@@ -77,7 +77,6 @@ def post_tweet(text):
     print(f"内容: {text}")
 
 if __name__ == "__main__":
-if __name__ == "__main__":
     import sys
     import datetime
 
