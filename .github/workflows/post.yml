@@ -58,6 +58,67 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # 投稿済みURLキャッシュを復元
+      - name: Restore posted URLs cache
+        uses: actions/cache@v4
+        with:
+          path: src/posted_urls.json
+          key: posted-urls-${{ github.run_id }}
+          restore-keys: |
+            posted-urls-
+
+      - name: Determine post mode
+        id: mode
+        run: |
+          HOUR=$(date -u +%H)
+          MINUTE=$(date -u +%M)
+          if ( [ "$HOUR" = "22" ] || [ "$HOUR" = "03" ] || [ "$HOUR" = "09" ] ) && [ "$MINUTE" = "00" ]; then
+            echo "mode=link" >> $GITHUB_OUTPUT
+          else
+            echo "mode=normal" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Post to X
+        env:
+          API_KEY: ${{ secrets.API_KEY }}
+          API_KEY_SECRET: ${{ secrets.API_KEY_SECRET }}
+          ACCESS_TOKEN: ${{ secrets.ACCESS_TOKEN }}
+          ACCESS_TOKEN_SECRET: ${{ secrets.ACCESS_TOKEN_SECRET }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          cd src
+          python post.py ${{ steps.mode.outputs.mode }}
+
+      # 投稿済みURLキャッシュを保存
+      - name: Save posted URLs cache
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: src/posted_urls.json
+          key: posted-urls-${{ github.run_id }}    - cron: '45 13 * * *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: '投稿モード（link or normal）'
+        required: false
+        default: 'normal'
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
       - name: Determine post mode
         id: mode
         run: |
