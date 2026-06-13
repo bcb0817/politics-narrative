@@ -1,30 +1,23 @@
 name: Daily Schedule Reset
-
 on:
   schedule:
-    - cron: '0 15 * * *'  # 毎日24時 JST（UTC 15時）
-  workflow_dispatch:        # 手動実行も可能
-
+    - cron: '0 15 * * *'
+  workflow_dispatch:
 jobs:
   reset:
     runs-on: ubuntu-latest
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           token: ${{ secrets.GH_PAT }}
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-
       - name: Generate new schedule
         run: python src/generate_schedule.py
-
-      - name: Commit and push new schedule
+      - name: Commit and push
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
