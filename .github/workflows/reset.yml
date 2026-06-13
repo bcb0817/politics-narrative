@@ -30,4 +30,4 @@ jobs:
           git add .github/workflows/post.yml
           git diff --staged --quiet && echo "No changes" && exit 0
           git commit -m "Daily schedule reset"
-          git push origin main
+          git push --force origin main
