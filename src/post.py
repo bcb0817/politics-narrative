@@ -81,9 +81,9 @@ if __name__ == "__main__":
 
     mode = sys.argv[1] if len(sys.argv) > 1 else "test"
 
-if mode == "test":
-    import datetime
-    now = datetime.datetime.now().strftime('%Y/%m/%d %H:%M:%S')
+    if mode == "test":
+        import datetime
+        now = datetime.datetime.now().strftime('%Y/%m/%d %H:%M:%S')
         post_tweet("世界が平和になりますように " + now)
     elif mode == "link":
         print("リンクあり投稿を生成中...")
