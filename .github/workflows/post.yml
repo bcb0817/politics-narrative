@@ -2,8 +2,45 @@ name: X Auto Post Bot
 
 on:
   schedule:
-    - cron: '0 9 * * *'   # 毎日18時JST（UTC9時）
-  workflow_dispatch:        # 手動実行も可能
+    # 朝 7時〜9時（UTC 22時〜翌0時）5回
+    - cron: '0 22 * * *'
+    - cron: '30 22 * * *'
+    - cron: '0 23 * * *'
+    - cron: '30 23 * * *'
+    - cron: '0 0 * * *'
+    # 昼 12時〜13時（UTC 3時〜4時）5回
+    - cron: '0 3 * * *'
+    - cron: '15 3 * * *'
+    - cron: '30 3 * * *'
+    - cron: '45 3 * * *'
+    - cron: '0 4 * * *'
+    # 夜 18時〜23時（UTC 9時〜14時）20回
+    - cron: '0 9 * * *'
+    - cron: '15 9 * * *'
+    - cron: '30 9 * * *'
+    - cron: '45 9 * * *'
+    - cron: '0 10 * * *'
+    - cron: '15 10 * * *'
+    - cron: '30 10 * * *'
+    - cron: '45 10 * * *'
+    - cron: '0 11 * * *'
+    - cron: '15 11 * * *'
+    - cron: '30 11 * * *'
+    - cron: '45 11 * * *'
+    - cron: '0 12 * * *'
+    - cron: '15 12 * * *'
+    - cron: '30 12 * * *'
+    - cron: '45 12 * * *'
+    - cron: '0 13 * * *'
+    - cron: '15 13 * * *'
+    - cron: '30 13 * * *'
+    - cron: '45 13 * * *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: '投稿モード（link or normal）'
+        required: false
+        default: 'normal'
 
 jobs:
   post:
@@ -21,10 +58,25 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Determine post mode
+        id: mode
+        run: |
+          # 1日3回だけlinkモード（朝昼夜の最初の1回）
+          HOUR=$(date -u +%H)
+          MINUTE=$(date -u +%M)
+          if ( [ "$HOUR" = "22" ] || [ "$HOUR" = "03" ] || [ "$HOUR" = "09" ] ) && [ "$MINUTE" = "00" ]; then
+            echo "mode=link" >> $GITHUB_OUTPUT
+          else
+            echo "mode=normal" >> $GITHUB_OUTPUT
+          fi
+
       - name: Post to X
         env:
           API_KEY: ${{ secrets.API_KEY }}
           API_KEY_SECRET: ${{ secrets.API_KEY_SECRET }}
           ACCESS_TOKEN: ${{ secrets.ACCESS_TOKEN }}
           ACCESS_TOKEN_SECRET: ${{ secrets.ACCESS_TOKEN_SECRET }}
-        run: python src/post.py
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          cd src
+          python post.py ${{ steps.mode.outputs.mode }}
