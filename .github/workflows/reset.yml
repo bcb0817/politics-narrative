@@ -23,9 +23,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git fetch origin main
-          git reset --hard origin/main
-          python src/generate_schedule.py
           git add .github/workflows/post.yml
           git diff --staged --quiet || git commit -m "Daily schedule reset"
+          git pull --rebase origin main
           git push origin main
