@@ -10,24 +10,12 @@ jobs:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
       - uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GH_PAT }}
-          ref: main
-          fetch-depth: 0
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Generate and push new schedule
+
+      - name: Generate and update schedule via API
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git remote set-url origin https://x-access-token:${GH_PAT}@github.com/bcb0817/x-Politics-bot-Yui.git
-          git fetch --all
-          git reset --hard origin/main
-          python src/generate_schedule.py
-          git add .github/workflows/post.yml
-          git diff --staged --quiet && echo "No changes" && exit 0
-          git commit -m "Daily schedule reset"
-          git push --force origin main
+        run: python src/generate_schedule.py
