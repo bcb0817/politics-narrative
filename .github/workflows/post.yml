@@ -2,36 +2,36 @@ name: X Auto Post Bot
 
 on:
   schedule:
-    - cron: '0 22 * * *'
+    - cron: '0 21 * * *'
+    - cron: '38 21 * * *'
+    - cron: '46 21 * * *'
+    - cron: '49 21 * * *'
     - cron: '10 22 * * *'
-    - cron: '20 22 * * *'
+    - cron: '23 22 * * *'
     - cron: '30 22 * * *'
-    - cron: '50 22 * * *'
-    - cron: '0 23 * * *'
-    - cron: '10 23 * * *'
-    - cron: '20 23 * * *'
-    - cron: '30 23 * * *'
-    - cron: '50 23 * * *'
-    - cron: '0 0 * * *'
-    - cron: '0 3 * * *'
-    - cron: '10 3 * * *'
-    - cron: '20 3 * * *'
+    - cron: '35 22 * * *'
+    - cron: '37 22 * * *'
+    - cron: '41 22 * * *'
+    - cron: '47 22 * * *'
+    - cron: '5 23 * * *'
+    - cron: '14 23 * * *'
+    - cron: '4 3 * * *'
     - cron: '30 3 * * *'
-    - cron: '50 3 * * *'
-    - cron: '0 9 * * *'
-    - cron: '10 9 * * *'
-    - cron: '20 9 * * *'
-    - cron: '30 9 * * *'
-    - cron: '50 9 * * *'
-    - cron: '0 10 * * *'
-    - cron: '10 10 * * *'
-    - cron: '20 10 * * *'
+    - cron: '36 3 * * *'
+    - cron: '48 3 * * *'
+    - cron: '15 8 * * *'
+    - cron: '23 8 * * *'
+    - cron: '28 8 * * *'
+    - cron: '35 8 * * *'
+    - cron: '56 8 * * *'
+    - cron: '26 9 * * *'
+    - cron: '21 10 * * *'
     - cron: '30 10 * * *'
-    - cron: '50 10 * * *'
-    - cron: '0 11 * * *'
-    - cron: '10 11 * * *'
-    - cron: '20 11 * * *'
-    - cron: '50 11 * * *'
+    - cron: '55 10 * * *'
+    - cron: '40 11 * * *'
+    - cron: '59 11 * * *'
+    - cron: '37 12 * * *'
+    - cron: '39 12 * * *'
   workflow_dispatch:
     inputs:
       mode:
@@ -45,11 +45,9 @@ jobs:
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
@@ -71,7 +69,7 @@ jobs:
             echo "mode=${{ github.event.inputs.mode }}" >> $GITHUB_OUTPUT
           else
             HOUR=$(date -u +%H)
-            if [ "$HOUR" = "22" ] || [ "$HOUR" = "03" ] || [ "$HOUR" = "09" ]; then
+            if [ "$HOUR" = "21" ] || [ "$HOUR" = "22" ] || [ "$HOUR" = "02" ] || [ "$HOUR" = "08" ]; then
               echo "mode=link" >> $GITHUB_OUTPUT
             else
               echo "mode=normal" >> $GITHUB_OUTPUT
