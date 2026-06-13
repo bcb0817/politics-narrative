@@ -84,7 +84,7 @@ if __name__ == "__main__":
 if mode == "test":
     import datetime
     now = datetime.datetime.now().strftime('%Y/%m/%d %H:%M:%S')
-    post_tweet(f"世界が平和になりますように🕊️ {now}")
+        post_tweet(f"世界が平和になりますように {now}")
     elif mode == "link":
         print("リンクあり投稿を生成中...")
         news_item = fetch_news(with_link=True)
