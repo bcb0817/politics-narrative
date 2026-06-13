@@ -93,7 +93,7 @@ if __name__ == "__main__":
             post_tweet(tweet)
         else:
             print("ニュース取得失敗")
-    else:
+        else:
         print("リンクなし投稿を生成中...")
         tweet = generate_tweet_without_link()
         post_tweet(tweet)
