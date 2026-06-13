@@ -77,12 +77,13 @@ def post_tweet(text):
     print(f"内容: {text}")
 
 if __name__ == "__main__":
+if __name__ == "__main__":
     import sys
+    import datetime
 
     mode = sys.argv[1] if len(sys.argv) > 1 else "test"
 
     if mode == "test":
-        import datetime
         now = datetime.datetime.now().strftime('%Y/%m/%d %H:%M:%S')
         post_tweet("世界が平和になりますように " + now)
     elif mode == "link":
@@ -93,7 +94,7 @@ if __name__ == "__main__":
             post_tweet(tweet)
         else:
             print("ニュース取得失敗")
-        else:
+    else:
         print("リンクなし投稿を生成中...")
         tweet = generate_tweet_without_link()
         post_tweet(tweet)
