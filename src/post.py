@@ -81,9 +81,10 @@ if __name__ == "__main__":
 
     mode = sys.argv[1] if len(sys.argv) > 1 else "test"
 
-    if mode == "test":
-        print("テストモードで投稿中...")
-        post_tweet("世界が平和になりますように🕊️")
+if mode == "test":
+    import datetime
+    now = datetime.datetime.now().strftime('%Y/%m/%d %H:%M:%S')
+    post_tweet(f"世界が平和になりますように🕊️ {now}")
     elif mode == "link":
         print("リンクあり投稿を生成中...")
         news_item = fetch_news(with_link=True)
