@@ -1,89 +1,96 @@
-import os
-import anthropic
-import tweepy
-from news import fetch_news, get_recent_titles
+name: X Auto Post Bot
 
-def get_tweepy_client():
-    return tweepy.Client(
-        consumer_key=os.environ["API_KEY"],
-        consumer_secret=os.environ["API_KEY_SECRET"],
-        access_token=os.environ["ACCESS_TOKEN"],
-        access_token_secret=os.environ["ACCESS_TOKEN_SECRET"],
-    )
+on:
+  schedule:
+    - cron: '0 22 * * *'
+    - cron: '30 22 * * *'
+    - cron: '0 23 * * *'
+    - cron: '30 23 * * *'
+    - cron: '0 0 * * *'
+    - cron: '0 3 * * *'
+    - cron: '15 3 * * *'
+    - cron: '30 3 * * *'
+    - cron: '45 3 * * *'
+    - cron: '0 4 * * *'
+    - cron: '0 9 * * *'
+    - cron: '15 9 * * *'
+    - cron: '30 9 * * *'
+    - cron: '45 9 * * *'
+    - cron: '0 10 * * *'
+    - cron: '15 10 * * *'
+    - cron: '30 10 * * *'
+    - cron: '45 10 * * *'
+    - cron: '0 11 * * *'
+    - cron: '15 11 * * *'
+    - cron: '30 11 * * *'
+    - cron: '45 11 * * *'
+    - cron: '0 12 * * *'
+    - cron: '15 12 * * *'
+    - cron: '30 12 * * *'
+    - cron: '45 12 * * *'
+    - cron: '0 13 * * *'
+    - cron: '15 13 * * *'
+    - cron: '30 13 * * *'
+    - cron: '45 13 * * *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: '投稿モード（link / normal / test）'
+        required: false
+        default: 'test'
 
-def get_anthropic_client():
-    return anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-def generate_tweet_with_link(news_item):
-    client = get_anthropic_client()
-    titles = get_recent_titles()
-    news_text = "\n".join([f"・{t}" for t in titles])
-    message = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=300,
-        messages=[{
-            "role": "user",
-            "content": f"""以下のニュースを元に、Xに投稿する日本語のツイートを1つ作成してください。
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
 
-メインニュース：{news_item['title']}
+      - name: Install dependencies
+        run: pip install -r requirements.txt
 
-条件：
-- 100文字以内（URLを含めるため短めに）
-- 日本の保守・右派層に向けた鋭いオピニオンで、ターゲット層が強く共感し、思わずリポストしたくなるようなX（旧Twitter）用の投稿
-- ハッシュタグを2個つける
-- ツイート本文のみ返答すること（URLは含めない）"""
-        }]
-    )
-    text = message.content[0].text.strip()
-    return f"{text}\n{news_item['link']}"
+      - name: Restore posted URLs cache
+        uses: actions/cache@v4
+        with:
+          path: src/posted_urls.json
+          key: posted-urls-${{ github.run_id }}
+          restore-keys: |
+            posted-urls-
 
-def generate_tweet_without_link():
-    client = get_anthropic_client()
-    titles = get_recent_titles()
-    news_text = "\n".join([f"・{t}" for t in titles])
-    message = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=300,
-        messages=[{
-            "role": "user",
-            "content": f"""以下の最新ニュースを元に、Xに投稿する日本語のツイートを1つ作成してください。
+      - name: Determine post mode
+        id: mode
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "mode=${{ github.event.inputs.mode }}" >> $GITHUB_OUTPUT
+          else
+            HOUR=$(date -u +%H)
+            MINUTE=$(date -u +%M)
+            if ( [ "$HOUR" = "22" ] || [ "$HOUR" = "03" ] || [ "$HOUR" = "09" ] ) && [ "$MINUTE" = "00" ]; then
+              echo "mode=link" >> $GITHUB_OUTPUT
+            else
+              echo "mode=normal" >> $GITHUB_OUTPUT
+            fi
+          fi
 
-ニュース：
-{news_text}
+      - name: Post to X
+        env:
+          API_KEY: ${{ secrets.API_KEY }}
+          API_KEY_SECRET: ${{ secrets.API_KEY_SECRET }}
+          ACCESS_TOKEN: ${{ secrets.ACCESS_TOKEN }}
+          ACCESS_TOKEN_SECRET: ${{ secrets.ACCESS_TOKEN_SECRET }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          cd src
+          python post.py ${{ steps.mode.outputs.mode }}
 
-条件：
-- 140文字以内
-- 日本の保守・右派層に向けた鋭いオピニオンで、ターゲット層が強く共感し、思わずリポストしたくなるようなX（旧Twitter）用の投稿
-- ハッシュタグを1個つける
-- ツイート本文のみ返答すること"""
-        }]
-    )
-    return message.content[0].text.strip()
-
-def post_tweet(text):
-    client = get_tweepy_client()
-    response = client.create_tweet(text=text)
-    print(f"投稿成功: {response.data['id']}")
-    print(f"内容: {text}")
-
-if __name__ == "__main__":
-    import sys
-    import datetime
-
-    mode = sys.argv[1] if len(sys.argv) > 1 else "test"
-
-    if mode == "test":
-        now = datetime.datetime.now().strftime('%Y/%m/%d %H:%M:%S')
-        post_tweet("世界が平和になりますように " + now)
-    elif mode == "link":
-        print("リンクあり投稿を生成中...")
-        news_item = fetch_news(with_link=True)
-        if news_item:
-            tweet = generate_tweet_with_link(news_item)
-            post_tweet(tweet)
-        else:
-            print("ニュース取得失敗")
-    else:
-        print("リンクなし投稿を生成中...")
-        tweet = generate_tweet_without_link()
-        post_tweet(tweet)
+      - name: Save posted URLs cache
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: src/posted_urls.json
+          key: posted-urls-${{ github.run_id }}
