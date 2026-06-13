@@ -99,9 +99,9 @@ jobs:
   workflow_dispatch:
     inputs:
       mode:
-        description: '投稿モード（link or normal）'
+        description: '投稿モード（link / normal / test）'
         required: false
-        default: 'normal'
+        default: 'test'
 
 jobs:
   post:
