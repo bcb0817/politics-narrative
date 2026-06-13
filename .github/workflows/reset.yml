@@ -1,7 +1,7 @@
 name: Daily Schedule Reset
 on:
   schedule:
-    - cron: '0 15 * * *'
+- cron: '0 12 * * *'  # 毎日21時 JST（UTC 12時）
   workflow_dispatch:
 jobs:
   reset:
