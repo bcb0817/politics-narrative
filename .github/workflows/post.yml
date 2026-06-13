@@ -2,18 +2,36 @@ name: X Auto Post Bot
 
 on:
   schedule:
-    # JST: 7:00〜8:00窓（link）
     - cron: '0 22 * * *'
-    # JST: 9:00〜10:00窓
+    - cron: '10 22 * * *'
+    - cron: '20 22 * * *'
+    - cron: '30 22 * * *'
+    - cron: '50 22 * * *'
+    - cron: '0 23 * * *'
+    - cron: '10 23 * * *'
+    - cron: '20 23 * * *'
+    - cron: '30 23 * * *'
+    - cron: '50 23 * * *'
     - cron: '0 0 * * *'
-    # JST: 12:00〜13:00窓（link）
     - cron: '0 3 * * *'
-    # JST: 15:00〜16:00窓
-    - cron: '0 6 * * *'
-    # JST: 18:00〜19:00窓（link）
+    - cron: '10 3 * * *'
+    - cron: '20 3 * * *'
+    - cron: '30 3 * * *'
+    - cron: '50 3 * * *'
     - cron: '0 9 * * *'
-    # JST: 21:00〜22:00窓
-    - cron: '0 12 * * *'
+    - cron: '10 9 * * *'
+    - cron: '20 9 * * *'
+    - cron: '30 9 * * *'
+    - cron: '50 9 * * *'
+    - cron: '0 10 * * *'
+    - cron: '10 10 * * *'
+    - cron: '20 10 * * *'
+    - cron: '30 10 * * *'
+    - cron: '50 10 * * *'
+    - cron: '0 11 * * *'
+    - cron: '10 11 * * *'
+    - cron: '20 11 * * *'
+    - cron: '50 11 * * *'
   workflow_dispatch:
     inputs:
       mode:
@@ -27,13 +45,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Random delay (0〜59分)
-        if: github.event_name == 'schedule'
-        run: |
-          DELAY=$(( RANDOM % 3540 ))
-          echo "Sleeping ${DELAY} seconds..."
-          sleep $DELAY
 
       - name: Set up Python
         uses: actions/setup-python@v5
