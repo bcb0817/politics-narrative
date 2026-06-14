@@ -15,8 +15,20 @@ RSS_FEEDS = [
         "url": "https://www.nhk.or.jp/rss/news/cat5.xml"
     },
     {
-        "name": "日経RSS",
-        "url": "https://www.nikkei.com/rss/index.rss"
+        "name": "産経ニュース",
+        "url": "https://www.sankei.com/rss/politics.xml"
+    },
+    {
+        "name": "朝日新聞政治",
+        "url": "https://www.asahi.com/rss/politics.rdf"
+    },
+    {
+        "name": "Yahoo!ニュース政治",
+        "url": "https://news.yahoo.co.jp/rss/topics/domestic.xml"
+    },
+    {
+        "name": "Yahoo!ニュース経済",
+        "url": "https://news.yahoo.co.jp/rss/topics/business.xml"
     },
 ]
 
