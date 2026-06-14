@@ -7,25 +7,30 @@ import urllib.error
 
 def generate_crons():
     crons = []
-
-    # 朝 6時〜9時 JST（UTC 21時〜0時）13回
-    morning = random.sample(range(21 * 60, 24 * 60), 13)
+    
+    # 朝 6時〜9時 JST = UTC 21時〜0時 13回
+    morning = random.sample(range(6 * 60, 9 * 60), 13)
     for m in sorted(morning):
-        h, mn = divmod(m, 60)
-        crons.append(f"'{mn} {h % 24} * * *'")
-
-    # 昼 11時〜13時 JST（UTC 2時〜4時）4回
-    noon = random.sample(range(2 * 60, 4 * 60), 4)
+        utc_m = m - 9 * 60  # JSTからUTCに変換
+        if utc_m < 0:
+            utc_m += 24 * 60  # 前日のUTCに変換
+        h, mn = divmod(utc_m, 60)
+        crons.append(f"'{mn} {h} * * *'")
+    
+    # 昼 11時〜13時 JST = UTC 2時〜4時 4回
+    noon = random.sample(range(11 * 60, 13 * 60), 4)
     for m in sorted(noon):
-        h, mn = divmod(m, 60)
+        utc_m = m - 9 * 60
+        h, mn = divmod(utc_m, 60)
         crons.append(f"'{mn} {h} * * *'")
-
-    # 夜 17時〜22時 JST（UTC 8時〜13時）13回
-    evening = random.sample(range(8 * 60, 13 * 60), 13)
+    
+    # 夜 17時〜22時 JST = UTC 8時〜13時 13回
+    evening = random.sample(range(17 * 60, 22 * 60), 13)
     for m in sorted(evening):
-        h, mn = divmod(m, 60)
+        utc_m = m - 9 * 60
+        h, mn = divmod(utc_m, 60)
         crons.append(f"'{mn} {h} * * *'")
-
+    
     return crons
 
 def get_file_sha(token, repo, path):
