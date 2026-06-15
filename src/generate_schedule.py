@@ -53,7 +53,8 @@ def generate_crons() -> list[str]:
 
     print(f"本日の投稿数: {total}回")
     return crons
-def get_file_sha(token, repo, path):
+
+def get_file_sha(token: str, repo: str, path: str) -> str:
     url = f"https://api.github.com/repos/{repo}/contents/{path}"
     req = urllib.request.Request(url, headers={
         "Authorization": f"token {token}",
@@ -62,7 +63,7 @@ def get_file_sha(token, repo, path):
     with urllib.request.urlopen(req) as res:
         return json.loads(res.read())["sha"]
 
-def update_file_via_api(token, repo, path, content, sha):
+def update_file_via_api(token: str, repo: str, path: str, content: str, sha: str) -> None:
     url = f"https://api.github.com/repos/{repo}/contents/{path}"
     data = json.dumps({
         "message": "Daily schedule reset",
@@ -74,10 +75,14 @@ def update_file_via_api(token, repo, path, content, sha):
         "Accept": "application/vnd.github.v3+json",
         "Content-Type": "application/json"
     }, method="PUT")
-    with urllib.request.urlopen(req) as res:
-        print("更新成功！")
+    try:
+        with urllib.request.urlopen(req) as res:
+            print("更新成功！")
+    except urllib.error.HTTPError as e:
+        print(f"API更新失敗: {e.code} {e.reason}")
+        raise
 
-def build_post_yml(crons):
+def build_post_yml(crons: list[str]) -> str:
     cron_lines = "\n".join([f"    - cron: {c}" for c in crons])
     return f"""name: X Auto Post Bot
 
@@ -87,7 +92,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: '投稿モード（link / normal / test）'
+        description: '投稿モード（link / normal / diagram / test）'
         required: false
         default: 'test'
 
@@ -124,7 +129,12 @@ jobs:
             if [ "$HOUR" = "21" ] || [ "$HOUR" = "22" ] || [ "$HOUR" = "02" ] || [ "$HOUR" = "08" ]; then
               echo "mode=link" >> $GITHUB_OUTPUT
             else
-              echo "mode=normal" >> $GITHUB_OUTPUT
+              RAND=$((RANDOM % 2))
+              if [ "$RAND" = "0" ]; then
+                echo "mode=normal" >> $GITHUB_OUTPUT
+              else
+                echo "mode=diagram" >> $GITHUB_OUTPUT
+              fi
             fi
           fi
 
