@@ -61,6 +61,37 @@ def generate_tweet_without_link():
     )
     return message.content[0].text.strip()
 
+def generate_tweet_diagram(news_item):
+    """図解形式の投稿を生成"""
+    client = get_anthropic_client()
+    message = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=500,
+        messages=[{
+            "role": "user",
+            "content": f"""以下の政治・経済ニュースを元に、Xに投稿する図解形式のツイートを1つ作成してください。
+
+ニュース：{news_item['title']}
+ソース：{news_item['source']}
+
+条件：
+- 200文字〜500文字
+- 以下のような図解・矢印・箇条書きを使って視覚的にわかりやすく
+  例：
+  【タイトル】
+  原因 → 結果
+  　↓
+  影響① 〇〇
+  影響② 〇〇
+  　↓
+  結論：〇〇
+- 政府・中央銀行の発表に対して批判的・懐疑的な視点を含める
+- ハッシュタグを2個つける
+- ツイート本文のみ返答すること"""
+        }]
+    )
+    return message.content[0].text.strip()
+
 def post_tweet(text):
     client = get_tweepy_client()
     response = client.create_tweet(text=text)
@@ -80,6 +111,14 @@ if __name__ == "__main__":
         news_item = fetch_news(with_link=True)
         if news_item:
             tweet = generate_tweet_with_link(news_item)
+            post_tweet(tweet)
+        else:
+            print("ニュース取得失敗")
+    elif mode == "diagram":
+        print("図解形式の投稿を生成中...")
+        news_item = fetch_news(with_link=False)
+        if news_item:
+            tweet = generate_tweet_diagram(news_item)
             post_tweet(tweet)
         else:
             print("ニュース取得失敗")
