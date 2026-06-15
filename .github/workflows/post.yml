@@ -30,7 +30,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: '投稿モード（link / normal / test）'
+        description: '投稿モード（link / normal / diagram / test）'
         required: false
         default: 'test'
 
