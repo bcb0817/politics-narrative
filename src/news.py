@@ -15,12 +15,8 @@ RSS_FEEDS = [
         "url": "https://www.nhk.or.jp/rss/news/cat5.xml"
     },
     {
-        "name": "産経ニュース",
-        "url": "https://www.sankei.com/rss/politics.xml"
-    },
-    {
-        "name": "朝日新聞政治",
-        "url": "https://www.asahi.com/rss/politics.rdf"
+        "name": "NHK国際",
+        "url": "https://www.nhk.or.jp/rss/news/cat6.xml"
     },
     {
         "name": "Yahoo!ニュース政治",
@@ -29,6 +25,10 @@ RSS_FEEDS = [
     {
         "name": "Yahoo!ニュース経済",
         "url": "https://news.yahoo.co.jp/rss/topics/business.xml"
+    },
+    {
+        "name": "Yahoo!ニュース国際",
+        "url": "https://news.yahoo.co.jp/rss/topics/world.xml"
     },
 ]
 
