@@ -5,40 +5,52 @@ import json
 import urllib.request
 import urllib.error
 
-def generate_crons():
+def generate_crons() -> list[str]:
     crons = []
-    
-    # 1日の総投稿数をランダムに決定（25〜35回）
+
     total = random.randint(25, 35)
-    
-    # 時間帯ごとの比率で配分
-    morning_count = round(total * 13 / 30)   # 朝
-    noon_count = round(total * 4 / 30)        # 昼
-    evening_count = total - morning_count - noon_count  # 夜（残り）
-    
+    morning_count = round(total * 13 / 30)
+    noon_count = round(total * 4 / 30)
+    evening_count = total - morning_count - noon_count
+
+    def sample_with_gap(slots: list[int], count: int, gap: int = 5) -> list[int]:
+        """最低gap分間隔でランダムに選ぶ"""
+        selected = []
+        available = slots.copy()
+        random.shuffle(available)
+        for m in available:
+            if all(abs(m - s) >= gap for s in selected):
+                selected.append(m)
+            if len(selected) >= count:
+                break
+        return sorted(selected)
+
     # 朝 6時〜9時 JST = UTC 21時〜0時
-    morning = random.sample(range(6 * 60, 9 * 60), morning_count)
-    for m in sorted(morning):
+    morning_slots = list(range(6 * 60, 9 * 60))
+    morning = sample_with_gap(morning_slots, morning_count)
+    for m in morning:
         utc_m = m - 9 * 60
         if utc_m < 0:
             utc_m += 24 * 60
         h, mn = divmod(utc_m, 60)
         crons.append(f"'{mn} {h} * * *'")
-    
+
     # 昼 11時〜13時 JST = UTC 2時〜4時
-    noon = random.sample(range(11 * 60, 13 * 60), noon_count)
-    for m in sorted(noon):
+    noon_slots = list(range(11 * 60, 13 * 60))
+    noon = sample_with_gap(noon_slots, noon_count)
+    for m in noon:
         utc_m = m - 9 * 60
         h, mn = divmod(utc_m, 60)
         crons.append(f"'{mn} {h} * * *'")
-    
+
     # 夜 17時〜22時 JST = UTC 8時〜13時
-    evening = random.sample(range(17 * 60, 22 * 60), evening_count)
-    for m in sorted(evening):
+    evening_slots = list(range(17 * 60, 22 * 60))
+    evening = sample_with_gap(evening_slots, evening_count)
+    for m in evening:
         utc_m = m - 9 * 60
         h, mn = divmod(utc_m, 60)
         crons.append(f"'{mn} {h} * * *'")
-    
+
     print(f"本日の投稿数: {total}回")
     return crons
 def get_file_sha(token, repo, path):
