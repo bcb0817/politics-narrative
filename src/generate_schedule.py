@@ -8,31 +8,39 @@ import urllib.error
 def generate_crons():
     crons = []
     
-    # 朝 6時〜9時 JST = UTC 21時〜0時 13回
-    morning = random.sample(range(6 * 60, 9 * 60), 13)
+    # 1日の総投稿数をランダムに決定（25〜35回）
+    total = random.randint(25, 35)
+    
+    # 時間帯ごとの比率で配分
+    morning_count = round(total * 13 / 30)   # 朝
+    noon_count = round(total * 4 / 30)        # 昼
+    evening_count = total - morning_count - noon_count  # 夜（残り）
+    
+    # 朝 6時〜9時 JST = UTC 21時〜0時
+    morning = random.sample(range(6 * 60, 9 * 60), morning_count)
     for m in sorted(morning):
-        utc_m = m - 9 * 60  # JSTからUTCに変換
+        utc_m = m - 9 * 60
         if utc_m < 0:
-            utc_m += 24 * 60  # 前日のUTCに変換
+            utc_m += 24 * 60
         h, mn = divmod(utc_m, 60)
         crons.append(f"'{mn} {h} * * *'")
     
-    # 昼 11時〜13時 JST = UTC 2時〜4時 4回
-    noon = random.sample(range(11 * 60, 13 * 60), 4)
+    # 昼 11時〜13時 JST = UTC 2時〜4時
+    noon = random.sample(range(11 * 60, 13 * 60), noon_count)
     for m in sorted(noon):
         utc_m = m - 9 * 60
         h, mn = divmod(utc_m, 60)
         crons.append(f"'{mn} {h} * * *'")
     
-    # 夜 17時〜22時 JST = UTC 8時〜13時 13回
-    evening = random.sample(range(17 * 60, 22 * 60), 13)
+    # 夜 17時〜22時 JST = UTC 8時〜13時
+    evening = random.sample(range(17 * 60, 22 * 60), evening_count)
     for m in sorted(evening):
         utc_m = m - 9 * 60
         h, mn = divmod(utc_m, 60)
         crons.append(f"'{mn} {h} * * *'")
     
+    print(f"本日の投稿数: {total}回")
     return crons
-
 def get_file_sha(token, repo, path):
     url = f"https://api.github.com/repos/{repo}/contents/{path}"
     req = urllib.request.Request(url, headers={
