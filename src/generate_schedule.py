@@ -14,8 +14,8 @@ from typing import List, Tuple
 REPO = "bcb0817/x-Politics-bot-Yui"
 WORKFLOW_PATH = ".github/workflows/post.yml"
 
-MIN_POSTS = 25
-MAX_POSTS = 35
+MIN_POSTS = 20
+MAX_POSTS = 28
 MIN_GAP_MINUTES = 12
 
 # 毎時00分前後と58〜59分を避ける
