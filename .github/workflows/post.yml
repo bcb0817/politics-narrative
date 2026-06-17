@@ -2,29 +2,27 @@ name: X Auto Post Bot
 
 on:
   schedule:
-    - cron: '6 21 * * *'  # JST 06:06
-    - cron: '20 21 * * *'  # JST 06:20
-    - cron: '32 21 * * *'  # JST 06:32
-    - cron: '49 21 * * *'  # JST 06:49
-    - cron: '14 22 * * *'  # JST 07:14
-    - cron: '29 22 * * *'  # JST 07:29
-    - cron: '48 22 * * *'  # JST 07:48
-    - cron: '5 23 * * *'  # JST 08:05
-    - cron: '39 23 * * *'  # JST 08:39
-    - cron: '56 23 * * *'  # JST 08:56
-    - cron: '26 3 * * *'  # JST 12:26
-    - cron: '39 3 * * *'  # JST 12:39
-    - cron: '56 3 * * *'  # JST 12:56
-    - cron: '12 8 * * *'  # JST 17:12
-    - cron: '44 8 * * *'  # JST 17:44
-    - cron: '7 9 * * *'  # JST 18:07
-    - cron: '13 10 * * *'  # JST 19:13
-    - cron: '36 10 * * *'  # JST 19:36
-    - cron: '49 10 * * *'  # JST 19:49
-    - cron: '6 11 * * *'  # JST 20:06
-    - cron: '28 11 * * *'  # JST 20:28
-    - cron: '19 12 * * *'  # JST 21:19
-    - cron: '42 12 * * *'  # JST 21:42
+    - cron: '28 21 * * *'  # JST 06:28
+    - cron: '46 21 * * *'  # JST 06:46
+    - cron: '6 22 * * *'  # JST 07:06
+    - cron: '24 22 * * *'  # JST 07:24
+    - cron: '38 22 * * *'  # JST 07:38
+    - cron: '53 22 * * *'  # JST 07:53
+    - cron: '15 23 * * *'  # JST 08:15
+    - cron: '32 23 * * *'  # JST 08:32
+    - cron: '47 23 * * *'  # JST 08:47
+    - cron: '10 2 * * *'  # JST 11:10
+    - cron: '8 3 * * *'  # JST 12:08
+    - cron: '53 3 * * *'  # JST 12:53
+    - cron: '6 8 * * *'  # JST 17:06
+    - cron: '48 8 * * *'  # JST 17:48
+    - cron: '21 9 * * *'  # JST 18:21
+    - cron: '41 9 * * *'  # JST 18:41
+    - cron: '5 10 * * *'  # JST 19:05
+    - cron: '15 11 * * *'  # JST 20:15
+    - cron: '56 11 * * *'  # JST 20:56
+    - cron: '10 12 * * *'  # JST 21:10
+    - cron: '49 12 * * *'  # JST 21:49
   workflow_dispatch:
     inputs:
       mode:
