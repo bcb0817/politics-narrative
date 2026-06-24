@@ -134,6 +134,10 @@ def log(msg: str) -> None:
 
 def get_jst_now():
     """戻り値: (jst_datetime, source_str)"""
+    # worldtimeapi が不安定な環境向けに、外部API取得を環境変数で無効化できる。
+    # GitHub runner の時計は NTP 同期済みなので local_zoneinfo でも正確。
+    if os.environ.get("DISABLE_TIME_API", "").strip().lower() in ("true", "1", "yes"):
+        return datetime.now(JST), "local_zoneinfo (api disabled)"
     try:
         r = requests.get(
             "https://worldtimeapi.org/api/timezone/Asia/Tokyo",
@@ -200,8 +204,20 @@ def mark_slot_posted(slot_key: str) -> None:
 
 
 def load_post_history() -> list:
-    """過去投稿の記録（重複・類似回避とジャンルローテーション用）"""
-    return _load_json(POSTED_URLS_FILE, [])
+    """過去投稿の記録（重複・類似回避とジャンルローテーション用）。
+    旧Botが残した『URL文字列の配列』形式も受け入れ、dictに正規化する。
+    """
+    raw = _load_json(POSTED_URLS_FILE, [])
+    if not isinstance(raw, list):
+        return []
+    norm = []
+    for h in raw:
+        if isinstance(h, dict):
+            norm.append(h)
+        elif isinstance(h, str):
+            norm.append({"source_url": h})
+        # それ以外の型は無視
+    return norm
 
 
 def save_post_record(record: dict) -> None:
