@@ -1,84 +1,74 @@
-# ============================================================
-# 運用方針：
-# - 定期投稿はすべて diagram モード
-# - 手動実行も diagram モード
-# - 投稿時刻はJST固定
-# - 1日30回だけ投稿トライ
-# - SNSピーク時間帯に投稿を集中
-# - ランダムスケジュール生成なし
-# - ランダム投稿数なし
-# - linkモードなし
-# - test投稿なし
-# - post.ymlの自動書き換えなし
-# ============================================================
+name: post
 
-name: X Auto Post Bot
+# 運用方針:
+# - 10分おきに起動し、投稿可否は Python(post.py) 側で JST 現在時刻を見て判定する
+# - GitHub Actions の cron は UTC 基準かつ数分〜十数分の遅延があるため、
+#   cron 時刻そのものを投稿判定の根拠にしない
+# - 定期投稿・手動実行ともに diagram モード固定（link / test / random は廃止）
 
 on:
   schedule:
-    - cron: '7 22 * * *'   # JST 07:07
-    - cron: '27 22 * * *'  # JST 07:27
-    - cron: '47 22 * * *'  # JST 07:47
-    - cron: '7 23 * * *'   # JST 08:07
-    - cron: '27 23 * * *'  # JST 08:27
-    - cron: '47 23 * * *'  # JST 08:47
-    - cron: '7 0 * * *'    # JST 09:07
-    - cron: '27 0 * * *'   # JST 09:27
-    - cron: '37 2 * * *'   # JST 11:37
-    - cron: '57 2 * * *'   # JST 11:57
-    - cron: '17 3 * * *'   # JST 12:17
-    - cron: '37 3 * * *'   # JST 12:37
-    - cron: '57 3 * * *'   # JST 12:57
-    - cron: '17 4 * * *'   # JST 13:17
-    - cron: '7 8 * * *'    # JST 17:07
-    - cron: '27 8 * * *'   # JST 17:27
-    - cron: '47 8 * * *'   # JST 17:47
-    - cron: '7 9 * * *'    # JST 18:07
-    - cron: '27 9 * * *'   # JST 18:27
-    - cron: '47 9 * * *'   # JST 18:47
-    - cron: '7 11 * * *'   # JST 20:07
-    - cron: '27 11 * * *'  # JST 20:27
-    - cron: '47 11 * * *'  # JST 20:47
-    - cron: '7 12 * * *'   # JST 21:07
-    - cron: '27 12 * * *'  # JST 21:27
-    - cron: '47 12 * * *'  # JST 21:47
-    - cron: '7 13 * * *'   # JST 22:07
-    - cron: '27 13 * * *'  # JST 22:27
-    - cron: '47 13 * * *'  # JST 22:47
-    - cron: '17 14 * * *'  # JST 23:17
-
+    - cron: '*/10 * * * *'
   workflow_dispatch:
+    # 手動強制投稿用。FORCE_POST=true のときだけ時刻判定を無視して diagram 投稿する。
+    inputs:
+      force_post:
+        description: 'Force post now (ignore time window). diagram only.'
+        type: boolean
+        required: false
+        default: false
 
 concurrency:
-  group: x-auto-post-bot
+  # 10分おきの起動が重ならないようにする（重複投稿の保険）
+  group: post
   cancel-in-progress: false
 
 jobs:
   post:
     runs-on: ubuntu-latest
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    timeout-minutes: 10
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      - name: Install Japanese fonts (for diagram image)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fonts-noto-cjk
 
-      - name: Restore posted URLs cache
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install tweepy anthropic pillow requests feedparser
+          fi
+
+      # --- キャッシュ復元 -----------------------------------------------------
+      - name: Restore posted slots cache
         uses: actions/cache@v4
         with:
-          path: |
-            src/posted_urls.json
-            src/posted_log.json
+          path: src/posted_slots.json
+          key: posted-slots-${{ github.run_id }}
+          restore-keys: |
+            posted-slots-
+
+      - name: Restore posted urls cache
+        uses: actions/cache@v4
+        with:
+          path: src/posted_urls.json
           key: posted-urls-${{ github.run_id }}
           restore-keys: |
             posted-urls-
 
+      # --- 投稿 ---------------------------------------------------------------
       - name: Post diagram to X
         env:
           API_KEY: ${{ secrets.API_KEY }}
@@ -86,15 +76,22 @@ jobs:
           ACCESS_TOKEN: ${{ secrets.ACCESS_TOKEN }}
           ACCESS_TOKEN_SECRET: ${{ secrets.ACCESS_TOKEN_SECRET }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          FORCE_POST: ${{ inputs.force_post }}
         run: |
           cd src
           python post.py diagram
 
-      - name: Save posted URLs cache
+      # --- キャッシュ保存 -----------------------------------------------------
+      - name: Save posted slots cache
         uses: actions/cache/save@v4
         if: always()
         with:
-          path: |
-            src/posted_urls.json
-            src/posted_log.json
+          path: src/posted_slots.json
+          key: posted-slots-${{ github.run_id }}
+
+      - name: Save posted urls cache
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: src/posted_urls.json
           key: posted-urls-${{ github.run_id }}
