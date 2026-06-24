@@ -86,6 +86,18 @@ EXCLUDED_TOPICS = [
     "個人攻撃", "政党罵倒",
 ]
 
+# ニュース事前フィルタ用のジャンル別キーワード（コスト削減＋関連度向上）
+GENRE_KEYWORDS = {
+    "社会保障": ["社会保障", "年金", "医療", "介護", "健康保険", "後期高齢"],
+    "税財政": ["税", "増税", "減税", "財政", "予算", "国債", "社会保険料", "消費税"],
+    "少子化": ["少子化", "出生", "人口", "子育て", "児童手当"],
+    "安全保障": ["防衛", "安全保障", "自衛隊", "ミサイル", "有事"],
+    "エネルギー": ["原発", "電気代", "エネルギー", "再エネ", "電力", "ガソリン"],
+    "移民政策": ["外国人", "移民", "技能実習", "入管", "在留"],
+    "教育": ["教育", "大学", "奨学金", "給食", "教員"],
+    "国会法案": ["国会", "法案", "選挙", "解散", "委員会", "可決", "閣議"],
+}
+
 # 投稿型
 POST_TYPES = {
     "A": "対比型（政府の説明 vs 国民の実感／表の争点 vs 本当の争点）",
@@ -254,6 +266,22 @@ def gather_candidate_news() -> list:
     return items
 
 
+def prefilter_news(items: list, top_n: int = 4) -> list:
+    """優先ジャンルのキーワードでニュースを採点し、関連の高い上位だけ残す。
+    LLM呼び出し回数を抑え、関連度も上げる。
+    """
+    def kw_score(it: dict) -> int:
+        text = f"{it.get('title','')} {it.get('summary','')}"
+        return sum(1 for kws in GENRE_KEYWORDS.values() for kw in kws if kw in text)
+
+    scored = [(kw_score(it), it) for it in items]
+    relevant = [it for s, it in sorted(scored, key=lambda x: x[0], reverse=True) if s > 0]
+    if relevant:
+        return relevant[:top_n]
+    # 関連語ゼロしか無いときは先頭を少しだけ（完全に投稿が止まらないように）
+    return items[:top_n]
+
+
 # ---------------------------------------------------------------------------
 # 5. 投稿候補の生成・スコアリング（Anthropic）
 # ---------------------------------------------------------------------------
@@ -276,6 +304,7 @@ GENERATION_SYSTEM = """\
 最後: 引用されやすい短い結論
 条件: 120〜240字 / 3〜5ブロック / 1ブロック1〜2行 / 空行2〜3個まで /
       ハッシュタグ原則なし(使うなら最大1) / URLなし / 絵文字なし / ポエム化しない。
+本文は1行ずつの配列(tweet_lines)で返す。空行は空文字列 "" を要素として入れる。
 
 投稿型は必ず1つ選ぶ:
 A=対比型, B=数字インパクト型, C=誤解訂正型, D=争点整理型, E=未来警告型。
@@ -290,11 +319,12 @@ resonance(保守層への刺さりやすさ), save_value(保存価値),
 quote_likelihood(引用リポストされやすさ), ban_risk(炎上・BANリスク=高いほど危険)。
 overall は ban_risk を踏まえた総合点(0〜10)。
 
-出力は必ず JSON 配列のみ。前置き・コードフェンス・説明は一切書かない。
+必ず submit_candidates ツールを呼び、候補を3案提出する。地の文・説明は書かない。
 """
 
 GENERATION_USER_TMPL = """\
-次のニュースから、X投稿候補を必ず3案つくってください（フック違い: 対比型/数字型/誤解訂正型 などを混ぜる）。
+次のニュースから、X投稿候補を必ず3案つくり、submit_candidates ツールで提出してください。
+フックは混ぜる（対比型/数字型/誤解訂正型 など）。
 
 ニュース:
 title: {title}
@@ -303,31 +333,79 @@ source_name: {source_name}
 
 優先ジャンル(高い順): 社会保障 / 税財政 / 少子化 / 安全保障 / エネルギー / 移民政策 / 教育 / 国会法案
 このニュースが上記と無関係、または芸能・陰謀論・民族攻撃・宗教対立煽り等なら、各案の ban_risk を高く、overall を低くしてください。
-
-各案は次のキーを持つオブジェクトにしてください:
-- "type": "A".."E"
-- "title": 図解タイトル(対比型/争点型)
-- "tweet_text": 投稿本文(改行込み, 120〜240字)
-- "genre": 上記優先ジャンルのいずれか1語(社会保障/税財政/少子化/安全保障/エネルギー/移民政策/教育/国会法案)
-- "hook": この案のフックを一言で
-- "image_title": 画像内の大見出し
-- "image_points": 要点3〜5個の配列
-- "image_left": (対比型なら)左側ラベルと項目 {{"label": str, "items": [str,...]}} 、なければ null
-- "image_right": (対比型なら)右側ラベルと項目 {{"label": str, "items": [str,...]}} 、なければ null
-- "image_conclusion": 画像末尾の「つまり」の一言
-- "source_name": 出典名
-- "keywords": 主要キーワード3〜6個の配列
-- "uses_unverified_number": true/false
-- "scores": {{"news":int,"controversy":int,"data_ability":int,"resonance":int,"save_value":int,"quote_likelihood":int,"ban_risk":int}}
-- "overall": int(0〜10)
-- "decision_reason": なぜこの案が刺さるかを一言
-
-JSON配列のみを出力。
+本文(tweet_lines)は1行ずつの配列。空行は "" を入れる。図解タイトルは対比型/争点型にする。
 """
+
+# Anthropic ツール（構造化出力）。SDKがJSON妥当性を保証するので手書きパース不要。
+GENRE_ENUM = ["社会保障", "税財政", "少子化", "安全保障",
+              "エネルギー", "移民政策", "教育", "国会法案"]
+
+_COLUMN_SCHEMA = {
+    "type": ["object", "null"],
+    "properties": {
+        "label": {"type": "string"},
+        "items": {"type": "array", "items": {"type": "string"}},
+    },
+}
+
+CANDIDATE_TOOL = {
+    "name": "submit_candidates",
+    "description": "X投稿候補を3案提出する。",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "candidates": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "type": {"type": "string", "enum": ["A", "B", "C", "D", "E"]},
+                        "title": {"type": "string"},
+                        "tweet_lines": {"type": "array", "items": {"type": "string"}},
+                        "genre": {"type": "string", "enum": GENRE_ENUM},
+                        "hook": {"type": "string"},
+                        "image_title": {"type": "string"},
+                        "image_points": {"type": "array", "items": {"type": "string"}},
+                        "image_left": _COLUMN_SCHEMA,
+                        "image_right": _COLUMN_SCHEMA,
+                        "image_conclusion": {"type": "string"},
+                        "source_name": {"type": "string"},
+                        "keywords": {"type": "array", "items": {"type": "string"}},
+                        "uses_unverified_number": {"type": "boolean"},
+                        "scores": {
+                            "type": "object",
+                            "properties": {
+                                "news": {"type": "integer"},
+                                "controversy": {"type": "integer"},
+                                "data_ability": {"type": "integer"},
+                                "resonance": {"type": "integer"},
+                                "save_value": {"type": "integer"},
+                                "quote_likelihood": {"type": "integer"},
+                                "ban_risk": {"type": "integer"},
+                            },
+                            "required": ["news", "controversy", "data_ability",
+                                         "resonance", "save_value",
+                                         "quote_likelihood", "ban_risk"],
+                        },
+                        "overall": {"type": "integer"},
+                        "decision_reason": {"type": "string"},
+                    },
+                    "required": ["type", "title", "tweet_lines", "genre",
+                                 "image_title", "image_points", "image_conclusion",
+                                 "keywords", "uses_unverified_number", "scores",
+                                 "overall"],
+                },
+            },
+        },
+        "required": ["candidates"],
+    },
+}
 
 
 def generate_candidates(news_item: dict) -> list:
-    """1ニュースから3案を生成して返す。失敗時は空配列。"""
+    """1ニュースから3案を生成して返す。失敗時は空配列。
+    Anthropic のツール使用で構造化出力を強制し、JSON妥当性をSDKに保証させる。
+    """
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         log("[ERROR] ANTHROPIC_API_KEY is not set")
@@ -347,25 +425,41 @@ def generate_candidates(news_item: dict) -> list:
     try:
         resp = client.messages.create(
             model=ANTHROPIC_MODEL,
-            max_tokens=2000,
+            max_tokens=6000,
             system=GENERATION_SYSTEM,
+            tools=[CANDIDATE_TOOL],
+            tool_choice={"type": "tool", "name": "submit_candidates"},
             messages=[{"role": "user", "content": user}],
         )
-        text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
-        text = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-        candidates = json.loads(text)
     except Exception as e:
-        log(f"[ERROR] candidate generation/parse failed: {e}")
+        log(f"[ERROR] candidate generation failed: {e}")
         return []
+
+    if getattr(resp, "stop_reason", None) == "max_tokens":
+        log("[WARN] generation hit max_tokens (output may be truncated)")
+
+    candidates = []
+    for block in resp.content:
+        if getattr(block, "type", "") == "tool_use" and block.name == "submit_candidates":
+            candidates = (block.input or {}).get("candidates", []) or []
+            break
 
     if not isinstance(candidates, list):
         return []
 
-    # source_url を補完
+    # 後処理: 本文を組み立て、欠損を補完
+    cleaned = []
     for c in candidates:
+        if not isinstance(c, dict):
+            continue
+        lines = c.get("tweet_lines") or []
+        c["tweet_text"] = "\n".join(str(x) for x in lines).strip()
+        if not c["tweet_text"]:
+            continue
         c.setdefault("source_url", news_item.get("url", ""))
         c.setdefault("source_name", news_item.get("source_name", ""))
-    return candidates
+        cleaned.append(c)
+    return cleaned
 
 
 def effective_score(c: dict, history: list) -> float:
@@ -559,10 +653,13 @@ def main():
         log("[INFO] Skip reason: no_news")
         return
 
+    target_news = prefilter_news(news_items, top_n=4)
+    log(f"[INFO] News after prefilter: {len(target_news)}")
+
     # --- 候補生成・採点（複数ニュース×3案からベスト1を選ぶ） ---
     best = None
     best_score = -1.0
-    for item in news_items[:8]:
+    for item in target_news:
         for c in generate_candidates(item):
             if is_duplicate(c, history):
                 continue
