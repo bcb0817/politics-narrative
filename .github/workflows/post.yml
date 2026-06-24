@@ -72,7 +72,9 @@ jobs:
       - name: Restore posted URLs cache
         uses: actions/cache@v4
         with:
-          path: src/posted_urls.json
+          path: |
+            src/posted_urls.json
+            src/posted_log.json
           key: posted-urls-${{ github.run_id }}
           restore-keys: |
             posted-urls-
@@ -92,5 +94,7 @@ jobs:
         uses: actions/cache/save@v4
         if: always()
         with:
-          path: src/posted_urls.json
+          path: |
+            src/posted_urls.json
+            src/posted_log.json
           key: posted-urls-${{ github.run_id }}
