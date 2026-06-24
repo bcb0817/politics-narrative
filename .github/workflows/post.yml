@@ -1,38 +1,53 @@
+# ============================================================
+# 運用方針：
+# - 定期投稿はすべて diagram モード
+# - 手動実行も diagram モード
+# - 投稿時刻はJST固定
+# - 1日30回だけ投稿トライ
+# - SNSピーク時間帯に投稿を集中
+# - ランダムスケジュール生成なし
+# - ランダム投稿数なし
+# - linkモードなし
+# - test投稿なし
+# - post.ymlの自動書き換えなし
+# ============================================================
+
 name: X Auto Post Bot
 
 on:
   schedule:
-    - cron: '16 21 * * *'  # JST 06:16
-    - cron: '31 21 * * *'  # JST 06:31
-    - cron: '44 21 * * *'  # JST 06:44
-    - cron: '5 22 * * *'  # JST 07:05
-    - cron: '17 22 * * *'  # JST 07:17
-    - cron: '30 22 * * *'  # JST 07:30
-    - cron: '42 22 * * *'  # JST 07:42
-    - cron: '55 22 * * *'  # JST 07:55
-    - cron: '18 23 * * *'  # JST 08:18
-    - cron: '31 23 * * *'  # JST 08:31
-    - cron: '45 23 * * *'  # JST 08:45
-    - cron: '22 2 * * *'  # JST 11:22
-    - cron: '46 2 * * *'  # JST 11:46
-    - cron: '20 3 * * *'  # JST 12:20
-    - cron: '5 8 * * *'  # JST 17:05
-    - cron: '23 8 * * *'  # JST 17:23
-    - cron: '40 8 * * *'  # JST 17:40
-    - cron: '6 9 * * *'  # JST 18:06
-    - cron: '19 9 * * *'  # JST 18:19
-    - cron: '32 9 * * *'  # JST 18:32
-    - cron: '56 9 * * *'  # JST 18:56
-    - cron: '11 10 * * *'  # JST 19:11
-    - cron: '35 10 * * *'  # JST 19:35
-    - cron: '55 10 * * *'  # JST 19:55
+    - cron: '7 22 * * *'   # JST 07:07
+    - cron: '27 22 * * *'  # JST 07:27
+    - cron: '47 22 * * *'  # JST 07:47
+    - cron: '7 23 * * *'   # JST 08:07
+    - cron: '27 23 * * *'  # JST 08:27
+    - cron: '47 23 * * *'  # JST 08:47
+    - cron: '7 0 * * *'    # JST 09:07
+    - cron: '27 0 * * *'   # JST 09:27
+    - cron: '37 2 * * *'   # JST 11:37
+    - cron: '57 2 * * *'   # JST 11:57
+    - cron: '17 3 * * *'   # JST 12:17
+    - cron: '37 3 * * *'   # JST 12:37
+    - cron: '57 3 * * *'   # JST 12:57
+    - cron: '17 4 * * *'   # JST 13:17
+    - cron: '7 8 * * *'    # JST 17:07
+    - cron: '27 8 * * *'   # JST 17:27
+    - cron: '47 8 * * *'   # JST 17:47
+    - cron: '7 9 * * *'    # JST 18:07
+    - cron: '27 9 * * *'   # JST 18:27
+    - cron: '47 9 * * *'   # JST 18:47
+    - cron: '7 11 * * *'   # JST 20:07
+    - cron: '27 11 * * *'  # JST 20:27
     - cron: '47 11 * * *'  # JST 20:47
+    - cron: '7 12 * * *'   # JST 21:07
+    - cron: '27 12 * * *'  # JST 21:27
+    - cron: '47 12 * * *'  # JST 21:47
+    - cron: '7 13 * * *'   # JST 22:07
+    - cron: '27 13 * * *'  # JST 22:27
+    - cron: '47 13 * * *'  # JST 22:47
+    - cron: '17 14 * * *'  # JST 23:17
+
   workflow_dispatch:
-    inputs:
-      mode:
-        description: '投稿モード（link / normal / diagram / test）'
-        required: false
-        default: 'test'
 
 concurrency:
   group: x-auto-post-bot
@@ -62,26 +77,7 @@ jobs:
           restore-keys: |
             posted-urls-
 
-      - name: Determine post mode
-        id: mode
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "mode=${{ github.event.inputs.mode }}" >> $GITHUB_OUTPUT
-          else
-            HOUR=$(TZ=Asia/Tokyo date +%H)
-            if [ "$HOUR" = "06" ] || [ "$HOUR" = "11" ] || [ "$HOUR" = "17" ]; then
-              echo "mode=link" >> $GITHUB_OUTPUT
-            else
-              RAND=$((RANDOM % 2))
-              if [ "$RAND" = "0" ]; then
-                echo "mode=normal" >> $GITHUB_OUTPUT
-              else
-                echo "mode=diagram" >> $GITHUB_OUTPUT
-              fi
-            fi
-          fi
-
-      - name: Post to X
+      - name: Post diagram to X
         env:
           API_KEY: ${{ secrets.API_KEY }}
           API_KEY_SECRET: ${{ secrets.API_KEY_SECRET }}
@@ -90,7 +86,7 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           cd src
-          python post.py ${{ steps.mode.outputs.mode }}
+          python post.py diagram
 
       - name: Save posted URLs cache
         uses: actions/cache/save@v4
