@@ -47,13 +47,13 @@ jobs:
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
-          else
-            pip install tweepy anthropic pillow requests feedparser
           fi
+          # requirements.txt が不完全でも必ず動くよう、必須依存を確実に導入する
+          pip install tweepy anthropic pillow requests feedparser
 
       # --- キャッシュ復元 -----------------------------------------------------
       - name: Restore posted slots cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: src/posted_slots.json
           key: posted-slots-${{ github.run_id }}
@@ -61,7 +61,7 @@ jobs:
             posted-slots-
 
       - name: Restore posted urls cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: src/posted_urls.json
           key: posted-urls-${{ github.run_id }}
