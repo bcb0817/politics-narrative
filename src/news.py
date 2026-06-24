@@ -83,6 +83,7 @@ def fetch_all_items():
                 title = item.findtext("title", "").strip()
                 link = item.findtext("link", "").strip()
                 pub_date = item.findtext("pubDate", "").strip()
+                summary = item.findtext("description", "").strip()
 
                 if not title or not link:
                     continue
@@ -98,6 +99,7 @@ def fetch_all_items():
                     "link": link,
                     "source": feed["name"],
                     "pub_date": pub_date,
+                    "summary": summary,
                 })
 
         except Exception as e:
