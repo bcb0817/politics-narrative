@@ -1,32 +1,41 @@
 name: post
 
 # 運用方針:
-# - 10分おきに起動し、投稿可否は Python(post.py) 側で JST 現在時刻を見て判定する
-# - GitHub Actions の cron は UTC 基準かつ数分〜十数分の遅延があるため、
-#   cron 時刻そのものを投稿判定の根拠にしない
-# - 定期投稿・手動実行ともに diagram モード固定（link / test / random は廃止）
+# - 30分おき（毎時 07分・37分）に起動し、投稿可否は Python(post.py) 側で JST 現在時刻を見て判定する
+# - 24時間対象。時間帯（深夜・早朝）によるスキップはしない（1日48回の投稿トライ）
+# - GitHub Actions の cron は UTC 基準だが「分」指定は JST でも同じ値なので、毎時07分・37分に走る
+# - cron 時刻そのものは投稿判定の根拠にせず、POST_WINDOW_MINUTES(既定20分)で遅延を吸収する
+# - 定期投稿・手動実行ともに diagram モード固定（link / test / normal / dry-run は廃止）
 
 on:
   schedule:
-    - cron: '*/10 * * * *'
+    # 毎時 07分・37分（1日48回）。分指定は JST/UTC で同値。
+    - cron: '7,37 * * * *'
   workflow_dispatch:
-    # 手動強制投稿用。FORCE_POST=true のときだけ時刻判定を無視して diagram 投稿する。
+    # 手動強制投稿用。FORCE_POST=true のときだけスロット判定を無視して diagram 投稿する。
     inputs:
       force_post:
-        description: 'Force post now (ignore time window). diagram only.'
+        description: 'Force post now (ignore post window). diagram only.'
         type: boolean
         required: false
         default: false
 
 concurrency:
-  # 10分おきの起動が重ならないようにする（重複投稿の保険）
+  # 起動が重ならないようにする（重複投稿の保険）
   group: post
   cancel-in-progress: false
 
 jobs:
   post:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 25
+
+    env:
+      TZ: Asia/Tokyo
+      # 30分スロットに対し、GitHub Actions の遅延を20分まで吸収する
+      POST_WINDOW_MINUTES: "20"
+      # 24時間トライ。外部時刻APIに依存せず Actions 上の時刻(JST)を使う
+      DISABLE_TIME_API: "true"
 
     steps:
       - name: Checkout
@@ -50,6 +59,20 @@ jobs:
           fi
           # requirements.txt が不完全でも必ず動くよう、必須依存を確実に導入する
           pip install tweepy anthropic pillow requests feedparser
+
+      # --- デバッグ：schedule コンテキストを出力 ------------------------------
+      - name: Debug schedule context
+        env:
+          FORCE_POST: ${{ inputs.force_post }}
+        run: |
+          echo "event_name=${{ github.event_name }}"
+          echo "ref=${{ github.ref }}"
+          echo "UTC now=$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "JST now=$(TZ=Asia/Tokyo date '+%Y-%m-%d %H:%M:%S JST')"
+          echo "FORCE_POST=${FORCE_POST:-}"
+          echo "POST_WINDOW_MINUTES=${POST_WINDOW_MINUTES:-}"
+          echo "DIAGRAM_PRESET=${DIAGRAM_PRESET:-}"
+          echo "DISABLE_TIME_API=${DISABLE_TIME_API:-}"
 
       # --- キャッシュ復元 -----------------------------------------------------
       - name: Restore posted slots cache
