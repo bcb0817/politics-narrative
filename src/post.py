@@ -4,19 +4,20 @@
 politics-narrative — X 自動投稿Bot（政治・政策系 図解投稿）
 
 運用方針:
-- GitHub Actions は10分おきに起動する
+- GitHub Actions は30分おき（毎時 07分・37分）に起動する
 - Python側で JST 現在時刻を取得して投稿可否を判定する
-- 投稿許可スロットは JST 05:07〜23:17 の1日40回
-- 各スロットには12分の許容幅を持たせる
+- 投稿スロットは24時間対象。毎時 07分・37分の1日48スロット
+- 各スロットには POST_WINDOW_MINUTES（既定20分）の許容幅を持たせる（Actions遅延の吸収）
+- 時間帯（深夜・早朝）によるスキップは行わない
 - 1スロット1投稿まで
 - 定期投稿・手動実行ともに diagram モード固定
-- linkモード / test投稿 / ランダムスケジュール / ランダム投稿数 / post.yml自動書き換え は廃止
+- linkモード / test投稿 / normal / dry-run / ランダムスケジュール は廃止（復活させない）
 - 投稿内容は政策・データ・図解中心
 - 過度な煽り、陰謀論、差別表現、個人攻撃は禁止
 
 使い方:
-    python post.py diagram      # 通常（時刻判定あり）
-    FORCE_POST=true python post.py diagram   # 強制投稿（時刻判定なし・diagramのみ）
+    python post.py diagram      # 通常（時刻スロット判定あり）
+    FORCE_POST=true python post.py diagram   # 強制投稿（スロット判定なし・diagramのみ）
 """
 
 import os
@@ -39,32 +40,31 @@ SRC_DIR = Path(__file__).resolve().parent
 POSTED_SLOTS_FILE = SRC_DIR / "posted_slots.json"
 POSTED_URLS_FILE = SRC_DIR / "posted_urls.json"
 
-# 投稿許可スロット（JST）— SNSピーク時間帯に寄せた1日40本
-POST_SLOTS = [
-    "05:07", "05:37",
-    "06:07", "06:37",
-    "07:07", "07:27", "07:47",
-    "08:07", "08:27", "08:47",
-    "09:07", "09:27",
-    "10:07", "10:37",
-    "11:07", "11:37", "11:57",
-    "12:17", "12:37", "12:57",
-    "13:17",
-    "14:07",
-    "15:07",
-    "16:07",
-    "17:07", "17:27", "17:47",
-    "18:07", "18:27", "18:47",
-    "19:07",
-    "20:07", "20:27", "20:47",
-    "21:07", "21:27", "21:47",
-    "22:07", "22:27",
-    "23:17",
-]
-assert len(POST_SLOTS) == 40, f"POST_SLOTS must be 40, got {len(POST_SLOTS)}"
+# 投稿スロット（JST）— 24時間対象。毎時 07分・37分の1日48スロット。
+# 時間帯（深夜・早朝）によるスキップは行わない。
+#   00:07, 00:37, 01:07, 01:37, ... , 23:07, 23:37  （計48）
+def build_post_slots() -> list:
+    """1日48件（毎時07分・37分）の "HH:MM" スロット文字列を生成する。
+    現在時刻に依存しない（純粋関数）。"""
+    return [f"{h:02d}:{m:02d}" for h in range(24) for m in (7, 37)]
 
-# スロット開始から +12分まで投稿許可
-POST_WINDOW_MINUTES = 12
+
+POST_SLOTS = build_post_slots()
+assert len(POST_SLOTS) == 48, f"POST_SLOTS must be 48, got {len(POST_SLOTS)}"
+assert POST_SLOTS[0] == "00:07" and POST_SLOTS[1] == "00:37" and POST_SLOTS[-1] == "23:37"
+
+# スロット開始から +POST_WINDOW_MINUTES 分まで投稿許可（GitHub Actions の遅延吸収）。
+# 30分間隔なので既定20分なら次スロットと重複しない。環境変数で上書き可能。
+def _get_post_window_minutes() -> int:
+    try:
+        v = int(os.getenv("POST_WINDOW_MINUTES", "20"))
+    except (TypeError, ValueError):
+        v = 20
+    # 30分間隔と衝突しないよう 1〜29 にクランプ
+    return max(1, min(v, 29))
+
+
+POST_WINDOW_MINUTES = _get_post_window_minutes()
 
 # 優先ジャンル（高いほど優先）
 PRIORITY_GENRES = [
@@ -182,8 +182,10 @@ def get_jst_now():
 # ---------------------------------------------------------------------------
 
 def find_current_post_slot(now_jst: datetime):
-    """現在JST時刻が許可スロットの 0〜+12分 以内なら、その情報を返す。
+    """現在JST時刻が、いずれかのスロット開始から +POST_WINDOW_MINUTES 分以内なら、
+    そのスロット情報を返す。24時間対象（深夜・早朝のスキップはしない）。
     戻り値: (slot, slot_key, slot_dt, window_end) / 該当なしは (None, None, None, None)
+    ※ 該当なし＝「30分スロットの許可ウィンドウ外」であって「時間帯による禁止」ではない。
     """
     today = now_jst.date()
     for slot in POST_SLOTS:
@@ -938,24 +940,33 @@ def main():
     log(f"[INFO] Current JST: {now_jst:%Y-%m-%d %H:%M:%S}")
     log(f"[INFO] Current UTC: {now_utc:%Y-%m-%d %H:%M:%S}")
 
-    # --- スロット判定 ---
+    # --- スロット判定（24時間対象・30分間隔・深夜スキップなし） ---
+    log(f"[INFO] Post slots today: {len(POST_SLOTS)}")
+    log(f"[INFO] Post window minutes: {POST_WINDOW_MINUTES}")
     if force:
         slot = f"FORCE_{now_jst:%H:%M}"
         slot_key = f"{now_jst.date().isoformat()}_{slot}"
-        log("[INFO] FORCE_POST=true -> time window check skipped")
+        log("[INFO] FORCE_POST=true -> post window check skipped")
         log(f"[INFO] Matched slot: {slot}")
+        log(f"[INFO] Within post window: true")
         log(f"[INFO] Slot key: {slot_key}")
+        log(f"[INFO] Slot already posted: {str(is_slot_posted(slot_key)).lower()}")
     else:
         slot, slot_key, _, _ = find_current_post_slot(now_jst)
+        within = slot is not None
         log(f"[INFO] Matched slot: {slot if slot else 'None'}")
+        log(f"[INFO] Within post window: {str(within).lower()}")
         log(f"[INFO] Slot key: {slot_key if slot_key else 'None'}")
-        if slot is None:
+        if not within:
+            # 「深夜だから」ではなく「30分スロットの許可ウィンドウ外」という意味
             log("[INFO] Decision: skip")
             log("[INFO] Skip reason: outside_post_window")
             return
-        if is_slot_posted(slot_key):
+        already = is_slot_posted(slot_key)
+        log(f"[INFO] Slot already posted: {str(already).lower()}")
+        if already:
             log("[INFO] Decision: skip")
-            log("[INFO] Skip reason: already_posted_slot")
+            log("[INFO] Skip reason: slot_already_posted")
             return
 
     # --- 素材収集 ---
@@ -983,7 +994,7 @@ def main():
 
     if best is None:
         log("[INFO] Decision: skip")
-        log("[INFO] Skip reason: no_valid_candidate")
+        log("[INFO] Skip reason: candidate_generation_failed")
         return
 
     scores = best.get("scores") or {}
@@ -1024,7 +1035,8 @@ def main():
     except Exception as e:
         # 投稿失敗時はスロット記録しない（=未投稿扱い）
         log(f"[ERROR] post_to_x failed: {e}")
-        log("[INFO] Skip reason: post_api_failed (slot left unposted)")
+        log("[INFO] Decision: skip")
+        log("[INFO] Skip reason: post_to_x_failed (slot left unposted)")
         return
 
     # --- 投稿成功後にだけ記録 ---
