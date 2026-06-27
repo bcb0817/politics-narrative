@@ -9,8 +9,10 @@ name: post
 
 on:
   schedule:
-    # 毎時 07分・37分（1日48回）。分指定は JST/UTC で同値。
-    - cron: '7,37 * * * *'
+    # 毎時 07分・37分（1日48回）。GitHub の仕様上、複数分の1行指定より
+    # 2行に分けた方が発火が安定しやすい。分指定は JST/UTC で同値。
+    - cron: '7 * * * *'
+    - cron: '37 * * * *'
   workflow_dispatch:
     # 手動強制投稿用。FORCE_POST=true のときだけスロット判定を無視して diagram 投稿する。
     inputs:
@@ -32,8 +34,12 @@ jobs:
 
     env:
       TZ: Asia/Tokyo
-      # 30分スロットに対し、GitHub Actions の遅延を20分まで吸収する
+      # 30分スロットに対し、GitHub Actions の遅延を20分まで吸収する（現在slot判定用）
       POST_WINDOW_MINUTES: "20"
+      # schedule発火が落ちても過去24時間の未処理slotをcatch-upする
+      CATCH_UP_HOURS: "24"
+      # 連投・Bot臭を避けるため1runの投稿トライは最大1件
+      MAX_POSTS_PER_RUN: "1"
       # 24時間トライ。外部時刻APIに依存せず Actions 上の時刻(JST)を使う
       DISABLE_TIME_API: "true"
 
@@ -71,6 +77,8 @@ jobs:
           echo "JST now=$(TZ=Asia/Tokyo date '+%Y-%m-%d %H:%M:%S JST')"
           echo "FORCE_POST=${FORCE_POST:-}"
           echo "POST_WINDOW_MINUTES=${POST_WINDOW_MINUTES:-}"
+          echo "CATCH_UP_HOURS=${CATCH_UP_HOURS:-}"
+          echo "MAX_POSTS_PER_RUN=${MAX_POSTS_PER_RUN:-}"
           echo "DIAGRAM_PRESET=${DIAGRAM_PRESET:-}"
           echo "DISABLE_TIME_API=${DISABLE_TIME_API:-}"
 
