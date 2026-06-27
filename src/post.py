@@ -132,10 +132,25 @@ POST_TYPE_KEYS = list(POST_TYPES.keys())  # ["A","B","C","D","E","F","G","H","I"
 
 # スコア閾値（section 17）
 SCORE_POST_ALWAYS = 9   # 9-10 必ず投稿
-SCORE_POST = 7          # 7-8 投稿
-SCORE_SAVE = 5          # 5-6 保存のみ（投稿見送り）
+SCORE_POST = 7          # 7-8 投稿（参考用。投稿可否の最終判定は MIN_POST_SCORE）
+SCORE_SAVE = 5          # 5-6 保存のみ（参考用）
 # 4以下は投稿しない
 BAN_RISK_BLOCK = 7      # 炎上・BANリスクがこの値以上なら他が高くても投稿しない
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+# 投稿可否の最終しきい値: effective_score がこの値以上で投稿可。
+MIN_POST_SCORE = _env_float("MIN_POST_SCORE", 6.3)
+# overall救済ルールのしきい値（overall>=8 / effective>=6.2 / ban_risk<=2 で投稿可）
+RESCUE_OVERALL_MIN = 8
+RESCUE_EFFECTIVE_MIN = 6.2
+RESCUE_BAN_RISK_MAX = 2
 
 ANTHROPIC_MODEL = "claude-sonnet-4-6"  # コスト重視。必要なら opus 等に変更可
 
@@ -492,6 +507,7 @@ GENERATION_SYSTEM = """\
 最後: 短い結論。ただし F=争点問いかけ型なら、最後は1つの問いにする。
 条件: 120〜240字 / 3〜5ブロック / 1ブロック1〜2行 / 空行2〜3個まで / ポエム化しない。
 本文は1行ずつの配列(tweet_lines)で返す。空行は空文字列 "" を要素として入れる。
+hook には、本文1行目に当たる「違和感のあるフック（短い一文）」を必ず入れる（空にしない）。
 
 投稿型は必ず1つ選ぶ:
 A=対比型, B=数字インパクト型, C=誤解訂正型, D=争点整理型, E=未来警告型,
@@ -628,7 +644,7 @@ CANDIDATE_TOOL = {
                         "overall": {"type": "integer"},
                         "decision_reason": {"type": "string"},
                     },
-                    "required": ["type", "title", "tweet_lines", "genre",
+                    "required": ["type", "title", "hook", "tweet_lines", "genre",
                                  "image_title", "image_points", "image_conclusion",
                                  "keywords", "uses_unverified_number", "scores",
                                  "overall"],
@@ -697,6 +713,10 @@ def generate_candidates(news_item: dict) -> list:
         c.setdefault("source_url", news_item.get("url", ""))
         c.setdefault("source_name", news_item.get("source_name", ""))
         c.setdefault("pub_date", news_item.get("pub_date", ""))
+        # hook が空なら tweet_lines の最初の非空行、それも無ければ title を使う
+        if not (c.get("hook") or "").strip():
+            first_line = next((str(x).strip() for x in lines if str(x).strip()), "")
+            c["hook"] = first_line or (c.get("title") or "").strip()
         cleaned.append(c)
     return cleaned
 
@@ -1070,22 +1090,59 @@ def main():
         return
 
     scores = best.get("scores") or {}
+    overall = int(best.get("overall") or 0)
+    ban = int((scores or {}).get("ban_risk", 0) or 0)
+    btype = best.get("type", "")
+    bgenre = best.get("genre", "")
+    breason = best.get("decision_reason", "")
     log(f"[INFO] News title: {best.get('title','')}")
-    log(f"[INFO] Selected post type: {best.get('type','')} ({POST_TYPES.get(best.get('type',''),'')})")
-    log(f"[INFO] Score: overall={best.get('overall')} effective={best_score:.1f} ban_risk={scores.get('ban_risk')}")
-    log(f"[INFO] Genre: {best.get('genre','')}")
+    log(f"[INFO] Selected post type: {btype} ({POST_TYPES.get(btype,'')})")
+    log(f"[INFO] Score: overall={overall} effective={best_score:.2f} ban_risk={ban}")
+    log(f"[INFO] MIN_POST_SCORE: {MIN_POST_SCORE}")
+    log(f"[INFO] Genre: {bgenre}")
     log(f"[INFO] Hook: {best.get('hook','')}")
-    log(f"[INFO] Decision reason: {best.get('decision_reason','')}")
+    log(f"[INFO] Decision reason: {breason}")
 
     # --- スコア閾値ゲート ---
-    if best_score < SCORE_POST:
+    # FORCE_POST=true かつ FORCE_BYPASS_SCORE=true のときだけスコア判定を無視する。
+    force_bypass_score = (
+        force
+        and os.environ.get("FORCE_BYPASS_SCORE", "false").strip().lower()
+        in ("true", "1", "yes")
+    )
+
+    # overall救済ルール: overall>=8 / effective>=6.2 / ban_risk<=2 を満たせば投稿可。
+    rescue_rule_applied = (
+        overall >= RESCUE_OVERALL_MIN
+        and best_score >= RESCUE_EFFECTIVE_MIN
+        and ban <= RESCUE_BAN_RISK_MAX
+    )
+
+    # 安全弁: effective_score が負（BANリスク or 未検証数字ペナルティ）の場合は
+    # FORCE_BYPASS_SCORE でも投稿しない。
+    if best_score < 0:
         log("[INFO] Decision: skip")
-        if best_score < 0:
-            log("[INFO] Skip reason: ban_risk_or_unverified_block")
-        elif best_score < SCORE_SAVE:
-            log("[INFO] Skip reason: low_score_do_not_post")
-        else:
-            log("[INFO] Skip reason: save_only_score_5_6")
+        log("[INFO] Skip reason: ban_risk_or_unverified_block")
+        log(f"[INFO] effective_score={best_score:.2f} MIN_POST_SCORE={MIN_POST_SCORE} "
+            f"overall={overall} ban_risk={ban} type={btype} genre={bgenre} "
+            f"decision_reason={breason} rescue_rule_applied={str(rescue_rule_applied).lower()}")
+        return
+
+    can_post = (
+        force_bypass_score
+        or best_score >= MIN_POST_SCORE
+        or rescue_rule_applied
+    )
+    log(f"[INFO] Rescue rule applied: {str(rescue_rule_applied).lower()}")
+    if force_bypass_score:
+        log("[INFO] FORCE_BYPASS_SCORE=true -> score gate bypassed")
+
+    if not can_post:
+        log("[INFO] Decision: skip")
+        log("[INFO] Skip reason: effective_score_below_threshold")
+        log(f"[INFO] effective_score={best_score:.2f} MIN_POST_SCORE={MIN_POST_SCORE} "
+            f"overall={overall} ban_risk={ban} type={btype} genre={bgenre} "
+            f"decision_reason={breason} rescue_rule_applied={str(rescue_rule_applied).lower()}")
         return
 
     # --- 画像生成 ---
