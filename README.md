@@ -21,8 +21,19 @@
 ### 投稿しない（skip）理由
 時間帯による skip は無い。skip するのは次の場合だけ:
 `no_unprocessed_slot`（24時間以内の開始済みスロットがすべて投稿済み）/ `slot_already_posted` /
-`no_news` / `candidate_generation_failed` / `low_score_do_not_post` /
-`save_only_score_5_6` / `post_to_x_failed` / `missing_env` / `api_error`。
+`no_news` / `candidate_generation_failed` / `effective_score_below_threshold` /
+`ban_risk_or_unverified_block` / `post_to_x_failed` / `missing_env` / `api_error`。
+
+### 投稿可否のスコア判定
+- 最終しきい値は `MIN_POST_SCORE`（環境変数、既定 **6.3**）。`effective_score >= MIN_POST_SCORE` で投稿可。
+- **overall救済ルール**: `overall >= 8` かつ `effective_score >= 6.2` かつ `ban_risk <= 2` なら、
+  しきい値未満でも投稿可（良質だが加重で伸びにくい投稿を拾う）。
+- `effective_score` が負（BANリスク or 未検証数字ペナルティ）の場合は投稿しない（安全弁）。
+- `FORCE_POST=true` は時刻/catch-up判定のみ無視する。**スコア判定は既定で維持**。
+  `FORCE_BYPASS_SCORE=true` を併用したときだけスコア判定も無視する
+  （ただし `effective_score` が負の投稿は FORCE_BYPASS_SCORE でも出さない）。
+- skip時のログには `effective_score` / `MIN_POST_SCORE` / `overall` / `ban_risk` /
+  `type` / `genre` / `decision_reason` / `rescue_rule_applied` を必ず出力する。
 
 ## 時刻判定とcatch-up
 GitHub Actions の schedule は UTC 基準で、発火が遅延・間引きされることがある。
