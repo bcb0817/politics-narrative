@@ -21,6 +21,11 @@ on:
         type: boolean
         required: false
         default: false
+      force_bypass_score:
+        description: 'Also bypass score gate (only effective with force_post=true).'
+        type: boolean
+        required: false
+        default: false
 
 concurrency:
   # 起動が重ならないようにする（重複投稿の保険）
@@ -70,12 +75,16 @@ jobs:
       - name: Debug schedule context
         env:
           FORCE_POST: ${{ inputs.force_post }}
+          FORCE_BYPASS_SCORE: ${{ inputs.force_bypass_score }}
+          MIN_POST_SCORE: "6.3"
         run: |
           echo "event_name=${{ github.event_name }}"
           echo "ref=${{ github.ref }}"
           echo "UTC now=$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
           echo "JST now=$(TZ=Asia/Tokyo date '+%Y-%m-%d %H:%M:%S JST')"
           echo "FORCE_POST=${FORCE_POST:-}"
+          echo "FORCE_BYPASS_SCORE=${FORCE_BYPASS_SCORE:-}"
+          echo "MIN_POST_SCORE=${MIN_POST_SCORE:-}"
           echo "POST_WINDOW_MINUTES=${POST_WINDOW_MINUTES:-}"
           echo "CATCH_UP_HOURS=${CATCH_UP_HOURS:-}"
           echo "MAX_POSTS_PER_RUN=${MAX_POSTS_PER_RUN:-}"
@@ -108,6 +117,9 @@ jobs:
           ACCESS_TOKEN_SECRET: ${{ secrets.ACCESS_TOKEN_SECRET }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           FORCE_POST: ${{ inputs.force_post }}
+          FORCE_BYPASS_SCORE: ${{ inputs.force_bypass_score }}
+          # 投稿可否の最終しきい値（effective_score >= MIN_POST_SCORE で投稿）
+          MIN_POST_SCORE: "6.3"
         run: |
           cd src
           python post.py diagram
