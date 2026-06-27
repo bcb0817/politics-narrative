@@ -66,6 +66,20 @@ def _get_post_window_minutes() -> int:
 
 POST_WINDOW_MINUTES = _get_post_window_minutes()
 
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+# catch-up: GitHub Actions の schedule は確実に30分ごとに発火するとは限らないため、
+# 過去 CATCH_UP_HOURS 時間以内の「未処理スロット」を後続runで回収する。
+# ただし連投・Bot臭を避けるため、1runの投稿トライは MAX_POSTS_PER_RUN 件まで。
+CATCH_UP_HOURS = max(1, _env_int("CATCH_UP_HOURS", 24))
+MAX_POSTS_PER_RUN = max(0, _env_int("MAX_POSTS_PER_RUN", 1))
+
 # 優先ジャンル（高いほど優先）
 PRIORITY_GENRES = [
     "社会保障",   # 年金・医療・介護
@@ -196,6 +210,48 @@ def find_current_post_slot(now_jst: datetime):
             slot_key = f"{today.isoformat()}_{slot}"
             return slot, slot_key, slot_dt, window_end
     return None, None, None, None
+
+
+def slot_key_for(slot_dt: datetime, slot: str) -> str:
+    """そのスロット自身の日付からslot_keyを作る（過去日のスロットにも対応）。
+    例: 2026-06-26 09:07 のスロット -> '2026-06-26_09:07'
+    """
+    return f"{slot_dt.date().isoformat()}_{slot}"
+
+
+def slot_datetimes_in_window(now_jst: datetime, hours: int) -> list:
+    """now から過去 hours 時間以内に「開始済み」のスロット datetime を
+    古い順に返す。各要素は (slot_str, slot_dt)。catch-up探索に使う。
+    （POST_WINDOW_MINUTES は使わない＝ウィンドウ外でも未処理なら対象にする）
+    """
+    window_start = now_jst - timedelta(hours=hours)
+    out = []
+    d = window_start.date()
+    end_date = now_jst.date()
+    while d <= end_date:
+        for slot in POST_SLOTS:
+            hh, mm = map(int, slot.split(":"))
+            slot_dt = datetime.combine(d, time(hh, mm), tzinfo=JST)
+            # 開始済み(slot_dt <= now) かつ 過去hours以内(window_start < slot_dt)
+            if window_start < slot_dt <= now_jst:
+                out.append((slot, slot_dt))
+        d += timedelta(days=1)
+    out.sort(key=lambda x: x[1])  # 古い順
+    return out
+
+
+def find_catch_up_slot(now_jst: datetime, posted: set, hours: int):
+    """catch-up対象のうち最も古い未処理スロットを1件返す。
+    戻り値: (slot, slot_key, slot_dt, window_slots, unprocessed) 
+            未処理が無ければ slot 系は None。
+    """
+    window_slots = slot_datetimes_in_window(now_jst, hours)
+    unprocessed = [(s, dt) for (s, dt) in window_slots
+                   if slot_key_for(dt, s) not in posted]
+    if not unprocessed:
+        return None, None, None, window_slots, unprocessed
+    slot, slot_dt = unprocessed[0]  # 最古
+    return slot, slot_key_for(slot_dt, slot), slot_dt, window_slots, unprocessed
 
 
 # ---------------------------------------------------------------------------
@@ -940,31 +996,47 @@ def main():
     log(f"[INFO] Current JST: {now_jst:%Y-%m-%d %H:%M:%S}")
     log(f"[INFO] Current UTC: {now_utc:%Y-%m-%d %H:%M:%S}")
 
-    # --- スロット判定（24時間対象・30分間隔・深夜スキップなし） ---
-    log(f"[INFO] Post slots today: {len(POST_SLOTS)}")
-    log(f"[INFO] Post window minutes: {POST_WINDOW_MINUTES}")
+    # --- スロット判定（24時間対象・catch-up方式・1runで最大1投稿トライ） ---
+    posted = set(_load_json(POSTED_SLOTS_FILE, []))
+    log(f"[INFO] Catch-up window hours: {CATCH_UP_HOURS}")
+    log(f"[INFO] Max posts per run: {MAX_POSTS_PER_RUN}")
+    log(f"[INFO] posted_slots count: {len(posted)}")
+
+    # 安全弁: 1runの投稿トライ上限が0以下なら何もしない
+    if MAX_POSTS_PER_RUN < 1 and not force:
+        log("[INFO] Decision: skip")
+        log("[INFO] Skip reason: max_posts_per_run_zero")
+        return
+
     if force:
+        # FORCE_POST=true は catch-up判定を無視して即時投稿トライ
         slot = f"FORCE_{now_jst:%H:%M}"
         slot_key = f"{now_jst.date().isoformat()}_{slot}"
-        log("[INFO] FORCE_POST=true -> post window check skipped")
-        log(f"[INFO] Matched slot: {slot}")
-        log(f"[INFO] Within post window: true")
+        log("[INFO] FORCE_POST=true -> catch-up check skipped")
+        log(f"[INFO] Selected slot for this run: {now_jst.isoformat()}")
+        log(f"[INFO] Slot age minutes: 0")
         log(f"[INFO] Slot key: {slot_key}")
-        log(f"[INFO] Slot already posted: {str(is_slot_posted(slot_key)).lower()}")
+        log(f"[INFO] Slot already posted: {str(slot_key in posted).lower()}")
     else:
-        slot, slot_key, _, _ = find_current_post_slot(now_jst)
-        within = slot is not None
-        log(f"[INFO] Matched slot: {slot if slot else 'None'}")
-        log(f"[INFO] Within post window: {str(within).lower()}")
-        log(f"[INFO] Slot key: {slot_key if slot_key else 'None'}")
-        if not within:
-            # 「深夜だから」ではなく「30分スロットの許可ウィンドウ外」という意味
+        slot, slot_key, slot_dt, window_slots, unprocessed = \
+            find_catch_up_slot(now_jst, posted, CATCH_UP_HOURS)
+        log(f"[INFO] Post slots in catch-up window: {len(window_slots)}")
+        log(f"[INFO] Unprocessed slots count: {len(unprocessed)}")
+        if slot is None:
+            # この24時間で開始済みのスロットはすべて投稿済み（=回収すべきものが無い）
+            log("[INFO] Selected slot for this run: None")
             log("[INFO] Decision: skip")
-            log("[INFO] Skip reason: outside_post_window")
+            log("[INFO] Skip reason: no_unprocessed_slot")
             return
-        already = is_slot_posted(slot_key)
-        log(f"[INFO] Slot already posted: {str(already).lower()}")
-        if already:
+        age_min = int((now_jst - slot_dt).total_seconds() // 60)
+        # POST_WINDOW_MINUTES は「現在slotか否か」の表示にのみ使う（catch-up探索には使わない）
+        is_current = age_min <= POST_WINDOW_MINUTES
+        log(f"[INFO] Selected slot for this run: {slot_dt.isoformat()}")
+        log(f"[INFO] Slot age minutes: {age_min}")
+        log(f"[INFO] Within current post window: {str(is_current).lower()}")
+        log(f"[INFO] Slot key: {slot_key}")
+        # find_catch_up_slot は未処理slotのみ返すため通常ここは false
+        if slot_key in posted:
             log("[INFO] Decision: skip")
             log("[INFO] Skip reason: slot_already_posted")
             return
