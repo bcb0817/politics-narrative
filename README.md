@@ -1,38 +1,45 @@
 # politics-narrative 運用方針
 
-## 投稿運用（24時間・1日48回の投稿トライ）
-- GitHub Actions は **30分おき（毎時 07分・37分）** に起動する（`cron: '7,37 * * * *'`）
-- Python側で JST 現在時刻を取得して投稿可否を判定する
+## 投稿運用（24時間・catch-up方式・1runで最大1投稿トライ）
+- GitHub Actions は **30分おき（毎時 07分・37分）** に起動する。cron は**2行に分割**して発火を安定させる:
+  `- cron: '7 * * * *'` と `- cron: '37 * * * *'`
+- **GitHub Actions の schedule は必ず30分ごとに発火するとは限らない**（高負荷時に間引かれ・遅延・dropが起きる）
+- そのため Python 側で **過去 `CATCH_UP_HOURS`（既定24）時間以内の未処理スロットを catch-up** する
 - 投稿スロットは **24時間対象。毎時 07分・37分の1日48スロット**（`00:07, 00:37, … , 23:37`）
 - **深夜・早朝のスキップは廃止**（時間帯では止めない）
-- 各スロットには `POST_WINDOW_MINUTES`（既定20分）の許容幅を持たせ、Actions の遅延を吸収する
+- **1runあたり最大1投稿トライ**（`MAX_POSTS_PER_RUN`、既定1）。久しぶりの起動でも連投しない
+- 未処理スロットが複数あるときは **最も古い1件だけ** を処理し、残りは次以降のrunで徐々に回収する
+- **48回/日は理想の投稿トライ数**。schedule発火が落ちた場合は catch-up で徐々に回収する（48投稿を保証はしない）
 - 1スロット1投稿まで
-- **「1日48投稿」ではなく「1日48回の投稿トライ」**。
-  低スコア・ニュースなし・候補生成失敗・API失敗・投稿済みスロットの場合は投稿しない
-- 投稿成功後にだけ `posted_slots.json` / `posted_urls.json` を更新する（失敗時は更新しない）
+- **投稿成功後にだけ** `posted_slots.json` / `posted_urls.json` を更新する
+- **投稿失敗・低スコアskip では `posted_slots.json` を更新しない**（=次runで再トライ対象に残る）
+- `slot_already_posted` のスロットは従来どおり skip
 - 定期投稿・手動実行ともに diagram モード固定
-- linkモード / test投稿 / normal / dry-run / ランダムスケジュール生成 / post.yml自動書き換え は復活させない
-- 投稿内容は政策・データ・図解中心
-- 過度な煽り、陰謀論、差別表現、個人攻撃は禁止
+- linkモード / test投稿 / normal / dry-run / ランダムスケジュール生成 は復活させない
+- 投稿内容は政策・データ・図解中心。過度な煽り、陰謀論、差別表現、個人攻撃は禁止
 
 ### 投稿しない（skip）理由
 時間帯による skip は無い。skip するのは次の場合だけ:
-`outside_post_window`（30分スロットの許可ウィンドウ外）/ `slot_already_posted` /
+`no_unprocessed_slot`（24時間以内の開始済みスロットがすべて投稿済み）/ `slot_already_posted` /
 `no_news` / `candidate_generation_failed` / `low_score_do_not_post` /
 `save_only_score_5_6` / `post_to_x_failed` / `missing_env` / `api_error`。
-※ `outside_post_window` は「ウィンドウ外」の意味であり、「深夜だから」という意味では使わない。
 
-## 時刻判定
-GitHub Actions の schedule は UTC 基準で実行が数分〜十数分遅延することがある。
-そのため cron の完全一致では制御せず、`post.py` 側で JST 現在時刻を取得し、
-各スロット開始から `+POST_WINDOW_MINUTES`（既定20分）以内かどうかで投稿可否を判定する。
-24時間対象なので、どの時間帯でもこのウィンドウ内なら投稿トライする。
+## 時刻判定とcatch-up
+GitHub Actions の schedule は UTC 基準で、発火が遅延・間引きされることがある。
+そのため cron 時刻そのものは投稿判定の根拠にせず、`post.py` 側で JST 現在時刻を取得し、
+**過去 `CATCH_UP_HOURS` 時間以内に開始済みで、まだ `posted_slots.json` に無いスロット**を
+未処理スロットとして検出する。最古の1件だけを今回のrunで処理する。
 
-workflow では外部時刻APIに依存しないよう `DISABLE_TIME_API=true` を設定し、
-Actions 上の JST 時刻（`datetime.now(ZoneInfo("Asia/Tokyo"))`）を使う。
-`DISABLE_TIME_API` 未設定時のJST取得は2段構え:
-1. 第一候補: `https://worldtimeapi.org/api/timezone/Asia/Tokyo`
-2. フォールバック: `datetime.now(ZoneInfo("Asia/Tokyo"))`
+- `POST_WINDOW_MINUTES`（既定20）は「選択スロットが現在の生スロットか否か」の表示にのみ使い、
+  **catch-up対象の探索には使わない**（ウィンドウ外でも未処理なら回収対象）。
+- `MAX_POSTS_PER_RUN`（既定1）で1runの投稿トライ上限を制御する。
+- workflow では外部時刻APIに依存しないよう `DISABLE_TIME_API=true` を設定し、
+  Actions 上の JST 時刻（`datetime.now(ZoneInfo("Asia/Tokyo"))`）を使う。
+
+> 注意: catch-up は `posted_slots.json` が run 間で確実に保持されることが前提。
+> 現状は GitHub Actions の cache に保存している。cache がmissすると未処理判定が
+> 過剰になり得るため、重複投稿が気になる場合は永続ストレージ（ブランチへのcommit等）への
+> 切り替えも検討する。
 
 ## 重複防止
 - `src/posted_slots.json` … 投稿済みスロット（例: `2026-06-25_00:07`）
