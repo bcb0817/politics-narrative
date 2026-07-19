@@ -2,15 +2,15 @@
 $TaskName = "PoliticsNarrativeBot"
 $Root = Split-Path -Parent $PSScriptRoot
 $Python = Join-Path $Root ".venv\Scripts\python.exe"
-$Pythonw = Join-Path $Root ".venv\Scripts\pythonw.exe"
+$Runner = Join-Path $PSScriptRoot "run_bot.ps1"
 
 if (-not (Test-Path $Python)) { throw "Virtual environment not found. Run production\install.ps1 first." }
-if (-not (Test-Path $Pythonw)) { throw "pythonw.exe was not found in the virtual environment." }
+if (-not (Test-Path $Runner)) { throw "PowerShell runner not found: $Runner" }
 if (-not (Test-Path (Join-Path $Root ".env"))) { throw ".env not found. Run production\install.ps1 first." }
 
 $Action = New-ScheduledTaskAction `
-    -Execute $Pythonw `
-    -Argument "`"$(Join-Path $Root 'local_bot.py')`" daemon" `
+    -Execute "powershell.exe" `
+    -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$Runner`"" `
     -WorkingDirectory $Root
 
 $Trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
