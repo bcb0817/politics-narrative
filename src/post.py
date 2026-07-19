@@ -38,6 +38,20 @@ from zoneinfo import ZoneInfo
 
 import requests
 
+from publishing_policy import (
+    CRITIQUE_AXES,
+    HOOK_TYPES,
+    POST_TYPE_DAILY_LIMITS,
+    budget_reached,
+    classify_critique_axis,
+    classify_hook_type,
+    classify_post_type,
+    normalize_topic_key,
+    post_type_quota_reached,
+    pre_generation_skip_reason,
+    topic_cooldown_skip_reason,
+)
+
 # ---------------------------------------------------------------------------
 # 定数
 # ---------------------------------------------------------------------------
@@ -73,8 +87,8 @@ def _load_env_file(path: Path) -> None:
         key = key.strip()
         value = value.strip().strip('"').strip("'")
         if key:
-            # 常駐親プロセスの古い環境変数より、現在の.env設定を優先する。
-            os.environ[key] = value
+            # 明示的な実行時上書き（安全なdry-run等）を優先する。
+            os.environ.setdefault(key, value)
 
 
 # 環境変数ベースの定数を確定させる前に .env を読む
@@ -99,6 +113,7 @@ POSTED_SLOTS_FILE = STATE_DIR / "posted_slots.json"     # 投稿成功したslot
 ATTEMPTED_SLOTS_FILE = STATE_DIR / "attempted_slots.json"  # 投稿トライ済みslot（成功＋低スコアskip等）
 POSTED_URLS_FILE = STATE_DIR / "posted_urls.json"       # 投稿履歴（post_history）
 OPENAI_USAGE_FILE = STATE_DIR / "openai_usage.json"      # OpenAI推定使用量・予算管理
+RECENT_TOPICS_FILE = STATE_DIR / "recent_topics.json"    # トピック冷却状態
 BOT_LOG_FILE = LOG_DIR / "bot.log"
 
 
@@ -259,24 +274,15 @@ GENRE_KEYWORDS = {
     "国会法案": ["国会", "法案", "選挙", "解散", "委員会", "可決", "閣議"],
 }
 
-# 投稿型
-# POST_TYPES のキー順がそのまま Structured Outputs schema の type enum になる（ズレ防止）。
+# 投稿タイプ。Structured Outputs schema と同じ単一情報源を使う。
 POST_TYPES = {
-    "A": "対比型（政府の説明 vs 国民の実感／表の争点 vs 本当の争点）",
-    "B": "数字インパクト型（規模・比較で驚かせる）",
-    "C": "誤解訂正型（『〜は本当か？』で前提を問い直す）",
-    "D": "争点整理型（本当に見るべき論点を整理する）",
-    "E": "未来警告型（このままだとどうなるかを示す）",
-    "F": "争点問いかけ型（争点・優先順位・負担配分を提示し、最後に1つだけ問う）",
-    "G": "誰が得するか型（その決定で誰が利益を得るのかを整理する）",
-    "H": "負担の見える化型（コスト・負担が誰にどう乗るのかを可視化する）",
-    "I": "海外比較型（他国の制度・水準と比べて日本の位置を示す）",
-    "J": "世代間構造型（現役・将来世代・高齢層の負担と受益の構造を示す）",
-    "K": "政策の副作用型（狙いと、その裏で起きる想定外の影響を整理する）",
-    "L": "ニュースの裏にある制度型（報道の背後にある制度・仕組みを解説する）",
+    "breaking_news": "速報。変化と今後の確認点を簡潔に示す",
+    "issue_diagram": "文章・改行・矢印・対比で争点を図解する",
+    "strong_opinion": "政策原則から明確な意見を示す",
+    "comparison_factcheck": "複数案・一次資料・改正前後を比較する",
+    "morning_evening_digest": "朝刊・夕刊として複数ニュースを整理する",
 }
-# Structured Outputs schema の type enum と必ず一致させるための単一情報源。
-POST_TYPE_KEYS = list(POST_TYPES.keys())  # ["A","B","C","D","E","F","G","H","I","J","K","L"]
+POST_TYPE_KEYS = list(POST_TYPES.keys())
 
 # スコア閾値（section 17）
 SCORE_POST_ALWAYS = 9   # 9-10 必ず投稿
@@ -295,6 +301,9 @@ def _env_float(name: str, default: float) -> float:
 
 # 投稿可否の最終しきい値: effective_score がこの値以上で投稿可。
 MIN_POST_SCORE = _env_float("MIN_POST_SCORE", 6.3)
+MAX_DAILY_POSTS = max(0, _env_int("MAX_DAILY_POSTS", 16))
+MIN_POST_INTERVAL_MINUTES = max(0, _env_int("MIN_POST_INTERVAL_MINUTES", 45))
+TOPIC_COOLDOWN_HOURS = max(0.0, _env_float("TOPIC_COOLDOWN_HOURS", 4.0))
 
 # 古いニュースの自動投稿を避ける。pubDateを解釈できる記事だけ厳密に判定し、
 # 時刻不明の記事は候補として残す。
@@ -519,13 +528,25 @@ def save_post_record(record: dict) -> None:
     _save_json(POSTED_URLS_FILE, history[-500:])
 
 
+def load_recent_topics() -> list:
+    rows = _load_json(RECENT_TOPICS_FILE, [])
+    return rows if isinstance(rows, list) else []
+
+
+def save_recent_topic(record: dict) -> None:
+    rows = load_recent_topics()
+    rows.append(record)
+    _save_json(RECENT_TOPICS_FILE, rows[-500:])
+
+
 def recent_genres(history: list, n: int = 3) -> list:
     return [h.get("genre") for h in history[-n:] if h.get("genre")]
 
 
 def recent_types(history: list, n: int = 5) -> list:
-    """直近 n 件の投稿型（type）を返す。型の偏り抑制に使う。"""
-    return [h.get("type") for h in history[-n:] if h.get("type")]
+    """直近 n 件の投稿タイプを返す。型の偏り抑制に使う。"""
+    return [h.get("post_type") or h.get("type") for h in history[-n:]
+            if h.get("post_type") or h.get("type")]
 
 
 def is_duplicate(candidate: dict, history: list) -> bool:
@@ -827,7 +848,7 @@ GENERATION_SYSTEM = """\
 - 絵文字は必須。内容に合う異なる絵文字を2〜5個使い、同じ絵文字の連打はしない。
 - 見出し、箇条書き、空行を使って視線の流れを作る。絵文字は見出しや転換点の目印として使う。
 - 🌷➡️🚨 のように、状況・変化・警告を表す絵文字を意味の通る順序で使ってよい。
-- 本文に内部ラベルや制作過程を出さない。「A型」「F型」「F型の問い」「critique_axis」「保守寄りの視点からは」「編集部として」は禁止。
+- 本文に内部ラベルや制作過程を出さない。「A型」「F型」「post_type」「hook_type」「critique_axis」「decision_reason」「保守寄りの視点からは」「右派の観点からは」「AIとして」「編集部として」は禁止。
 - 「表の争点→本当の争点」などの定型句は、実際に二つの異なる争点を具体語で示せる場合だけ使う。
 - 中立的な要約だけで終わらせない。必ず監視軸を1つ選び、根拠に基づく厳しい意見を示す。
 - ただし、ニュースから批判を正当化できない場合は無理に断定せず、論点・懸念として示す。
@@ -840,7 +861,7 @@ GENERATION_SYSTEM = """\
 1行目: 固有名詞または根拠のある数字を入れた強いフック。
 2〜3行目: ニュースで確認できる事実。
 次のブロック: ニュースに直接関係する因果・対比を、固有の具体語で文章図解する。定型句を埋めるだけにしない。
-最後: 政策・予算・権限・説明責任に向けた批判的結論。F型のみ、線引きや優先順位を問う質問を1つ置ける。
+最後: 政策・予算・権限・説明責任に向けた批判的結論。必要な場合だけ、線引きや優先順位を問う質問を1つ置ける。
 条件: 140〜260字 / 3〜5ブロック / 空行2〜3個まで / 1ブロック1〜2行 / ポエム化しない。
 親投稿は必ず260字以内。文の途中や「…」で終わらせない。
 
@@ -861,20 +882,14 @@ hook には1行目をそのまま入れる。
 - opinion_conclusion: 行政監視の観点からの批判的結論。ニュース事実とは区別する。
 これらは画像用ではない。本文や任意のスレッド返信を組み立てるための文章素材である。
 
-投稿型は必ず1つ選ぶ:
-A=対比型, B=数字インパクト型, C=誤解訂正型, D=争点整理型, E=未来警告型,
-F=争点問いかけ型, G=誰が得するか型, H=負担の見える化型, I=海外比較型,
-J=世代間構造型, K=政策の副作用型, L=ニュースの裏にある制度型。
-
-F型の問いは最後に1つだけ。単なる「どう思いますか？」は禁止。
+post_type、hook_type、critique_axis はユーザー入力で指定された値をそのままJSONへ入れる。
+本文にはこれらの内部値や分類名を一切書かない。
+問いは最後に1つだけ。単なる「どう思いますか？」は禁止。
 税負担、優先順位、制度の線引きなど、具体的な争点を示して問う。
 政党・政治家の政策や公的行為への厳しい問いは許容する。ただし、属性攻撃、脅迫、
 標的型嫌がらせ、未確認疑惑の断定、投票妨害につながる問いは禁止。
 
-各候補は critique_axis を次から1つ選ぶ:
-小さな政府・負担抑制 / 財政規律・世代間公平 / 安全保障・国益 /
-エネルギー安全保障 / 法秩序・入管管理 / 家族・少子化 /
-国内産業・経済安全保障 / 行政改革・透明性 / 司法・適正手続
+各候補の批判軸はニュースに最も適合するもの1つだけとし、ユーザー入力の指定から変更しない。
 
 出力前に必ず内部確認する:
 1. 選んだ批判軸はニュース本文の具体語と直接つながっているか。
@@ -907,14 +922,12 @@ overall は ban_risk を踏まえた総合点0〜10。
 
 GENERATION_USER_TMPL = """\
 次のニュースから、X投稿候補を必ず{n_candidates}案つくり、指定JSONスキーマで返してください。
-複数案では投稿型と critique_axis を散らしてください。
+事前分類は post_type={post_type} / hook_type={hook_type} / critique_axis={critique_axis} / topic_key={topic_key}。
+JSONにはこの指定値をそのまま格納し、本文へ内部ラベルを表示しないでください。
 
 編集人格は「久世ゆい」。元投稿の要約や言い換えで終わらせず、確認済み事実から
 制度設計、責任の所在、受益と負担、長期的副作用のいずれか一つを独自論点として加える。
 「久世ゆい」という名前や制作過程は投稿本文に書かない。
-
-原則として1案は F=争点問いかけ型にする。ただし、選挙手続き、災害、事件事故、
-民族・国籍・宗教対立、裏取りが弱い話題、個人攻撃になりやすい話題ではF型を使わない。
 
 ニュース:
 title: {title}
@@ -960,18 +973,15 @@ _SCORE_KEYS = [
 ]
 
 _CANDIDATE_PROPERTIES = {
-    "type": {"type": "string", "enum": POST_TYPE_KEYS},
+    "post_type": {"type": "string", "enum": POST_TYPE_KEYS},
+    "hook_type": {"type": "string", "enum": list(HOOK_TYPES)},
     "title": {"type": "string"},
     "tweet_lines": {"type": "array", "items": {"type": "string"}},
     "genre": {"type": "string", "enum": GENRE_ENUM},
     "critique_axis": {
         "type": "string",
         "enum": [
-            "小さな政府・負担抑制", "財政規律・世代間公平",
-            "安全保障・国益", "エネルギー安全保障",
-            "法秩序・入管管理", "家族・少子化",
-            "国内産業・経済安全保障", "行政改革・透明性",
-            "司法・適正手続",
+            *CRITIQUE_AXES,
         ],
     },
     "hook": {"type": "string"},
@@ -1025,25 +1035,34 @@ def _get_candidate_count() -> int:
 CANDIDATES_PER_NEWS = _get_candidate_count()
 
 
-def _load_performance_patterns(max_chars: int = 700) -> str:
-    """knowledge/viral_patterns / failed_patterns から直近の実績パターンを読み、
-    生成プロンプトに注入する短いテキストを作る（入力トークン節約のため上限付き）。
-    ファイルが無ければ空文字（学習なしで従来どおり動く）。"""
-    root = ROOT_DIR / "knowledge"
+def _load_performance_patterns(topic_key: str = "", max_chars: int = 900) -> str:
+    """Load at most 3 relevant wins and 5 recent failure/avoid rules."""
+    root = ROOT_DIR / "knowledge" / "viral_patterns"
     sections = []
-    for sub, label in (("viral_patterns", "最近伸びた投稿の傾向（この方向に寄せる）"),
-                       ("failed_patterns", "最近伸びなかった投稿の傾向（この方向を避ける）")):
-        path = root / sub / "patterns.md"
+    specs = (
+        ("winning_patterns.md", "最近の成功形式", 3, True),
+        ("losing_patterns.md", "最近の低成績形式", 5, False),
+        ("avoid_patterns.md", "禁止・品質エラー", 5, False),
+    )
+    for filename, label, limit, prefer_topic in specs:
+        path = root / filename
         try:
             text = path.read_text(encoding="utf-8").strip()
         except (FileNotFoundError, OSError):
             continue
         if not text:
             continue
-        # 末尾（=最新）側を優先して切り出す
-        lines = [l for l in text.splitlines() if l.strip()]
-        tail = "\n".join(lines[-8:])
-        sections.append(f"【{label}】\n{tail}")
+        lines = [line for line in text.splitlines() if line.strip().startswith("-")]
+        if prefer_topic and topic_key:
+            related = [line for line in lines if f"topic={topic_key}" in line]
+            unrelated = [line for line in lines if line not in related]
+            selected = related[-limit:]
+            if len(selected) < limit:
+                selected = selected + unrelated[-(limit - len(selected)):]
+        else:
+            selected = lines[-limit:]
+        if selected:
+            sections.append(f"【{label}】\n" + "\n".join(selected))
     out = "\n\n".join(sections).strip()
     return out[:max_chars]
 
@@ -1215,8 +1234,13 @@ def _call_openai(client, *, model: str, system: str, user: str, max_toks: int):
 
 _META_LEAK_PATTERNS = [
     r"(?:^|[\s：:])(?:A|B|C|D|E|F|G|H|I|J|K|L)型(?:の問い)?",
-    r"critique_axis",
+    r"\b(?:post_type|hook_type|critique_axis|decision_reason)\b",
+    r"(?:breaking_news|issue_diagram|strong_opinion|comparison_factcheck|morning_evening_digest)",
+    r"(?:fact_reversal|issue_redefinition|conclusion_first)",
+    r"(?:システムプロンプト|内部スコア|JSONキー)",
     r"保守寄りの視点からは",
+    r"右派の観点からは",
+    r"AIとして",
     r"編集部として",
     r"投稿型",
 ]
@@ -1235,6 +1259,10 @@ _JUDICIAL_OUTPUT_TERMS = [
     "再審", "裁判", "司法", "適正手続", "証拠", "冤罪", "判決", "検察",
     "被害者", "有罪", "無罪", "捜査", "公正",
 ]
+_SECURITY_NEWS_TERMS = ["外交", "防衛", "同盟", "抑止", "台湾", "中国", "北朝鮮", "領海"]
+_SECURITY_OUTPUT_TERMS = ["国益", "防衛", "同盟", "抑止", "安全保障", "主権", "外交"]
+_ECONOMIC_NEWS_TERMS = ["経済", "景気", "賃金", "物価", "企業", "産業", "関税", "貿易"]
+_UNRELATED_SECURITY_TERMS = ["治安悪化", "犯罪増加", "入管強化"]
 
 _EMOJI_PATTERN = re.compile(r"[\U0001F300-\U0001FAFF\u2600-\u27BF]")
 
@@ -1256,6 +1284,23 @@ def _candidate_quality_violations(candidate: dict, news_item: dict) -> list[str]
     judicial_news = any(term in source_text for term in _JUDICIAL_NEWS_TERMS)
     if judicial_news and not any(term in text for term in _JUDICIAL_OUTPUT_TERMS):
         violations.append("judicial_topic_not_addressed")
+    if judicial_news and any(term in text for term in _FINANCE_OUTPUT_TERMS):
+        violations.append("judicial_with_unrelated_finance")
+    security_news = any(term in source_text for term in _SECURITY_NEWS_TERMS)
+    if security_news and not any(term in text for term in _SECURITY_OUTPUT_TERMS):
+        violations.append("security_topic_not_addressed")
+    economic_news = any(term in source_text for term in _ECONOMIC_NEWS_TERMS)
+    if economic_news and not any(term in source_text for term in ("治安", "犯罪", "入管")) \
+            and any(term in text for term in _UNRELATED_SECURITY_TERMS):
+        violations.append("economic_with_unrelated_security")
+    expected = {
+        "post_type": news_item.get("post_type"),
+        "hook_type": news_item.get("hook_type"),
+        "critique_axis": news_item.get("critique_axis"),
+    }
+    for key, value in expected.items():
+        if value and candidate.get(key) != value:
+            violations.append(f"classification_mismatch:{key}")
     if len(text) < 100:
         violations.append("too_short")
     emojis = _EMOJI_PATTERN.findall(text)
@@ -1268,7 +1313,10 @@ def _candidate_quality_violations(candidate: dict, news_item: dict) -> list[str]
     return violations
 
 
-def generate_candidates(news_item: dict) -> list:
+LAST_GENERATION_FAILURE_REASON = ""
+
+
+def generate_candidates(news_item: dict, regeneration_attempt: int = 0) -> list:
     """Generate structured X post candidates with the OpenAI Responses API."""
     api_key = os.environ.get("OPENAI_API_KEY", "").strip()
     if not api_key:
@@ -1282,7 +1330,7 @@ def generate_candidates(news_item: dict) -> list:
 
     state = _openai_usage_state()
     spent = float(state.get("estimated_cost_usd", 0.0) or 0.0)
-    if OPENAI_MONTHLY_BUDGET_USD > 0 and spent >= OPENAI_MONTHLY_BUDGET_USD:
+    if budget_reached(spent, OPENAI_MONTHLY_BUDGET_USD):
         log(
             f"[ERROR] OpenAI monthly budget reached: estimated_usd={spent:.4f} "
             f"budget_usd={OPENAI_MONTHLY_BUDGET_USD:.2f}"
@@ -1296,17 +1344,21 @@ def generate_candidates(news_item: dict) -> list:
     system = GENERATION_SYSTEM.format(n_candidates=n)
     user = GENERATION_USER_TMPL.format(
         n_candidates=n,
+        post_type=news_item.get("post_type", ""),
+        hook_type=news_item.get("hook_type", ""),
+        critique_axis=news_item.get("critique_axis", ""),
+        topic_key=news_item.get("topic_key", ""),
         title=news_item.get("title", ""),
         summary=news_item.get("summary", "")[:1200],
         source_name=news_item.get("source_name", ""),
     )
-    perf = _load_performance_patterns()
+    perf = _load_performance_patterns(news_item.get("topic_key", ""))
     if perf:
         user += "\n\n実績データ（report コマンドで集計した実際のインプレッション傾向）:\n" + perf
 
     # One candidate normally fits well under this cap. Reasoning tokens are also
     # counted against max_output_tokens, so keep a modest configurable buffer.
-    max_toks = min(8000, max(OPENAI_MAX_OUTPUT_TOKENS, 1800 * n))
+    max_toks = min(8000, max(OPENAI_MAX_OUTPUT_TOKENS, 4000 * n))
     log(
         f"[INFO] OpenAI model selected: {model} tier={tier} "
         f"important_keyword={matched_keyword or '-'} max_output_tokens={max_toks}"
@@ -1352,7 +1404,10 @@ def generate_candidates(news_item: dict) -> list:
     if not isinstance(candidates, list):
         return []
 
+    global LAST_GENERATION_FAILURE_REASON
+    LAST_GENERATION_FAILURE_REASON = ""
     cleaned = []
+    rejected_violations = []
     for c in candidates[:n]:
         if not isinstance(c, dict):
             continue
@@ -1362,6 +1417,7 @@ def generate_candidates(news_item: dict) -> list:
             continue
         violations = _candidate_quality_violations(c, news_item)
         if violations:
+            rejected_violations.extend(violations)
             log(
                 f"[WARN] Candidate rejected by deterministic quality check: "
                 f"{','.join(violations)} text={c['tweet_text'][:160]!r}"
@@ -1372,6 +1428,7 @@ def generate_candidates(news_item: dict) -> list:
         c["verification_sources"] = news_item.get("verification_sources", [])
         c["x_cluster_size"] = int(news_item.get("x_cluster_size", 0) or 0)
         c["x_trend_score"] = float(news_item.get("x_trend_score", 0) or 0)
+        c["topic_key"] = news_item.get("topic_key", "")
         c["source_name"] = c.get("source_name") or news_item.get("source_name", "")
         c.setdefault("pub_date", news_item.get("pub_date", ""))
         c["openai_model"] = model
@@ -1379,6 +1436,20 @@ def generate_candidates(news_item: dict) -> list:
             first_line = next((str(x).strip() for x in lines if str(x).strip()), "")
             c["hook"] = first_line or (c.get("title") or "").strip()
         cleaned.append(c)
+    if not cleaned and rejected_violations:
+        LAST_GENERATION_FAILURE_REASON = (
+            "internal_label_leak"
+            if any(v.startswith("meta_leak:") for v in rejected_violations)
+            else "relevance_gate_failed"
+        )
+        if regeneration_attempt < 1:
+            log("[INFO] Candidate quality rejection; regenerating once")
+            retry_item = dict(news_item)
+            retry_item["summary"] = (
+                f"{news_item.get('summary', '')}\n再生成指示: 前回は品質検査で拒否。"
+                "内部ラベルを本文へ出さず、ニュース固有の事実と指定した批判軸だけで書き直す。"
+            )
+            return generate_candidates(retry_item, regeneration_attempt + 1)
     return cleaned
 
 # 実効スコアの加重（合計で割って 0〜10 相当に正規化する）
@@ -1412,7 +1483,7 @@ def effective_score(c: dict, history: list) -> float:
     BANリスク・未検証数字・ジャンル/型の連続・低信頼ソースで減点する。
     """
     scores = c.get("scores") or {}
-    ttype = c.get("type", "")
+    ttype = c.get("post_type", "")
     ban = int(_num(scores, "ban_risk"))
 
     # 安全ゲート（維持方針）：BANリスクが閾値以上なら候補から外す。
@@ -1446,17 +1517,8 @@ def effective_score(c: dict, history: list) -> float:
     if src_trust <= 4:
         base -= 1.0
 
-    # --- F型（争点問いかけ型）の追加処理 ---
-    if ttype == "F":
-        # 反応が取れそうな良問のみ加点
-        if quote >= 7 and angle >= 7 and ban <= 4:
-            base += 0.7
-        # F型でBANリスクがやや高いものは敬遠（重ねて減点）
-        if ban >= 5:
-            base -= 1.0
-        # F型が直近10投稿で3回以上なら、増えすぎ防止で減点
-        if recent_types(history, 10).count("F") >= 3:
-            base -= 1.5
+    if ttype == "strong_opinion" and quote >= 7 and angle >= 7 and ban <= 4:
+        base += 0.4
 
     return base
 
@@ -1495,7 +1557,7 @@ def build_post_text(c: dict) -> str:
         parts.append(hook)
     concl = (c.get("opinion_conclusion") or "").strip()
     if concl:
-        label = "問い：" if c.get("type") == "F" else "つまり："
+        label = "結論："
         parts.append("")
         parts.append(f"{label}{concl}")
     return "\n".join(parts).strip()
@@ -1645,6 +1707,7 @@ def main():
         # FORCE_POST=true は catch-up判定を無視して即時投稿トライ
         slot = f"FORCE_{now_jst:%H:%M}"
         slot_key = f"{now_jst.date().isoformat()}_{slot}"
+        slot_dt = now_jst
         log("[INFO] FORCE_POST=true -> catch-up check skipped")
         log(f"[INFO] Selected slot for this run: {now_jst.isoformat()}")
         log(f"[INFO] Slot age minutes: 0")
@@ -1685,6 +1748,8 @@ def main():
         log("[INFO] Decision: skip")
         log(f"[INFO] Skip reason: {reason}")
         recorded = False
+        if not POST_ENABLED:
+            mark_attempted = False
         if mark_attempted:
             mark_slot_attempted(slot_key)
             recorded = True
@@ -1705,7 +1770,8 @@ def main():
 
     # --- 素材収集 ---
     history = load_post_history()
-    source_split = _env_bool("SOURCE_SCHEDULE_SPLIT", "true")
+    # FORCE_POSTは時刻スロットのソース分割を適用せず、混合候補で安全に検証できるようにする。
+    source_split = _env_bool("SOURCE_SCHEDULE_SPLIT", "true") and not force
     slot_minute = int(slot_dt.minute)
     source_lane = "mixed"
     if source_split:
@@ -1743,13 +1809,81 @@ def main():
         finalize_skip("no_news", mark_attempted=True)
         return
 
-    target_news = prefilter_news(news_items)
+    digest_hours = {
+        int(value) for value in os.environ.get("DIGEST_HOURS", "6,18").split(",")
+        if value.strip().isdigit() and 0 <= int(value) <= 23
+    }
+    digest_window = now_jst.hour in digest_hours and slot_dt.minute == 0
+    target_news = prefilter_news(news_items, top_n=3 if digest_window else None)
+    if digest_window and len(target_news) >= 2:
+        digest_items = target_news[:3]
+        target_news = [{
+            "title": f"{now_jst:%H時}の政治ニュースダイジェスト",
+            "summary": " / ".join(item.get("title", "") for item in digest_items),
+            "url": digest_items[0].get("url", ""),
+            "source_name": "複数ソース",
+            "pub_date": digest_items[0].get("pub_date", ""),
+            "digest_items": digest_items,
+        }]
     log(f"[INFO] News after prefilter: {len(target_news)}")
+
+    # ニュース監視後、OpenAI生成前に日次上限と投稿間隔を判定する。
+    policy_skip = pre_generation_skip_reason(
+        history, now_jst, MAX_DAILY_POSTS, MIN_POST_INTERVAL_MINUTES
+    )
+    if policy_skip:
+        finalize_skip(policy_skip, mark_attempted=True, extra={
+            "daily_success_count": len([
+                h for h in history if str(h.get("posted_at_jst", "")).startswith(now_jst.date().isoformat())
+            ]),
+            "max_daily_posts": MAX_DAILY_POSTS,
+            "min_post_interval_minutes": MIN_POST_INTERVAL_MINUTES,
+        })
+        return
+
+    recent_topics = load_recent_topics()
+    if not recent_topics:
+        recent_topics = [
+            {
+                "topic_key": h.get("topic_key") or normalize_topic_key(h.get("title", ""), h.get("keywords") or []),
+                "last_posted_at": h.get("posted_at_jst", ""),
+                "tweet_id": h.get("tweet_id", ""),
+                "news_title": h.get("title", ""),
+            }
+            for h in history[-120:] if h.get("posted_at_jst")
+        ]
+    eligible_news = []
+    blocked_for_topic = False
+    blocked_for_type_quota = False
+    for item in target_news:
+        enriched = dict(item)
+        enriched["topic_key"] = normalize_topic_key(
+            enriched.get("title", ""), enriched.get("keywords") or []
+        )
+        enriched["post_type"] = classify_post_type(enriched, now_jst)
+        enriched["hook_type"] = classify_hook_type(enriched, history)
+        enriched["critique_axis"] = classify_critique_axis(enriched)
+        if post_type_quota_reached(enriched["post_type"], history, now_jst):
+            blocked_for_type_quota = True
+            continue
+        cooldown_reason = topic_cooldown_skip_reason(
+            enriched["topic_key"], enriched.get("title", ""), recent_topics,
+            now_jst, TOPIC_COOLDOWN_HOURS,
+        )
+        if cooldown_reason:
+            blocked_for_topic = True
+            continue
+        eligible_news.append(enriched)
+
+    if not eligible_news:
+        reason = "topic_cooldown" if blocked_for_topic else "post_type_daily_limit"
+        finalize_skip(reason, mark_attempted=True)
+        return
 
     # --- 候補生成・採点（複数ニュースからベスト1を選ぶ） ---
     best = None
     best_score = -1.0
-    for item in target_news:
+    for item in eligible_news:
         for c in generate_candidates(item):
             if is_duplicate(c, history):
                 continue
@@ -1758,18 +1892,20 @@ def main():
                 best, best_score = c, s
 
     if best is None:
-        # candidate_generation_failed は attempted に記録する（要件2-4）
-        finalize_skip("candidate_generation_failed", mark_attempted=True)
+        reason = LAST_GENERATION_FAILURE_REASON or "candidate_generation_failed"
+        finalize_skip(reason, mark_attempted=True)
         return
 
     scores = best.get("scores") or {}
     overall = int(best.get("overall") or 0)
     ban = int((scores or {}).get("ban_risk", 0) or 0)
-    btype = best.get("type", "")
+    btype = best.get("post_type", "")
     bgenre = best.get("genre", "")
     breason = best.get("decision_reason", "")
     log(f"[INFO] News title: {best.get('title','')}")
     log(f"[INFO] Selected post type: {btype} ({POST_TYPES.get(btype,'')})")
+    log(f"[INFO] Hook type: {best.get('hook_type','')}")
+    log(f"[INFO] Topic key: {best.get('topic_key','')}")
     log(f"[INFO] Score: overall={overall} effective={best_score:.2f} ban_risk={ban}")
     log(f"[INFO] MIN_POST_SCORE: {MIN_POST_SCORE}")
     log(f"[INFO] Genre: {bgenre}")
@@ -1804,7 +1940,7 @@ def main():
         log("[INFO] BAN risk gate: blocked (この判定は常時有効で無効化できません)")
         finalize_skip("ban_risk_or_unverified_block", mark_attempted=True, extra={
             "effective_score": round(float(best_score), 2), "overall": overall,
-            "ban_risk": ban, "type": btype, "genre": bgenre,
+            "ban_risk": ban, "post_type": btype, "genre": bgenre,
             "title": best.get("title", "")})
         return
 
@@ -1829,7 +1965,7 @@ def main():
         # effective_score_below_threshold は attempted に記録する（要件2-4）
         finalize_skip("effective_score_below_threshold", mark_attempted=True, extra={
             "effective_score": round(float(best_score), 2), "overall": overall,
-            "ban_risk": ban, "type": btype, "genre": bgenre,
+            "ban_risk": ban, "post_type": btype, "genre": bgenre,
             "title": best.get("title", "")})
         return
 
@@ -1857,7 +1993,7 @@ def main():
     if not POST_ENABLED:
         log("[INFO] POST_ENABLED=false -> X posting skipped")
         finalize_skip("post_disabled", mark_attempted=MARK_DISABLED_RUN_AS_ATTEMPTED, extra={
-            "title": best.get("title", ""), "type": btype, "genre": bgenre,
+            "title": best.get("title", ""), "post_type": btype, "genre": bgenre,
             "effective_score": round(float(best_score), 2), "overall": overall})
         return
 
@@ -1872,7 +2008,7 @@ def main():
         log(f"[ERROR] post_to_x failed: {e}")
         log_error({"where": "post_to_x", "error": str(e), "slot_key": slot_key})
         finalize_skip("post_to_x_failed", mark_attempted=False, extra={
-            "title": best.get("title", ""), "type": btype, "genre": bgenre})
+            "title": best.get("title", ""), "post_type": btype, "genre": bgenre})
         return
 
     # --- 投稿成功後にだけ記録（attempted と posted の両方 ＋ post_history） ---
@@ -1885,7 +2021,9 @@ def main():
         "posted_at_jst": now_jst.isoformat(),
         "tweet_id": tweet_id,
         "title": best.get("title", ""),
-        "type": best.get("type", ""),
+        "post_type": best.get("post_type", ""),
+        "hook_type": best.get("hook_type", ""),
+        "topic_key": best.get("topic_key", ""),
         "genre": best.get("genre", ""),
         "critique_axis": best.get("critique_axis", ""),
         "source_url": best.get("source_url", ""),
@@ -1911,12 +2049,20 @@ def main():
         "verification_sources": best.get("verification_sources", []),
         "openai_model": best.get("openai_model", ""),
     })
+    save_recent_topic({
+        "topic_key": best.get("topic_key", ""),
+        "last_posted_at": now_jst.isoformat(),
+        "tweet_id": tweet_id,
+        "news_title": best.get("title", ""),
+    })
     log("[INFO] Slot and post history recorded.")
     log_attempt({
         "decision": "post", "reason": "success",
         "slot_key": slot_key, "selected_slot": slot_key,
         "tweet_id": tweet_id,
-        "title": best.get("title", ""), "type": btype, "genre": bgenre,
+        "title": best.get("title", ""), "post_type": btype,
+        "hook_type": best.get("hook_type", ""), "topic_key": best.get("topic_key", ""),
+        "genre": bgenre,
         "critique_axis": best.get("critique_axis", ""),
         "effective_score": round(float(best_score), 2), "overall": overall,
         "ban_risk": ban,

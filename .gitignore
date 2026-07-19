@@ -16,6 +16,11 @@ bot.log
 # Local backup copies
 *.backup-*
 
+# Runtime performance learning (may contain operational metrics/topics)
+knowledge/viral_patterns/winning_patterns.md
+knowledge/viral_patterns/losing_patterns.md
+knowledge/viral_patterns/avoid_patterns.md
+
 # ローカル状態・ログ（コードと分離）
 data/
 logs/

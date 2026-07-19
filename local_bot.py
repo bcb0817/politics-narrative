@@ -82,8 +82,8 @@ def load_env(require: bool = True) -> None:
         key = key.strip()
         value = value.strip().strip('"').strip("'")
         if key:
-            # 常駐プロセスから古い値を継承していても、プロジェクトの.envを正とする。
-            os.environ[key] = value
+            # 明示的な実行時上書き（安全なdry-run等）を優先する。
+            os.environ.setdefault(key, value)
 
 
 def resolve_dir(env_name: str, default: str) -> Path:
@@ -451,6 +451,7 @@ def cmd_report() -> int:
     if str(SRC_DIR) not in sys.path:
         sys.path.insert(0, str(SRC_DIR))
     import post as post_mod  # noqa: E402
+    from publishing_policy import calculate_growth_score  # noqa: E402
 
     now_jst = datetime.now(JST)
     window_hours = 24
@@ -567,16 +568,32 @@ def cmd_report() -> int:
         metrics[tid] = {
             "impressions": int(pm.get("impression_count", 0) or 0),
             "likes": int(pm.get("like_count", 0) or 0),
-            "retweets": int(pm.get("retweet_count", 0) or 0),
+            "reposts": int(pm.get("retweet_count", 0) or 0),
             "replies": int(pm.get("reply_count", 0) or 0),
             "quotes": int(pm.get("quote_count", 0) or 0),
             "bookmarks": int(pm.get("bookmark_count", 0) or 0),
+            "profile_clicks": int(pm.get("user_profile_clicks", 0) or 0),
+            "url_clicks": int(pm.get("url_link_clicks", 0) or 0),
         }
+
+    missing_tweet_errors = [
+        {"reason": "missing_from_x_timeline", "tweet_id": tid,
+         "topic_key": local_by_id[tid].get("topic_key", ""),
+         "post_type": local_by_id[tid].get("post_type") or local_by_id[tid].get("type", "")}
+        for tid in local_by_id if tid not in metrics
+    ]
 
     if not metrics:
         log("[WARN] report: no matching metrics returned for local bot posts")
         return 1
 
+    growth_weights = {
+        "impressions_per_hour": float(os.environ.get("SCORE_WEIGHT_IMPRESSIONS_PER_HOUR", "0.25")),
+        "engagement_rate": float(os.environ.get("SCORE_WEIGHT_ENGAGEMENT_RATE", "0.20")),
+        "profile_clicks": float(os.environ.get("SCORE_WEIGHT_PROFILE_CLICKS", "0.25")),
+        "quotes_bookmarks": float(os.environ.get("SCORE_WEIGHT_QUOTES_BOOKMARKS", "0.15")),
+        "follow_conversion": float(os.environ.get("SCORE_WEIGHT_FOLLOW_CONVERSION", "0.15")),
+    }
     rows = []
     for tid, h in local_by_id.items():
         if tid not in metrics:
@@ -584,31 +601,55 @@ def cmd_report() -> int:
         m = metrics[tid]
         posted_dt = h["_posted_dt"]
         age_hours = max((now_jst - posted_dt).total_seconds() / 3600.0, 0.25)
-        engagement_total = m["likes"] + m["retweets"] + m["replies"] + m["quotes"] + m["bookmarks"]
+        engagement_total = m["likes"] + m["reposts"] + m["replies"] + m["quotes"] + m["bookmarks"]
         impressions = m["impressions"]
-        rows.append({
+        impressions_per_hour = round(impressions / age_hours, 2)
+        engagement_rate = round((engagement_total / impressions), 6) if impressions else 0.0
+        row = {
             "tweet_id": tid,
-            "posted_at_jst": h.get("posted_at_jst", ""),
-            "age_hours": round(age_hours, 2),
-            "type": h.get("type", ""),
-            "genre": h.get("genre", ""),
+            "text": h.get("tweet_text", ""),
+            "topic": h.get("topic_key", ""),
+            "post_type": h.get("post_type") or h.get("type", ""),
+            "hook_type": h.get("hook_type", ""),
             "critique_axis": h.get("critique_axis", ""),
-            "title": h.get("title", ""),
-            "tweet_text": h.get("tweet_text", ""),
-            "hook": h.get("hook", ""),
-            "structure_title": h.get("structure_title", ""),
-            "structure_key_message": h.get("structure_key_message", ""),
-            "opinion_conclusion": h.get("opinion_conclusion", ""),
-            "openai_model": h.get("openai_model", ""),
+            "model": h.get("openai_model", ""),
+            "posted_at": h.get("posted_at_jst", ""),
+            "posted_hour_jst": posted_dt.hour,
             "text_length": len(h.get("tweet_text", "") or ""),
             **m,
-            "engagement_total": engagement_total,
-            "engagement_rate_pct": round((engagement_total / impressions * 100.0), 3) if impressions else 0.0,
-            "impressions_per_hour": round(impressions / age_hours, 2),
-        })
+            "engagement_rate": engagement_rate,
+            "impressions_per_hour": impressions_per_hour,
+            "growth_score": 0.0,
+        }
+        row["growth_score"] = calculate_growth_score(row, growth_weights)
+        rows.append(row)
 
-    rows.sort(key=lambda r: (r["impressions"], r["engagement_total"], r["impressions_per_hour"]), reverse=True)
-    top3 = rows[:3]
+    by_impressions = sorted(rows, key=lambda r: (r["impressions"], r["impressions_per_hour"]), reverse=True)
+    by_growth = sorted(rows, key=lambda r: r["growth_score"], reverse=True)
+    top3 = by_impressions[:3]
+    growth_top3 = by_growth[:3]
+    bottom3 = by_growth[-3:] if rows else []
+
+    quality_errors = list(missing_tweet_errors)
+    attempts_file = dirs["log"] / "post_attempts.jsonl"
+    try:
+        for line in attempts_file.read_text(encoding="utf-8").splitlines():
+            rec = json.loads(line)
+            try:
+                rec_dt = datetime.fromisoformat(str(rec.get("ts_jst") or ""))
+                if rec_dt.tzinfo is None:
+                    rec_dt = rec_dt.replace(tzinfo=JST)
+                if rec_dt.astimezone(JST) < start_jst:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            if rec.get("reason") in {
+                "relevance_gate_failed", "internal_label_leak", "ban_risk_or_unverified_block",
+                "manual_delete",
+            }:
+                quality_errors.append(rec)
+    except Exception:
+        quality_errors = list(missing_tweet_errors)
 
     reviews_dir = dirs["state"] / "daily_reviews"
     reviews_dir.mkdir(parents=True, exist_ok=True)
@@ -616,9 +657,13 @@ def cmd_report() -> int:
         "reviewed_at_jst": now_jst.isoformat(),
         "window_start_jst": start_jst.isoformat(),
         "window_end_jst": now_jst.isoformat(),
-        "ranking": "impressions_desc",
+        "ranking": "impressions_and_growth",
         "reviewed_count": len(rows),
-        "top3": top3,
+        "top_impressions_3": top3,
+        "top_growth_3": growth_top3,
+        "bottom_3": bottom3,
+        "quality_errors": quality_errors[-20:],
+        "growth_score_weights": growth_weights,
         "all_posts": rows,
     }
     dated_file = reviews_dir / f"{now_jst:%Y-%m-%d}.json"
@@ -631,11 +676,11 @@ def cmd_report() -> int:
     for idx, r in enumerate(top3, 1):
         log(
             f"  #{idx} imp={r['impressions']} imp/h={r['impressions_per_hour']} "
-            f"eng={r['engagement_total']} type={r['type']} hook={r['hook'][:45]}"
+            f"growth={r['growth_score']} post_type={r['post_type']} hook_type={r['hook_type']}"
         )
 
-    kn_file = ROOT_DIR / "knowledge" / "viral_patterns" / "patterns.md"
-    kn_file.parent.mkdir(parents=True, exist_ok=True)
+    patterns_dir = ROOT_DIR / "knowledge" / "viral_patterns"
+    patterns_dir.mkdir(parents=True, exist_ok=True)
 
     def style_signature(value: str) -> str:
         """Learn layout signals only; never persist political claims or outrage wording."""
@@ -652,16 +697,32 @@ def cmd_report() -> int:
             f"emoji_samples={' '.join(emojis[:5]) or '-'}"
         )
 
-    heading = f"## {now_jst:%Y-%m-%d %H:%M} 24h impressions top3"
-    learning_lines = [heading]
-    for rank, r in enumerate(top3, 1):
-        learning_lines.append(
-            f"- #{rank} imp={r['impressions']} imp/h={r['impressions_per_hour']} "
-            f"eng_rate={r['engagement_rate_pct']}% time={r['posted_at_jst'][11:16]} "
-            f"type={r['type']} len={r['text_length']} style=({style_signature(r['tweet_text'])})"
+    heading = f"## {now_jst:%Y-%m-%d %H:%M} 24h review"
+    winning_lines = [heading]
+    for rank, r in enumerate(growth_top3, 1):
+        winning_lines.append(
+            f"- #{rank} topic={r['topic']} growth={r['growth_score']} imp={r['impressions']} "
+            f"post_type={r['post_type']} hook_type={r['hook_type']} axis={r['critique_axis']} "
+            f"style=({style_signature(r['text'])})"
         )
-    with open(kn_file, "a", encoding="utf-8") as f:
-        f.write("\n" + "\n".join(learning_lines) + "\n")
+    losing_lines = [heading]
+    for rank, r in enumerate(bottom3, 1):
+        losing_lines.append(
+            f"- #{rank} topic={r['topic']} growth={r['growth_score']} imp={r['impressions']} "
+            f"post_type={r['post_type']} hook_type={r['hook_type']} axis={r['critique_axis']} "
+            f"style=({style_signature(r['text'])})"
+        )
+    avoid_lines = [heading] + [
+        f"- reason={rec.get('reason','')} post_type={rec.get('post_type','')} topic={rec.get('topic_key','')}"
+        for rec in quality_errors[-5:]
+    ]
+    for filename, lines in (
+        ("winning_patterns.md", winning_lines),
+        ("losing_patterns.md", losing_lines),
+        ("avoid_patterns.md", avoid_lines),
+    ):
+        with open(patterns_dir / filename, "a", encoding="utf-8") as f:
+            f.write("\n" + "\n".join(lines) + "\n")
 
     state.update({
         "last_review_date_jst": review_date,
@@ -672,7 +733,7 @@ def cmd_report() -> int:
     })
     state_file.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    log(f"[INFO] report: learning data appended to {kn_file}")
+    log(f"[INFO] report: learning data appended to {patterns_dir}")
     log(f"[INFO] report: full review saved to {dated_file}")
     log("[INFO] report: next post generation will use the latest winning patterns")
     return 0
@@ -715,6 +776,9 @@ def cmd_status() -> int:
     print(f"X_SEARCH_QUERY       : {os.environ.get('X_SEARCH_QUERY', '(未設定)')}")
     print(f"SOURCE_SCHEDULE_SPLIT: {os.environ.get('SOURCE_SCHEDULE_SPLIT', '(未設定→true扱い)')}")
     print(f"MIN_POST_SCORE       : {os.environ.get('MIN_POST_SCORE', '(未設定→6.3)')}")
+    print(f"MAX_DAILY_POSTS      : {os.environ.get('MAX_DAILY_POSTS', '(未設定→16)')}")
+    print(f"MIN_POST_INTERVAL_MINUTES: {os.environ.get('MIN_POST_INTERVAL_MINUTES', '(未設定→45)')}")
+    print(f"TOPIC_COOLDOWN_HOURS : {os.environ.get('TOPIC_COOLDOWN_HOURS', '(未設定→4)')}")
     print(f"CATCH_UP_HOURS       : {os.environ.get('CATCH_UP_HOURS', '(未設定→24)')}")
     print(f"MAX_POSTS_PER_RUN    : {os.environ.get('MAX_POSTS_PER_RUN', '(未設定→1)')}")
     print(f"OPENAI_MODEL_DEFAULT : {os.environ.get('OPENAI_MODEL_DEFAULT', '(未設定→gpt-5-nano)')}")

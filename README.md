@@ -246,16 +246,35 @@ local_bot.py            ローカル運用エントリポイント
 src/
   post.py               投稿処理本体（diagram固定）
   news.py               RSS取得
+  publishing_policy.py  投稿上限・間隔・分類・テーマ冷却・成長スコア
 config/
   platform_rules.json   Xの文字数ルール（X専用）
   bot_persona.md        Botのペルソナ（参照用）
   prohibited_expressions.md  禁止表現（参照用）
 knowledge/
-  viral_patterns/       伸びた投稿パターンの蓄積用（今後）
-  failed_patterns/      伸びなかったパターンの蓄積用（今後）
+  viral_patterns/       winning / losing / avoid パターン
 data/                   状態（git管理外）
 logs/                   ログ（git管理外）
 ```
+
+## 選別投稿ポリシー
+
+Botは30分ごとにニュースを監視しますが、全枠で投稿しません。JST基準で次を適用します。
+
+- `MAX_DAILY_POSTS=16`: 1日の成功投稿上限
+- `MIN_POST_INTERVAL_MINUTES=45`: 成功投稿間の最短間隔
+- `TOPIC_COOLDOWN_HOURS=4`: 同一テーマの冷却時間
+- `QUALITY_GATE_ENABLED=true` / `MIN_POST_SCORE=7.0`: 品質スコアゲート
+
+投稿タイプは `breaking_news`、`issue_diagram`、`strong_opinion`、
+`comparison_factcheck`、`morning_evening_digest` の5種類です。内部ラベルは本文へ出しません。
+テーマ履歴は `data/recent_topics.json`、最新レビューは
+`data/daily_review_latest.json`、日別レビューは `data/daily_reviews/YYYY-MM-DD.json` に保存します。
+
+毎日04:45のレビューは、上位・成長上位・下位・品質エラーを集計し、
+`knowledge/viral_patterns/` の `winning_patterns.md`、`losing_patterns.md`、
+`avoid_patterns.md` を更新します。次回生成では成功形式を最大3件、失敗・禁止ルールを
+最大5件だけ読み込み、プロンプトコストを制限します。
 
 ## 今後の拡張方針
 
