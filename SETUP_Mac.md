@@ -106,7 +106,7 @@ python local_bot.py force
    ```
    python local_bot.py force --bypass-score
    ```
-   `Posted tweet id: ...` が出て、@singa9999 に投稿が出れば成功
+   `Posted tweet id: ...` が出て、@example_account に投稿が出れば成功
 3. 常駐スタート:
    ```
    python local_bot.py daemon
