@@ -620,6 +620,8 @@ def cmd_report() -> int:
             "engagement_rate": engagement_rate,
             "impressions_per_hour": impressions_per_hour,
             "growth_score": 0.0,
+            "x_attention_score_at_post": float(h.get("x_attention_score", 0) or 0),
+            "x_unique_accounts_at_post": int(h.get("x_unique_accounts", 0) or 0),
         }
         row["growth_score"] = calculate_growth_score(row, growth_weights)
         rows.append(row)
@@ -629,6 +631,68 @@ def cmd_report() -> int:
     top3 = by_impressions[:3]
     growth_top3 = by_growth[:3]
     bottom3 = by_growth[-3:] if rows else []
+
+    def performance_breakdown(field: str) -> dict:
+        grouped = {}
+        for row in rows:
+            key = str(row.get(field, "") or "unknown")
+            grouped.setdefault(key, []).append(row)
+        return {
+            key: {
+                "count": len(values),
+                "avg_growth_score": round(sum(v["growth_score"] for v in values) / len(values), 4),
+                "avg_impressions": round(sum(v["impressions"] for v in values) / len(values), 2),
+                "avg_profile_clicks": round(sum(v["profile_clicks"] for v in values) / len(values), 2),
+            }
+            for key, values in sorted(grouped.items())
+        }
+
+    growth_median = 0.0
+    if by_growth:
+        middle = len(by_growth) // 2
+        growth_median = (
+            by_growth[middle]["growth_score"] if len(by_growth) % 2
+            else (by_growth[middle - 1]["growth_score"] + by_growth[middle]["growth_score"]) / 2
+        )
+    timing_rows = []
+    for row in rows:
+        attention = row["x_attention_score_at_post"]
+        if attention < 3.0:
+            timing = "before_attention_or_low_attention"
+        elif attention >= 7.0:
+            timing = "high_attention_or_late_followup"
+        else:
+            timing = "attention_growing"
+        timing_rows.append({
+            "tweet_id": row["tweet_id"],
+            "timing_estimate": timing,
+            "x_attention_score_at_post": attention,
+            "growth_score": row["growth_score"],
+        })
+    x_timing_analysis = {
+        "method_note": "投稿時点の集計値による推定。X注目度の時系列比較がないため断定しない。",
+        "posts": timing_rows,
+        "high_x_low_growth": [
+            row["tweet_id"] for row in rows
+            if row["x_attention_score_at_post"] >= 7.0 and row["growth_score"] < growth_median
+        ],
+        "low_x_high_growth": [
+            row["tweet_id"] for row in rows
+            if row["x_attention_score_at_post"] < 3.0 and row["growth_score"] > growth_median
+        ],
+    }
+
+    opening_counts = {}
+    for row in rows:
+        first_line = next((line.strip() for line in row["text"].splitlines() if line.strip()), "")
+        signature = re.sub(r"\d+", "#", first_line)[:40]
+        if signature:
+            opening_counts[signature] = opening_counts.get(signature, 0) + 1
+    repeated_structures = [
+        {"opening_signature": key, "count": count}
+        for key, count in sorted(opening_counts.items(), key=lambda pair: (-pair[1], pair[0]))
+        if count >= 3
+    ]
 
     quality_errors = list(missing_tweet_errors)
     attempts_file = dirs["log"] / "post_attempts.jsonl"
@@ -645,7 +709,7 @@ def cmd_report() -> int:
                 continue
             if rec.get("reason") in {
                 "relevance_gate_failed", "internal_label_leak", "ban_risk_or_unverified_block",
-                "manual_delete",
+                "unverified_x_claim", "manual_delete",
             }:
                 quality_errors.append(rec)
     except Exception:
@@ -664,6 +728,14 @@ def cmd_report() -> int:
         "bottom_3": bottom3,
         "quality_errors": quality_errors[-20:],
         "growth_score_weights": growth_weights,
+        "x_timing_analysis": x_timing_analysis,
+        "performance_breakdown": {
+            "post_type": performance_breakdown("post_type"),
+            "hook_type": performance_breakdown("hook_type"),
+            "critique_axis": performance_breakdown("critique_axis"),
+            "posted_hour_jst": performance_breakdown("posted_hour_jst"),
+        },
+        "repeated_structures": repeated_structures,
         "all_posts": rows,
     }
     dated_file = reviews_dir / f"{now_jst:%Y-%m-%d}.json"

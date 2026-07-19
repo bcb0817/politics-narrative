@@ -51,6 +51,7 @@ from publishing_policy import (
     pre_generation_skip_reason,
     topic_cooldown_skip_reason,
 )
+from x_attention import final_news_score
 
 # ---------------------------------------------------------------------------
 # 定数
@@ -615,10 +616,14 @@ def gather_candidate_news(include_x: bool = True) -> list:
             "url": link,
             "source_name": (it.get("source") or "").strip(),
             "pub_date": (it.get("pub_date") or "").strip(),
-            "x_metrics": it.get("x_metrics") if isinstance(it.get("x_metrics"), dict) else {},
-            "x_trend_score": float(it.get("x_trend_score", 0) or 0),
+            "discovered_via": list(it.get("discovered_via") or ["rss"]),
+            "x_attention_score": float(it.get("x_attention_score", 0) or 0),
+            "x_post_count": int(it.get("x_post_count", 0) or 0),
+            "x_unique_accounts": int(it.get("x_unique_accounts", 0) or 0),
+            "x_velocity_score": float(it.get("x_velocity_score", 0) or 0),
+            "x_topic_key": (it.get("x_topic_key") or "").strip(),
         })
-    return enrich_x_topics(items)
+    return items
 
 
 _GENERIC_X_TERMS = {"政治", "政府", "国会", "選挙", "日本", "ニュース"}
@@ -716,6 +721,21 @@ SOURCE_TRUST_BONUS = {
     "X検索": 0,
 }
 
+SOURCE_RELIABILITY = {
+    "内閣府公式": 10.0,
+    "NHK政治": 9.0,
+    "NHK経済": 9.0,
+    "NHK国際": 9.0,
+    "Yahoo!ニュース政治": 7.5,
+    "Yahoo!ニュース経済": 7.5,
+    "Yahoo!ニュース国際": 7.0,
+}
+
+MAJOR_IMPACT_TERMS = (
+    "法案", "成立", "採決", "判決", "公式発表", "制度改正", "外交合意",
+    "防衛", "安全保障", "関税", "災害", "辞任", "逮捕", "開戦", "停戦",
+)
+
 
 def prefilter_news(items: list, top_n: int = None) -> list:
     """優先ジャンルのキーワードでニュースを採点し、関連の高い上位だけ残す。
@@ -773,24 +793,24 @@ def prefilter_news(items: list, top_n: int = None) -> list:
 
     def kw_score(it: dict) -> float:
         text = f"{it.get('title','')} {it.get('summary','')}"
-        s = float(sum(1 for kws in GENRE_KEYWORDS.values() for kw in kws if kw in text))
-        # ソース信頼度の軽い補正
-        s += SOURCE_TRUST_BONUS.get((it.get("source_name") or "").strip(), 0)
-        # X検索候補は、累積反応ではなく経過時間補正済みの注目度を反映する。
-        if (it.get("source_name") or "").strip() == "X検索":
-            trend_weight = max(0.0, min(_env_float("X_TREND_WEIGHT", 1.0), 3.0))
-            s += float(it.get("x_trend_score", 0) or 0) * trend_weight
-        # 鮮度補正。時刻が解釈できる古い記事は候補から外し、新しい記事を優先する。
+        keyword_hits = sum(1 for kws in GENRE_KEYWORDS.values() for kw in kws if kw in text)
+        relevance = min(10.0, keyword_hits * 1.25 + (2.0 if any(t in text for t in MAJOR_IMPACT_TERMS) else 0.0))
         age = age_hours(it)
         if age is not None:
             if age > MAX_NEWS_AGE_HOURS:
                 return -999.0
-            if age <= 2:
-                s += 3.0
-            elif age <= 6:
-                s += 2.0
-            elif age <= 12:
-                s += 1.0
+            freshness = max(0.0, 10.0 * (1.0 - age / max(MAX_NEWS_AGE_HOURS, 1)))
+        else:
+            freshness = 4.0
+        source = (it.get("source_name") or "").strip()
+        reliability = SOURCE_RELIABILITY.get(source, 6.0)
+        x_attention = float(it.get("x_attention_score", 0) or 0)
+        x_weight = max(0.0, min(_env_float("X_SEARCH_WEIGHT", 0.25), 0.50))
+        s = final_news_score(relevance, freshness, x_attention, reliability, x_weight)
+        it["news_relevance_score"] = round(relevance, 3)
+        it["freshness_score"] = round(freshness, 3)
+        it["source_reliability_score"] = round(reliability, 3)
+        it["final_news_score"] = s
         # 除外・低優先テーマは大きく減点（実質除外）
         if any(t in text for t in EXCLUDED_TOPICS):
             s -= 5.0
@@ -799,12 +819,23 @@ def prefilter_news(items: list, top_n: int = None) -> list:
     scored = sorted(((kw_score(it), it) for it in deduped),
                     key=lambda x: x[0], reverse=True)
 
-    relevant = [it for s, it in scored if s > 0]
+    relevant = [
+        it for s, it in scored
+        if s >= 3.0 and float(it.get("news_relevance_score", 0) or 0) >= 2.0
+    ]
     if relevant:
-        return relevant[:top_n]
-    # 関連語ゼロでも投稿が完全に止まらないよう、除外テーマだけは外して先頭を残す
-    fallback = [it for s, it in scored if s > -5.0]
-    return fallback[:top_n]
+        selected = relevant[:top_n]
+        for item in selected:
+            log(
+                f"[INFO] Candidate score: final={item.get('final_news_score', 0)} "
+                f"relevance={item.get('news_relevance_score', 0)} "
+                f"freshness={item.get('freshness_score', 0)} "
+                f"x_attention={item.get('x_attention_score', 0)} "
+                f"reliability={item.get('source_reliability_score', 0)}"
+            )
+        return selected
+    # 関連性の弱いニュースを無理に投稿しない。
+    return []
 
 
 # ---------------------------------------------------------------------------
@@ -1275,6 +1306,9 @@ def _candidate_quality_violations(candidate: dict, news_item: dict) -> list[str]
         str(news_item.get("summary", "")),
     ])
     violations = []
+    discovered_via = set(news_item.get("discovered_via") or [])
+    if "x_search" in discovered_via and not ({"rss", "official"} & discovered_via):
+        violations.append("unverified_x_claim")
     for pattern in _META_LEAK_PATTERNS:
         if re.search(pattern, text, flags=re.IGNORECASE):
             violations.append(f"meta_leak:{pattern}")
@@ -1426,8 +1460,12 @@ def generate_candidates(news_item: dict, regeneration_attempt: int = 0) -> list:
         c.setdefault("source_url", news_item.get("url", ""))
         c["externally_corroborated"] = bool(news_item.get("externally_corroborated"))
         c["verification_sources"] = news_item.get("verification_sources", [])
-        c["x_cluster_size"] = int(news_item.get("x_cluster_size", 0) or 0)
-        c["x_trend_score"] = float(news_item.get("x_trend_score", 0) or 0)
+        c["discovered_via"] = list(news_item.get("discovered_via") or ["rss"])
+        c["x_attention_score"] = float(news_item.get("x_attention_score", 0) or 0)
+        c["x_post_count"] = int(news_item.get("x_post_count", 0) or 0)
+        c["x_unique_accounts"] = int(news_item.get("x_unique_accounts", 0) or 0)
+        c["x_velocity_score"] = float(news_item.get("x_velocity_score", 0) or 0)
+        c["final_news_score"] = float(news_item.get("final_news_score", 0) or 0)
         c["topic_key"] = news_item.get("topic_key", "")
         c["source_name"] = c.get("source_name") or news_item.get("source_name", "")
         c.setdefault("pub_date", news_item.get("pub_date", ""))
@@ -1438,8 +1476,8 @@ def generate_candidates(news_item: dict, regeneration_attempt: int = 0) -> list:
         cleaned.append(c)
     if not cleaned and rejected_violations:
         LAST_GENERATION_FAILURE_REASON = (
-            "internal_label_leak"
-            if any(v.startswith("meta_leak:") for v in rejected_violations)
+            "unverified_x_claim" if "unverified_x_claim" in rejected_violations
+            else "internal_label_leak" if any(v.startswith("meta_leak:") for v in rejected_violations)
             else "relevance_gate_failed"
         )
         if regeneration_attempt < 1:
@@ -1793,13 +1831,16 @@ def main():
     news_items = gather_candidate_news(include_x=(source_lane != "rss"))
     log(f"[INFO] News items fetched: {len(news_items)}")
 
-    # 毎時00分はRSS/公式情報、毎時30分はX Search由来の話題に分離する。
+    # 毎時00分はRSS/公式情報、毎時30分はXレーダーでも確認されたRSS話題に分離する。
     # 他者の文章・画像・動画の再アップロードは行わず、どちらも独自テキストを生成する。
     if source_split:
         if slot_minute == 0:
-            news_items = [it for it in news_items if it.get("source_name") != "X検索"]
+            pass
         elif slot_minute == 30:
-            news_items = [it for it in news_items if it.get("source_name") == "X検索"]
+            news_items = [
+                it for it in news_items
+                if "x_search" in set(it.get("discovered_via") or [])
+            ]
         else:
             news_items = []
         log(f"[INFO] Source schedule lane: {source_lane} ({len(news_items)} items)")
@@ -1826,6 +1867,10 @@ def main():
             "digest_items": digest_items,
         }]
     log(f"[INFO] News after prefilter: {len(target_news)}")
+
+    if not target_news:
+        finalize_skip("no_qualified_news", mark_attempted=True)
+        return
 
     # ニュース監視後、OpenAI生成前に日次上限と投稿間隔を判定する。
     policy_skip = pre_generation_skip_reason(
@@ -2044,9 +2089,12 @@ def main():
         "source_name": best.get("source_name", ""),
         "pub_date": best.get("pub_date", ""),
         "decision_reason": best.get("decision_reason", ""),
-        "x_cluster_size": best.get("x_cluster_size", 0),
-        "externally_corroborated": best.get("externally_corroborated", False),
-        "verification_sources": best.get("verification_sources", []),
+        "discovered_via": best.get("discovered_via", ["rss"]),
+        "x_attention_score": best.get("x_attention_score", 0.0),
+        "x_post_count": best.get("x_post_count", 0),
+        "x_unique_accounts": best.get("x_unique_accounts", 0),
+        "x_velocity_score": best.get("x_velocity_score", 0.0),
+        "final_news_score": best.get("final_news_score", 0.0),
         "openai_model": best.get("openai_model", ""),
     })
     save_recent_topic({
@@ -2054,6 +2102,7 @@ def main():
         "last_posted_at": now_jst.isoformat(),
         "tweet_id": tweet_id,
         "news_title": best.get("title", ""),
+        "major_update_signature": normalize_topic_key(best.get("title", "")),
     })
     log("[INFO] Slot and post history recorded.")
     log_attempt({

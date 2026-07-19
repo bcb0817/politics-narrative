@@ -7,7 +7,15 @@ import math
 import re
 from pathlib import Path
 from email.utils import format_datetime
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+
+from x_attention import (
+    aggregate_attention,
+    build_search_queries,
+    env_int,
+    match_topics_to_rss,
+)
 
 # リポジトリ直下（cwdに依存しない）
 _ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -27,7 +35,7 @@ def _load_env_file(path: Path):
         key = key.strip()
         value = value.strip().strip('"').strip("'")
         if key:
-            os.environ[key] = value
+            os.environ.setdefault(key, value)
 
 
 _load_env_file(_ROOT_DIR / ".env")
@@ -84,127 +92,111 @@ def _env_bool(name, default="false"):
     return os.environ.get(name, default).strip().lower() in ("true", "1", "yes")
 
 
-def fetch_x_search_items():
-    """X API v2 Recent Searchから投稿候補を取得する。
+def _save_x_search_results(topics: list[dict], queries: list[dict]) -> None:
+    state = _state_dir()
+    now = datetime.now(timezone.utc)
+    payload = {
+        "collected_at": now.isoformat(),
+        "query_count": len(queries),
+        "queries": [{"label": query.get("label", ""), "dynamic": query.get("dynamic", False)}
+                    for query in queries],
+        "topic_count": len(topics),
+        "topics": topics,
+    }
+    latest = state / "x_search_latest.json"
+    latest.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    history_dir = state / "x_search_history"
+    history_dir.mkdir(parents=True, exist_ok=True)
+    history_file = history_dir / f"{now.astimezone(ZoneInfo('Asia/Tokyo')).date().isoformat()}.jsonl"
+    with open(history_file, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
-    X_SEARCH_ENABLED=true の場合だけ実行する。X上の投稿は報道機関の記事とは
-    限らないため、事実の確定情報ではなく話題・論点を見つける補助ソースとして扱う。
-    """
+
+def fetch_x_search_topics(rss_items: list[dict]) -> list[dict]:
+    """Use X Recent Search only as a cross-account attention radar."""
     if not _env_bool("X_SEARCH_ENABLED"):
         return []
 
     bearer_token = os.environ.get("X_BEARER_TOKEN", "").strip()
     if not bearer_token:
-        print("X検索エラー: X_BEARER_TOKEN が設定されていません")
+        print("X Search unavailable -> continuing with RSS candidates")
         return []
 
-    query = os.environ.get(
-        "X_SEARCH_QUERY",
-        "(政治 OR 国会 OR 政府 OR 法案 OR 選挙) lang:ja -is:retweet -is:reply",
-    ).strip()
-    if not query:
-        print("X検索エラー: X_SEARCH_QUERY が空です")
-        return []
-
-    try:
-        max_results = int(os.environ.get("X_SEARCH_MAX_RESULTS", "20"))
-    except ValueError:
-        max_results = 20
-    max_results = max(10, min(max_results, 100))
-
-    try:
-        min_likes = max(0, int(os.environ.get("X_SEARCH_MIN_LIKES", "0")))
-    except ValueError:
-        min_likes = 0
-    try:
-        min_engagement = max(0, int(os.environ.get("X_SEARCH_MIN_ENGAGEMENT", "0")))
-    except ValueError:
-        min_engagement = 0
+    max_queries = env_int(os.environ.get("X_SEARCH_MAX_QUERIES_PER_RUN"), 5, 1, 5)
+    max_results = env_int(os.environ.get("X_SEARCH_MAX_RESULTS_PER_QUERY"), 20, 10, 100)
+    lookback_minutes = env_int(os.environ.get("X_SEARCH_LOOKBACK_MINUTES"), 90, 10, 1440)
+    min_accounts = env_int(os.environ.get("X_SEARCH_MIN_UNIQUE_ACCOUNTS"), 3, 2, 100)
+    min_posts = env_int(os.environ.get("X_SEARCH_MIN_POST_COUNT"), 3, 2, 100)
+    max_topics = env_int(os.environ.get("X_SEARCH_MAX_TOPIC_RESULTS"), 10, 1, 50)
+    queries = build_search_queries(rss_items, max_queries=max_queries)
 
     try:
         import tweepy
 
         client = tweepy.Client(bearer_token=bearer_token, wait_on_rate_limit=False)
-        response = client.search_recent_tweets(
-            query=query,
-            max_results=max_results,
-            tweet_fields=["author_id", "conversation_id", "created_at", "lang", "public_metrics"],
-        )
     except Exception as e:
-        print(f"X検索取得エラー: {e}")
+        print(f"X Search unavailable -> continuing with RSS candidates ({type(e).__name__})")
         return []
 
-    items = []
-    for tweet in response.data or []:
-        raw_text = (tweet.text or "").strip()
-        text = " ".join(raw_text.split())
-        metrics = tweet.public_metrics or {}
-        likes = int(metrics.get("like_count", 0) or 0)
-        retweets = int(metrics.get("retweet_count", 0) or 0)
-        replies = int(metrics.get("reply_count", 0) or 0)
-        quotes = int(metrics.get("quote_count", 0) or 0)
-        engagement = likes + (retweets * 2) + replies + (quotes * 2)
-        if not text or likes < min_likes or engagement < min_engagement:
-            continue
-
-        created_at = tweet.created_at
-        if created_at is not None:
-            if created_at.tzinfo is None:
-                created_at = created_at.replace(tzinfo=timezone.utc)
-            pub_date = format_datetime(created_at)
-        else:
-            pub_date = ""
-
-        # 古い累積値だけが勝たないよう、経過時間で補正した反応速度を使う。
-        if created_at is not None:
-            age_hours = max(
-                0.5,
-                (datetime.now(timezone.utc) - created_at.astimezone(timezone.utc)).total_seconds() / 3600.0,
+    all_topics = []
+    successful_queries = 0
+    start_time = datetime.now(timezone.utc) - timedelta(minutes=lookback_minutes)
+    for query in queries:
+        try:
+            response = client.search_recent_tweets(
+                query=query["query"],
+                max_results=max_results,
+                start_time=start_time,
+                expansions=["author_id"],
+                tweet_fields=["author_id", "conversation_id", "created_at", "lang", "public_metrics"],
+                user_fields=["name", "description", "verified", "created_at", "public_metrics"],
             )
-        else:
-            age_hours = 24.0
-        engagement_per_hour = engagement / age_hours
-        # 極端なバズ1件で全候補が固定されないよう対数化し、0〜10へ制限する。
-        trend_score = min(10.0, math.log1p(engagement_per_hour) * 2.0)
+            successful_queries += 1
+        except Exception as e:
+            print(f"X Search query failed: {query.get('label','')} ({type(e).__name__})")
+            continue
+        includes = getattr(response, "includes", None) or {}
+        users = {str(user.id): user for user in includes.get("users", [])}
+        posts = []
+        for tweet in response.data or []:
+            metrics = tweet.public_metrics or {}
+            author = users.get(str(tweet.author_id))
+            posts.append({
+                "tweet_id": str(tweet.id),
+                "text": (tweet.text or "").strip(),
+                "author_id": str(tweet.author_id or ""),
+                "author_name": str(getattr(author, "name", "") or ""),
+                "author_description": str(getattr(author, "description", "") or ""),
+                "author_verified": bool(getattr(author, "verified", False)),
+                "author_created_at": getattr(author, "created_at", None),
+                "author_followers": int((getattr(author, "public_metrics", None) or {}).get("followers_count", 0) or 0),
+                "created_at": tweet.created_at,
+                "is_reply": bool(getattr(tweet, "in_reply_to_user_id", None)),
+                "likes": int(metrics.get("like_count", 0) or 0),
+                "reposts": int(metrics.get("retweet_count", 0) or 0),
+                "replies": int(metrics.get("reply_count", 0) or 0),
+                "quotes": int(metrics.get("quote_count", 0) or 0),
+            })
+        all_topics.extend(aggregate_attention(
+            posts, query, min_unique_accounts=min_accounts, min_post_count=min_posts
+        ))
 
-        tweet_id = str(tweet.id)
-        emoji_samples = []
-        for symbol in re.findall(r"[\U0001F300-\U0001FAFF\u2600-\u27BF]", raw_text):
-            if symbol not in emoji_samples:
-                emoji_samples.append(symbol)
-        nonempty_lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
-        bullet_lines = sum(
-            line.startswith(("-", "・", "●", "○", "▶", "➡")) for line in nonempty_lines
-        )
-        style_hint = (
-            f"表現形式: {len(nonempty_lines) or 1}行、箇条書き{bullet_lines}行、"
-            f"絵文字{len(emoji_samples)}種"
-            + (f"（{' '.join(emoji_samples[:5])}）" if emoji_samples else "")
-            + "。主張や煽り口調ではなく、この構成情報だけを参考にする。"
-        )
-        summary = (
-            f"X上の投稿。いいね {likes}、リポスト "
-            f"{retweets}、返信 {replies}、引用 {quotes}。"
-            f"反応速度 {engagement_per_hour:.1f}/時、注目度 {trend_score:.2f}/10。{style_hint}"
-        )
-        items.append({
-            "title": text,
-            "link": f"https://x.com/i/web/status/{tweet_id}",
-            "source": "X検索",
-            "pub_date": pub_date,
-            "summary": summary,
-            "x_metrics": {
-                "likes": likes,
-                "retweets": retweets,
-                "replies": replies,
-                "quotes": quotes,
-                "engagement": engagement,
-                "engagement_per_hour": round(engagement_per_hour, 2),
-            },
-            "x_trend_score": round(trend_score, 3),
-        })
-    items.sort(key=lambda item: item.get("x_trend_score", 0), reverse=True)
-    return items
+    if successful_queries == 0:
+        print("X Search unavailable -> continuing with RSS candidates")
+        return []
+    merged = {}
+    for topic in all_topics:
+        key = topic["topic_key"]
+        current = merged.get(key)
+        if current is None or topic["x_attention_score"] > current["x_attention_score"]:
+            merged[key] = topic
+    topics = sorted(merged.values(), key=lambda row: row["x_attention_score"], reverse=True)[:max_topics]
+    _save_x_search_results(topics, queries)
+    print(f"X Search topics found: {len(all_topics)}")
+    print(f"X Search qualified topics: {len(topics)}")
+    for topic in topics[:5]:
+        print(f"X attention score applied: {topic['topic_key']} = {topic['x_attention_score']}")
+    return topics
 
 
 def load_posted_urls():
@@ -277,21 +269,24 @@ def fetch_all_items(include_x=True):
                     "source": feed["name"],
                     "pub_date": pub_date,
                     "summary": summary,
+                    "discovered_via": ["rss"],
+                    "x_attention_score": 0.0,
+                    "x_post_count": 0,
+                    "x_unique_accounts": 0,
+                    "x_velocity_score": 0.0,
                 })
 
         except Exception as e:
             print(f"{feed['name']} 取得エラー: {e}")
             continue
 
-    if include_x:
-        for item in fetch_x_search_items():
-            title = (item.get("title") or "").strip()
-            link = (item.get("link") or "").strip()
-            if not title or not link or link in seen_links or title in seen_titles:
-                continue
-            seen_links.add(link)
-            seen_titles.add(title)
-            all_items.append(item)
+    if include_x and _env_bool("X_SEARCH_ENABLED"):
+        try:
+            topics = fetch_x_search_topics(all_items)
+            all_items = match_topics_to_rss(all_items, topics)
+        except Exception as e:
+            # X is an optional attention signal. Never expose credentials or stop RSS.
+            print(f"X Search unavailable -> continuing with RSS candidates ({type(e).__name__})")
 
     return all_items
 
