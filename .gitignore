@@ -1,3 +1,21 @@
 .env
+.env.*
+!.env.example
 __pycache__/
 *.pyc
+.venv/
+venv/
+
+# Runtime data and generated artifacts
+data/
+logs/
+outputs/
+archive/
+bot.log
+
+# Local backup copies
+*.backup-*
+
+# ローカル状態・ログ（コードと分離）
+data/
+logs/
