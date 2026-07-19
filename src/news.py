@@ -135,7 +135,8 @@ def fetch_x_search_items():
 
     items = []
     for tweet in response.data or []:
-        text = " ".join((tweet.text or "").split())
+        raw_text = (tweet.text or "").strip()
+        text = " ".join(raw_text.split())
         metrics = tweet.public_metrics or {}
         likes = int(metrics.get("like_count", 0) or 0)
         retweets = int(metrics.get("retweet_count", 0) or 0)
@@ -166,10 +167,24 @@ def fetch_x_search_items():
         trend_score = min(10.0, math.log1p(engagement_per_hour) * 2.0)
 
         tweet_id = str(tweet.id)
+        emoji_samples = []
+        for symbol in re.findall(r"[\U0001F300-\U0001FAFF\u2600-\u27BF]", raw_text):
+            if symbol not in emoji_samples:
+                emoji_samples.append(symbol)
+        nonempty_lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
+        bullet_lines = sum(
+            line.startswith(("-", "・", "●", "○", "▶", "➡")) for line in nonempty_lines
+        )
+        style_hint = (
+            f"表現形式: {len(nonempty_lines) or 1}行、箇条書き{bullet_lines}行、"
+            f"絵文字{len(emoji_samples)}種"
+            + (f"（{' '.join(emoji_samples[:5])}）" if emoji_samples else "")
+            + "。主張や煽り口調ではなく、この構成情報だけを参考にする。"
+        )
         summary = (
             f"X上の投稿。いいね {likes}、リポスト "
             f"{retweets}、返信 {replies}、引用 {quotes}。"
-            f"反応速度 {engagement_per_hour:.1f}/時、注目度 {trend_score:.2f}/10。"
+            f"反応速度 {engagement_per_hour:.1f}/時、注目度 {trend_score:.2f}/10。{style_hint}"
         )
         items.append({
             "title": text,

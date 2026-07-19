@@ -637,9 +637,20 @@ def cmd_report() -> int:
     kn_file = ROOT_DIR / "knowledge" / "viral_patterns" / "patterns.md"
     kn_file.parent.mkdir(parents=True, exist_ok=True)
 
-    def compact_text(value: str, limit: int = 125) -> str:
-        value = re.sub(r"\s+", " / ", (value or "").strip())
-        return value[:limit].rstrip()
+    def style_signature(value: str) -> str:
+        """Learn layout signals only; never persist political claims or outrage wording."""
+        value = value or ""
+        lines = [line.strip() for line in value.splitlines() if line.strip()]
+        bullets = sum(line.startswith(("-", "・", "●", "○", "▶", "➡")) for line in lines)
+        emojis = []
+        for symbol in re.findall(r"[\U0001F300-\U0001FAFF\u2600-\u27BF]", value):
+            if symbol not in emojis:
+                emojis.append(symbol)
+        return (
+            f"blocks={len([b for b in re.split(r'\n\s*\n', value) if b.strip()])} "
+            f"lines={len(lines)} bullets={bullets} emoji_types={len(emojis)} "
+            f"emoji_samples={' '.join(emojis[:5]) or '-'}"
+        )
 
     heading = f"## {now_jst:%Y-%m-%d %H:%M} 24h impressions top3"
     learning_lines = [heading]
@@ -647,8 +658,7 @@ def cmd_report() -> int:
         learning_lines.append(
             f"- #{rank} imp={r['impressions']} imp/h={r['impressions_per_hour']} "
             f"eng_rate={r['engagement_rate_pct']}% time={r['posted_at_jst'][11:16]} "
-            f"type={r['type']} genre={r['genre']} axis={r['critique_axis']} len={r['text_length']} "
-            f"text「{compact_text(r['tweet_text'])}」"
+            f"type={r['type']} len={r['text_length']} style=({style_signature(r['tweet_text'])})"
         )
     with open(kn_file, "a", encoding="utf-8") as f:
         f.write("\n" + "\n".join(learning_lines) + "\n")
