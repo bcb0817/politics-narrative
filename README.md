@@ -1,152 +1,270 @@
-# politics-narrative 運用方針
+# politics-narrative
 
-## 投稿運用（24時間・catch-up方式・1runで最大1投稿トライ）
-- GitHub Actions は **30分おき（毎時 07分・37分）** に起動する。cron は**2行に分割**して発火を安定させる:
-  `- cron: '7 * * * *'` と `- cron: '37 * * * *'`
-- **GitHub Actions の schedule は必ず30分ごとに発火するとは限らない**（高負荷時に間引かれ・遅延・dropが起きる）
-- そのため Python 側で **過去 `CATCH_UP_HOURS`（既定24）時間以内の未処理スロットを catch-up** する
-- 投稿スロットは **24時間対象。毎時 07分・37分の1日48スロット**（`00:07, 00:37, … , 23:37`）
-- **深夜・早朝のスキップは廃止**（時間帯では止めない）
-- **1runあたり最大1投稿トライ**（`MAX_POSTS_PER_RUN`、既定1）。久しぶりの起動でも連投しない
-- 未処理スロットが複数あるときは **最も古い1件だけ** を処理し、残りは次以降のrunで徐々に回収する
-- **48回/日は理想の投稿トライ数**。schedule発火が落ちた場合は catch-up で徐々に回収する（48投稿を保証はしない）
-- 1スロット1投稿まで
-- **投稿成功後にだけ** `posted_slots.json` / `posted_urls.json` を更新する
-- **投稿失敗・低スコアskip では `posted_slots.json` を更新しない**（=次runで再トライ対象に残る）
-- `slot_already_posted` のスロットは従来どおり skip
-- 定期投稿・手動実行ともに diagram モード固定
-- linkモード / test投稿 / normal / dry-run / ランダムスケジュール生成 は復活させない
-- 投稿内容は政策・データ・図解中心。過度な煽り、陰謀論、差別表現、個人攻撃は禁止
 
-### 投稿しない（skip）理由
-時間帯による skip は無い。skip するのは次の場合だけ:
-`no_unprocessed_slot`（24時間以内の開始済みスロットがすべて投稿済み）/ `slot_already_posted` /
-`no_news` / `candidate_generation_failed` / `effective_score_below_threshold` /
-`ban_risk_or_unverified_block` / `post_to_x_failed` / `missing_env` / `api_error`。
+## 現在の投稿方針
 
-### 投稿可否のスコア判定
-- 最終しきい値は `MIN_POST_SCORE`（環境変数、既定 **6.3**）。`effective_score >= MIN_POST_SCORE` で投稿可。
-- **overall救済ルール**: `overall >= 8` かつ `effective_score >= 6.2` かつ `ban_risk <= 2` なら、
-  しきい値未満でも投稿可（良質だが加重で伸びにくい投稿を拾う）。
-- `effective_score` が負（BANリスク or 未検証数字ペナルティ）の場合は投稿しない（安全弁）。
-- `FORCE_POST=true` は時刻/catch-up判定のみ無視する。**スコア判定は既定で維持**。
-  `FORCE_BYPASS_SCORE=true` を併用したときだけスコア判定も無視する
-  （ただし `effective_score` が負の投稿は FORCE_BYPASS_SCORE でも出さない）。
-- skip時のログには `effective_score` / `MIN_POST_SCORE` / `overall` / `ban_risk` /
-  `type` / `genre` / `decision_reason` / `rescue_rule_applied` を必ず出力する。
+- Xへの投稿はテキスト専用。画像生成・画像アップロード機能はありません。
+- 投稿は「ニュース事実 → 文章図解 → 保守・右派寄りの批判的意見」で構成します。
+- 批判軸は減税・小さな政府、財政規律、安全保障、エネルギー安保、法秩序、少子化、国内産業、行政透明性です。
+- 特定政党の無条件な擁護ではなく、同じ原則で与野党を評価します。
 
-## 時刻判定とcatch-up
-GitHub Actions の schedule は UTC 基準で、発火が遅延・間引きされることがある。
-そのため cron 時刻そのものは投稿判定の根拠にせず、`post.py` 側で JST 現在時刻を取得し、
-**過去 `CATCH_UP_HOURS` 時間以内に開始済みで、まだ `posted_slots.json` に無いスロット**を
-未処理スロットとして検出する。最古の1件だけを今回のrunで処理する。
+日本の政治・政策ニュースを「争点の構造」として X に自動投稿する Bot。
 
-- `POST_WINDOW_MINUTES`（既定20）は「選択スロットが現在の生スロットか否か」の表示にのみ使い、
-  **catch-up対象の探索には使わない**（ウィンドウ外でも未処理なら回収対象）。
-- `MAX_POSTS_PER_RUN`（既定1）で1runの投稿トライ上限を制御する。
-- workflow では外部時刻APIに依存しないよう `DISABLE_TIME_API=true` を設定し、
-  Actions 上の JST 時刻（`datetime.now(ZoneInfo("Asia/Tokyo"))`）を使う。
+**このBotはローカル運用に移行しました。** GitHub Actions では動かしません。
+ローカルPC / ローカルサーバー上で `local_bot.py daemon` として常駐させます。
 
-> 注意: catch-up は `posted_slots.json` が run 間で確実に保持されることが前提。
-> 現状は GitHub Actions の cache に保存している。cache がmissすると未処理判定が
-> 過剰になり得るため、重複投稿が気になる場合は永続ストレージ（ブランチへのcommit等）への
-> 切り替えも検討する。
+- 対象プラットフォームは **X のみ**（Threads対応はありません）
+- `POST_ENABLED=true` にしない限り **X への実投稿は一切行われません**
 
-## 重複防止
-- `src/posted_slots.json` … 投稿済みスロット（例: `2026-06-25_00:07`）
-- `src/posted_urls.json` … 投稿済みのURL・タイトル・キーワード・型・ジャンル
-- どちらも GitHub Actions cache で復元・保存する
-- 投稿APIが成功した後にだけ記録する（失敗時は未投稿扱い）
+> テキスト投稿への移行と、catch-up 詰まり対策（attempted_slots.json）の詳しい方針は
+> [`README_運用方針.md`](./README_運用方針.md) を参照してください。
 
-## 手動実行
-- 通常の手動実行: 時刻判定あり
-- workflow_dispatch の `force_post=true`（または `FORCE_POST=true`）: 時刻判定を無視して diagram 投稿
-- test モードは復活させない
+## 全体像
 
----
+```
+local_bot.py daemon          ← 常駐。JST 毎時07分・37分に起動
+   └── src/post.py diagram   ← 1回分の投稿処理（既存ロジックそのまま）
+         ├── src/news.py     ← NHK / Yahoo!ニュース RSS取得
+         ├── OpenAI API   ← 投稿候補の生成・スコアリング
+         └── tweepy          ← X へ投稿（既定はテキスト＋スレッド返信）
 
-## このリポジトリで「やめたこと」と移行手順
+data/     posted_slots.json / attempted_slots.json / posted_urls.json（状態）
+logs/     bot.log / post_attempts.jsonl / errors.jsonl（ログ）
+```
 
-### 削除するファイル
-1. `.github/workflows/reset.yml` を削除する
-   - 削除できない場合は `schedule:` トリガーを消し、`workflow_dispatch:` のみにする
-   - 理由: `reset.yml` が `generate_schedule.py` を実行して `post.yml` をランダム生成・上書きすると固定運用が壊れるため
-2. `src/generate_schedule.py` を削除する
-   - 残す場合でも、どの workflow からも呼ばれない状態にする
+## セットアップ
 
-### 必要な Secrets（Settings → Secrets and variables → Actions）
-- `API_KEY`
-- `API_KEY_SECRET`
-- `ACCESS_TOKEN`
-- `ACCESS_TOKEN_SECRET`
-- `ANTHROPIC_API_KEY`
+前提: Python 3.12
 
-### 依存ライブラリ
-`requirements.txt` がある場合はそれを使う。無い場合は workflow が以下を入れる:
-`tweepy / anthropic / pillow / requests / feedparser`
+```bash
+# 1. 仮想環境
+python -m venv .venv
+# Windows:  .venv\Scripts\activate
+# macOS/Linux:  source .venv/bin/activate
 
-### 日本語フォント
-図解画像のため workflow で `fonts-noto-cjk` を導入している。
-ローカル検証する場合も Noto CJK を入れること。
+# 2. 依存パッケージ
+pip install -r requirements.txt
 
-### ニュース取り込み
-`post.py` の `gather_candidate_news()` は最小フォールバック実装。
-既存の RSS ingestion がある場合は、その出力（title / summary / url / source_name の配列）を
-この関数に差し込むこと。
+# 3. .env 作成
+cp .env.example .env        # Windows: copy .env.example .env
+# .env をエディタで開き、X APIキー4種と OPENAI_API_KEY を設定する
+```
 
----
+### .env の作り方
 
-## 投稿型（A〜L）
+`.env.example` をコピーして `.env` を作り、以下を埋めます。
 
-図解投稿の「型」を A〜L に拡張した。狙いは炎上ではなく、保存・引用リポスト・返信。
+| 変数 | 内容 |
+|---|---|
+| `API_KEY` / `API_KEY_SECRET` | X API の Consumer Keys |
+| `ACCESS_TOKEN` / `ACCESS_TOKEN_SECRET` | X API の Access Token |
+| `X_BEARER_TOKEN` | X API v2 Recent Search用のBearer Token |
+| `X_SEARCH_ENABLED` | `true`でX Searchをニュース候補収集に追加（既定 `false`） |
+| `OPENAI_API_KEY` | OpenAI API キー（候補生成に必須） |
+| `POST_ENABLED` | **`true` にしない限り実投稿されない**（既定 false） |
 
-- A=対比型 / B=数字インパクト型 / C=誤解訂正型 / D=争点整理型 / E=未来警告型
-- F=争点問いかけ型
-- G=誰が得するか型 / H=負担の見える化型 / I=海外比較型
-- J=世代間構造型 / K=政策の副作用型 / L=ニュースの裏にある制度型
+`.env` は `.gitignore` 済みです。**絶対にコミットしないでください。**
 
-`POST_TYPES`（`src/post.py`）のキー順がそのまま生成ツールの `type` enum になる。
-型を増減するときは `POST_TYPES` を編集すれば enum も自動で揃う。
+### X Searchを有効にする
 
-## F=争点問いかけ型の安全ルール
+X Developer PortalでBearer Tokenを取得し、`.env`へ次を追加します。
 
-F型は「最後に1つだけ問いを置く」型。返信・引用を増やすのが目的。
+```dotenv
+X_SEARCH_ENABLED=true
+X_BEARER_TOKEN=ここにBearer Token
+X_SEARCH_QUERY=(政治 OR 国会 OR 政府 OR 法案 OR 選挙) lang:ja -is:retweet -is:reply
+X_SEARCH_MAX_RESULTS=20
+X_SEARCH_MIN_LIKES=0
+X_SEARCH_MIN_ENGAGEMENT=0
+X_TREND_WEIGHT=1.0
+X_REQUIRE_EXTERNAL_CORROBORATION=true
+SOURCE_SCHEDULE_SPLIT=true
+```
 
-- 単なる「あなたはどう思いますか？」は禁止。必ず争点（線引き・優先順位・負担配分）を提示してから問う。
-- 良い問いの例:「これは支援なのか、将来世代への負担移転なのか。あなたはどう見ますか？」
-- 政党・政治家・個人への攻撃に誘導しない。
-- 投票先・投票行動・選挙手続きに関する問いは禁止。
-- 災害・事件事故・民族/国籍/宗教対立を招きやすいテーマでは F型を使わない。
-- F型は採点で増えすぎないよう抑制している（直近10投稿に3回以上で減点）。
+X Searchの投稿は話題・論点を探す補助ソースとして扱い、RSSと同じ候補一覧へ
+追加されます。いいね、リポスト、返信、引用を経過時間で補正した注目度により、
+短時間で反応が伸びている政治話題を優先します。実投稿前には既存の関連度、
+品質スコア、BANリスク審査を通り、X上の未確認情報を事実として断定しません。
 
-## 投稿本文・数字・スコアの方針
+複数のX投稿は共通する政策語・固有語で話題クラスタにまとめられます。RSS報道と
+共通語があるクラスタだけを外部確認済みとして採用し、反応速度と複数投稿での
+共通言及から「なぜ伸びているか」を生成材料へ追加します。投稿形式は常に
+久世ゆい独自の通常投稿で、引用ポストは行いません。
 
-- 投稿本文に URL は入れない（画像と本文で完結させる）。
-- ソース不明（ニュース本文に根拠がない）数字は使わない。使った場合は `uses_unverified_number=true` とし、採点で大きく減点する。
-- 本文の狙いは「怒らせる」ことではなく「争点を一言で言い直したくなる状態」を作ること。
-- スコアは反応の取りやすさ（引用・保存・初速）を重く見た加重平均で評価する。
-  追加項目: early_reaction_likelihood / quote_angle_strength / visual_clarity /
-  policy_structure_value / evergreen_value / source_trust。
-- **低スコア投稿はスキップする。** 48スロットが空いていても、実効スコアが投稿閾値
-  （`SCORE_POST`）未満なら投稿しない。スロットを埋めること自体は目的ではない。
-- ニュースの事前選別（`prefilter_news`）では、投稿済みURL・重複タイトル・除外テーマ
-  （`EXCLUDED_TOPICS`）を外し、ソース信頼度で軽く補正する。
-  選別件数は環境変数 `PREFILTER_TOP_N`（未指定なら4）で調整できる。
+`SOURCE_SCHEDULE_SPLIT=true` の場合、毎時00分はRSS・官公庁公式情報を基にした
+独自テキスト、毎時30分は外部確認済みのX Search話題を基にした独自テキストを
+生成します。他者の文章、画像、動画をダウンロードして再投稿する機能はありません。
 
-## 図解画像サイズ（A/Bテスト）
+## 初回だけ: init-state（重要）
 
-図解画像は `DIAGRAM_PRESET` で切り替えられる。
+```bash
+python local_bot.py init-state
+```
 
-- `landscape`（既定）: 1200x675（X タイムライン向け 16:9）
-- `vertical`: 1080x1350（保存・縦長シェア向け 4:5）
+この Bot には「過去 `CATCH_UP_HOURS`（既定24時間）の未処理スロットを古い順に回収する」
+catch-up 仕様があります。GitHub Actions 運用では意図された挙動でしたが、
+ローカル移行の初回起動時に `posted_slots.json` が空だと、
+**過去24時間分（最大48スロット）のバックログ投稿が始まってしまいます。**
 
-未指定時は landscape のまま。将来 `DIAGRAM_PRESET=vertical` で縦長図解の反応を
-A/Bテストできる。文字はピクセル幅で折り返すため、長文でもはみ出しにくい
-（タイトル・結論は最大2行、対比カラムは各4項目・1項目2行まで）。
+`init-state` は、過去24時間以内に開始済みのスロットを「処理済み」として登録し
+（実投稿はしません）、以後は未来の 07分/37分 スロットから通常運用にします。
 
-## ニュース取り込み
+**ローカルで初めて動かす前に必ず1回実行してください。**
 
-`src/post.py` の `gather_candidate_news()` は `src/news.py` の `fetch_all_items()` を使う
-（NHK 政治/経済/国際・Yahoo! 政治/経済/国際）。
-`fetch_news()` は取得時に投稿済みURLを記録してしまうため **使わない**。
-投稿済み記録は、投稿API成功後に `save_post_record()` / `mark_slot_posted()` でのみ更新する。
+## 使い方
+
+```bash
+# 状態確認（次回実行時刻・件数・設定値・直近投稿）
+python local_bot.py status
+
+# 1回だけ通常実行（スロット判定あり）
+python local_bot.py once
+
+# 強制投稿（スロット判定なし。スコアゲートは有効）
+python local_bot.py force
+
+# 強制投稿＋スコアゲート無視（effective_score < 0 は投稿しない）
+python local_bot.py force --bypass-score
+
+# 常駐（JST 毎時07分・37分に実行。Ctrl+C で終了）
+python local_bot.py daemon
+```
+
+### 動作確認の推奨手順
+
+1. `.env` を作成（`POST_ENABLED=false` のまま）
+2. `python local_bot.py init-state`
+3. `python local_bot.py status`
+4. `python local_bot.py force` → 候補生成・スコア判定・本文組み立てまで動く。
+   `logs/bot.log` と `logs/post_attempts.jsonl` を確認。**Xには投稿されない。**
+5. 問題なければ `.env` の `POST_ENABLED=true` に変更して運用開始
+
+## POST_ENABLED について
+
+- `POST_ENABLED=false`（既定）: 候補生成・スコア判定・本文組み立てまでは実行し、
+  **X への実投稿だけを直前で止めます。** ログに
+  `[INFO] POST_ENABLED=false -> X posting skipped` と出ます。
+  この場合、スロットは投稿済みになりません。
+- `POST_ENABLED=true`: 実投稿します。
+- これは旧 dry-run モードの復活ではありません。mode は diagram 固定のまま、
+  環境変数による安全弁です。
+
+## 常駐方法（OS別）
+
+### Windows
+
+- 簡単な方法: ターミナル（PowerShell）を開いたままにする
+  ```powershell
+  .venv\Scripts\activate
+  python local_bot.py daemon
+  ```
+- タスクスケジューラを使う場合: 「タスクの作成」→ トリガー「ログオン時」→
+  操作でプログラム `C:\path\to\repo\.venv\Scripts\python.exe`、
+  引数 `local_bot.py daemon`、開始（作業）フォルダをリポジトリ直下に設定。
+
+### macOS
+
+- 簡単な方法: ターミナル常駐（`python local_bot.py daemon`）
+- launchd を使う場合: `~/Library/LaunchAgents/` に plist を置き、
+  `ProgramArguments` に venv の python と `local_bot.py daemon`、
+  `WorkingDirectory` にリポジトリ直下を指定して `launchctl load`。
+
+### Linux
+
+systemd の例（`/etc/systemd/system/politics-narrative.service`）:
+
+```ini
+[Unit]
+Description=politics-narrative X bot
+After=network-online.target
+
+[Service]
+WorkingDirectory=/path/to/politics-narrative
+ExecStart=/path/to/politics-narrative/.venv/bin/python local_bot.py daemon
+Restart=on-failure
+User=youruser
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl enable --now politics-narrative
+```
+
+## ログの確認方法
+
+| ファイル | 内容 |
+|---|---|
+| `logs/bot.log` | 実行ログ全般（起動時刻、モード、選択slot、skip理由、tweet_id、次回実行時刻） |
+| `logs/post_attempts.jsonl` | 投稿トライの構造化記録（1行1JSON。decision / reason / score など） |
+| `logs/errors.jsonl` | エラーの構造化記録 |
+
+```bash
+# 直近のログを見る
+tail -50 logs/bot.log          # Windows: Get-Content logs\bot.log -Tail 50
+```
+
+## 投稿されないときの確認項目
+
+1. `python local_bot.py status` で `POST_ENABLED` が `true` になっているか
+2. `logs/bot.log` の `Skip reason:` を確認
+   - `no_unattempted_slot` … その時間帯のスロットはすべてトライ済み（正常）
+   - `post_disabled` … `POST_ENABLED=false`
+   - `effective_score_below_threshold` … スコアが `MIN_POST_SCORE`（既定6.3）未満
+   - `ban_risk_or_unverified_block` … BANリスク/未検証数字による安全弁（仕様どおり）
+   - `no_news` … RSS取得失敗。ネットワークを確認
+   - `post_to_x_failed` … X APIエラー。`logs/errors.jsonl` を確認
+3. X APIキー・`OPENAI_API_KEY` が `.env` に正しく設定されているか
+4. daemon が実際に動いているか（`logs/bot.log` に `daemon: next run at ...` が出ているか）
+
+## 状態ファイルの移行（旧 → 新）
+
+状態ファイルの置き場所を `src/` から `data/` に変更しました。
+
+- 新: `data/posted_slots.json` / `data/posted_urls.json`
+- 旧: `src/posted_slots.json` / `src/posted_urls.json`
+
+旧ファイルが残っていて新ファイルがまだ無い場合、**初回実行時に自動でコピー移行**されます。
+手動で移行する場合は旧ファイルを `data/` にコピーしてください。
+GitHub Actions cache に入っていた状態は引き継げないため、代わりに `init-state` を使ってください。
+
+## 安全設計（維持している方針）
+
+- mode は diagram 固定（link / test / normal / dry-run は復活させない）
+- catch-up は `attempted_slots.json` 基準。低スコアskipも attempted に記録して詰まりを防ぐ
+- 過度な煽り、陰謀論、差別表現、個人攻撃、政党罵倒は禁止（`config/prohibited_expressions.md`）
+- スコア判定を維持: `MIN_POST_SCORE` / `FORCE_POST` / `FORCE_BYPASS_SCORE`
+- `effective_score < 0` の候補は強制でも投稿しない
+- 投稿成功後にだけ投稿済み記録を保存する（失敗時は slot を posted 扱いにしない）
+- 1 run の投稿トライは `MAX_POSTS_PER_RUN`（既定1）まで
+
+## ディレクトリ構成
+
+```
+local_bot.py            ローカル運用エントリポイント
+src/
+  post.py               投稿処理本体（diagram固定）
+  news.py               RSS取得
+config/
+  platform_rules.json   Xの文字数ルール（X専用）
+  bot_persona.md        Botのペルソナ（参照用）
+  prohibited_expressions.md  禁止表現（参照用）
+knowledge/
+  viral_patterns/       伸びた投稿パターンの蓄積用（今後）
+  failed_patterns/      伸びなかったパターンの蓄積用（今後）
+data/                   状態（git管理外）
+logs/                   ログ（git管理外）
+```
+
+## 今後の拡張方針
+
+現在、生成方針は `src/post.py` 内のプロンプトに直書きされています。
+今後は `config/bot_persona.md`（ペルソナ・トーン）、`config/prohibited_expressions.md`、
+`knowledge/viral_patterns/`・`knowledge/failed_patterns/`（伸びた/伸びなかった投稿パターン）を
+Bot に読み込ませ、生成品質を実績ベースで改善していく設計へ拡張する予定です。
+
+## GitHub Actions について
+
+GitHub Actions での運用は廃止しました。`.github/workflows/post.yml` は削除済みです。
+もしリポジトリに残っている場合は削除してください（scheduleが発火すると二重投稿の原因になります）。

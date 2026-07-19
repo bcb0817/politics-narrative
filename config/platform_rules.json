@@ -1,0 +1,8 @@
+{
+  "x": {
+    "max_chars": 280,
+    "safe_chars": 260,
+    "thread_enabled": true,
+    "thread_safe_chars": 260
+  }
+}
