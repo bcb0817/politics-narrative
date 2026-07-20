@@ -284,6 +284,24 @@ Botは30分ごとにニュースを監視しますが、全枠で投稿しませ
 `avoid_patterns.md` を更新します。次回生成では成功形式を最大3件、失敗・禁止ルールを
 最大5件だけ読み込み、プロンプトコストを制限します。
 
+## OpenAIモデル設定の安全な更新
+
+`.env` のAPIキーや他の設定を維持したまま、モデル名・推論設定・料金単価だけを更新できます。
+実行前に `.env.backup.YYYYMMDD-HHMMSS` が自動作成されます。
+
+```powershell
+# 変更内容だけ確認
+.\production\update_openai_models.ps1 -Profile recommended -WhatIf
+
+# 推奨構成: gpt-5.4-nano + gpt-5.4-mini
+.\production\update_openai_models.ps1 -Profile recommended
+
+# 最新世代重視: gpt-5.4-nano + gpt-5.6-luna
+.\production\update_openai_models.ps1 -Profile latest
+```
+
+更新後は `PoliticsNarrativeBot` の再起動が必要です。
+
 ## 今後の拡張方針
 
 現在、生成方針は `src/post.py` 内のプロンプトに直書きされています。
