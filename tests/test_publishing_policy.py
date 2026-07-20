@@ -120,6 +120,19 @@ class PublishingPolicyTests(unittest.TestCase):
         })
         self.assertTrue(any(value.startswith("meta_leak:") for value in violations))
 
+    def test_flag_emojis_count_for_required_variety(self):
+        text = (
+            "🇯🇵🇬🇧🇮🇹 共同開発の論点\n\n"
+            "政府発表を基に、装備開発の責任分担を確認します。\n\n"
+            "仕様変更と説明責任を明確にする必要があります。十分な長さの本文です。"
+        )
+        violations = post._candidate_quality_violations(
+            {"tweet_text": text},
+            {"title": "共同開発を発表", "summary": "政府が説明"},
+        )
+        self.assertNotIn("missing_required_emojis", violations)
+        self.assertNotIn("insufficient_emoji_variety", violations)
+
     def test_same_hook_does_not_continue_three_times(self):
         news = {"title": "予算100億円を発表", "summary": ""}
         history = [{"hook_type": "number"}, {"hook_type": "number"}]

@@ -1315,7 +1315,9 @@ _SECURITY_OUTPUT_TERMS = ["国益", "防衛", "同盟", "抑止", "安全保障"
 _ECONOMIC_NEWS_TERMS = ["経済", "景気", "賃金", "物価", "企業", "産業", "関税", "貿易"]
 _UNRELATED_SECURITY_TERMS = ["治安悪化", "犯罪増加", "入管強化"]
 
-_EMOJI_PATTERN = re.compile(r"[\U0001F300-\U0001FAFF\u2600-\u27BF]")
+_EMOJI_PATTERN = re.compile(
+    r"[\U0001F1E6-\U0001F1FF\U0001F300-\U0001FAFF\u2600-\u27BF]"
+)
 
 
 def _candidate_quality_violations(candidate: dict, news_item: dict) -> list[str]:
@@ -1467,6 +1469,10 @@ def generate_candidates(news_item: dict, regeneration_attempt: int = 0) -> list:
             continue
         lines = c.get("tweet_lines") or []
         c["tweet_text"] = "\n".join(str(x) for x in lines).strip()
+        if "\n\n" not in c["tweet_text"]:
+            nonempty_lines = [line.strip() for line in c["tweet_text"].splitlines() if line.strip()]
+            if len(nonempty_lines) >= 3:
+                c["tweet_text"] = "\n\n".join(nonempty_lines)
         if not c["tweet_text"]:
             continue
         violations = _candidate_quality_violations(c, news_item)
