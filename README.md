@@ -267,7 +267,11 @@ Botは30分ごとにニュースを監視しますが、全枠で投稿しませ
 - `MAX_DAILY_POSTS=16`: 1日の成功投稿上限
 - `MIN_POST_INTERVAL_MINUTES=45`: 成功投稿間の最短間隔
 - `TOPIC_COOLDOWN_HOURS=4`: 同一テーマの冷却時間
+- `LOW_QUALITY_FALLBACK_HOURS=3`: 3時間以上成功投稿がなければ得点・型・テーマ枠を緩和
 - `QUALITY_GATE_ENABLED=true` / `MIN_POST_SCORE=7.0`: 品質スコアゲート
+
+低品質フォールバック中も、RSS確認、政治関連性、重複URL、未確認情報、BANリスク、
+1日16件の上限は緩和しません。
 
 投稿タイプは `breaking_news`、`issue_diagram`、`strong_opinion`、
 `comparison_factcheck`、`morning_evening_digest` の5種類です。内部ラベルは本文へ出しません。

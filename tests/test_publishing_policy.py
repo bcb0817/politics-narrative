@@ -22,6 +22,7 @@ from publishing_policy import (  # noqa: E402
     classify_hook_type,
     normalize_topic_key,
     pre_generation_skip_reason,
+    stagnation_fallback_active,
     topic_cooldown_skip_reason,
 )
 import post  # noqa: E402
@@ -56,6 +57,27 @@ class PublishingPolicyTests(unittest.TestCase):
             pre_generation_skip_reason(history, self.now, 16, 45),
             "minimum_post_interval",
         )
+
+    def test_low_quality_fallback_starts_at_three_hours(self):
+        before = [{
+            "tweet_id": "1",
+            "posted_at_jst": (self.now - timedelta(hours=2, minutes=59)).isoformat(),
+        }]
+        at_threshold = [{
+            "tweet_id": "1",
+            "posted_at_jst": (self.now - timedelta(hours=3)).isoformat(),
+        }]
+        self.assertFalse(stagnation_fallback_active(before, self.now, 3))
+        self.assertTrue(stagnation_fallback_active(at_threshold, self.now, 3))
+
+    def test_low_quality_fallback_requires_success_history(self):
+        self.assertFalse(stagnation_fallback_active([], self.now, 3))
+        failed = [{"posted_at_jst": (self.now - timedelta(hours=5)).isoformat()}]
+        self.assertFalse(stagnation_fallback_active(failed, self.now, 3))
+
+    def test_low_quality_fallback_relaxes_only_score_threshold(self):
+        self.assertFalse(post._score_gate_allows(3.0, False, False, False))
+        self.assertTrue(post._score_gate_allows(3.0, False, False, True))
 
     def test_topic_cooldown_within_four_hours(self):
         rows = [{

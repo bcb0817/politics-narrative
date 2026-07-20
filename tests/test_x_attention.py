@@ -99,6 +99,19 @@ class XAttentionTests(unittest.TestCase):
         }], top_n=1)
         self.assertEqual(rows, [])
 
+    def test_low_quality_prefilter_still_requires_political_relevance(self):
+        nonpolitical = {
+            "title": "浴室の換気扇を長持ちさせる方法",
+            "summary": "住宅設備の日常的な手入れを紹介",
+            "url": "https://example.test/lifestyle-fallback",
+            "source_name": "Yahoo!ニュース政治",
+            "pub_date": "",
+            "x_attention_score": 0,
+        }
+        self.assertEqual(
+            post.prefilter_news([nonpolitical], top_n=1, allow_low_quality=True), []
+        )
+
     def test_single_account_does_not_qualify(self):
         topics = aggregate_attention(
             self._posts(("same", "same", "same")), self.query,

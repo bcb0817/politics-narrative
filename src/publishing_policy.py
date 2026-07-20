@@ -97,6 +97,23 @@ def successful_posts_today(history: list[dict], now_jst: datetime) -> list[dict]
     return out
 
 
+def stagnation_fallback_active(
+    history: list[dict], now_jst: datetime, fallback_hours: float
+) -> bool:
+    """Enable score relaxation after a long gap since the last successful post."""
+    successful_times = []
+    for row in history:
+        if not row.get("tweet_id"):
+            continue
+        dt = parse_jst(row.get("posted_at_jst") or row.get("posted_at"))
+        if dt and dt <= now_jst:
+            successful_times.append(dt)
+    if not successful_times:
+        return False
+    elapsed = now_jst - max(successful_times)
+    return elapsed >= timedelta(hours=max(0.0, fallback_hours))
+
+
 def pre_generation_skip_reason(
     history: list[dict], now_jst: datetime, max_daily_posts: int, min_interval_minutes: int
 ) -> str | None:

@@ -49,6 +49,7 @@ from publishing_policy import (
     normalize_topic_key,
     post_type_quota_reached,
     pre_generation_skip_reason,
+    stagnation_fallback_active,
     topic_cooldown_skip_reason,
 )
 from x_attention import final_news_score
@@ -305,6 +306,7 @@ MIN_POST_SCORE = _env_float("MIN_POST_SCORE", 6.3)
 MAX_DAILY_POSTS = max(0, _env_int("MAX_DAILY_POSTS", 16))
 MIN_POST_INTERVAL_MINUTES = max(0, _env_int("MIN_POST_INTERVAL_MINUTES", 45))
 TOPIC_COOLDOWN_HOURS = max(0.0, _env_float("TOPIC_COOLDOWN_HOURS", 4.0))
+LOW_QUALITY_FALLBACK_HOURS = max(0.0, _env_float("LOW_QUALITY_FALLBACK_HOURS", 3.0))
 
 # 古いニュースの自動投稿を避ける。pubDateを解釈できる記事だけ厳密に判定し、
 # 時刻不明の記事は候補として残す。
@@ -320,6 +322,21 @@ QUALITY_GATE_ENABLED = os.environ.get(
 RESCUE_OVERALL_MIN = 8
 RESCUE_EFFECTIVE_MIN = 6.2
 RESCUE_BAN_RISK_MAX = 2
+
+
+def _score_gate_allows(
+    effective_score: float,
+    force_bypass: bool,
+    rescue_rule_applied: bool,
+    stagnation_fallback: bool,
+) -> bool:
+    """Relax only the performance score; safety checks run before this gate."""
+    return bool(
+        force_bypass
+        or stagnation_fallback
+        or effective_score >= MIN_POST_SCORE
+        or rescue_rule_applied
+    )
 
 OPENAI_MODEL_DEFAULT = os.getenv("OPENAI_MODEL_DEFAULT", "gpt-5-nano").strip() or "gpt-5-nano"
 OPENAI_MODEL_IMPORTANT = os.getenv("OPENAI_MODEL_IMPORTANT", "gpt-5-mini").strip() or "gpt-5-mini"
@@ -737,7 +754,7 @@ MAJOR_IMPACT_TERMS = (
 )
 
 
-def prefilter_news(items: list, top_n: int = None) -> list:
+def prefilter_news(items: list, top_n: int = None, allow_low_quality: bool = False) -> list:
     """優先ジャンルのキーワードでニュースを採点し、関連の高い上位だけ残す。
     LLM呼び出し回数を抑え、関連度も上げる。
 
@@ -819,9 +836,12 @@ def prefilter_news(items: list, top_n: int = None) -> list:
     scored = sorted(((kw_score(it), it) for it in deduped),
                     key=lambda x: x[0], reverse=True)
 
+    minimum_final = 0.0 if allow_low_quality else 3.0
+    minimum_relevance = 0.5 if allow_low_quality else 2.0
     relevant = [
         it for s, it in scored
-        if s >= 3.0 and float(it.get("news_relevance_score", 0) or 0) >= 2.0
+        if s >= minimum_final
+        and float(it.get("news_relevance_score", 0) or 0) >= minimum_relevance
     ]
     if relevant:
         selected = relevant[:top_n]
@@ -1808,6 +1828,13 @@ def main():
 
     # --- 素材収集 ---
     history = load_post_history()
+    stagnation_fallback = stagnation_fallback_active(
+        history, now_jst, LOW_QUALITY_FALLBACK_HOURS
+    )
+    log(
+        f"[INFO] Low-quality fallback after hours: {LOW_QUALITY_FALLBACK_HOURS:g} "
+        f"active={str(stagnation_fallback).lower()}"
+    )
     # FORCE_POSTは時刻スロットのソース分割を適用せず、混合候補で安全に検証できるようにする。
     source_split = _env_bool("SOURCE_SCHEDULE_SPLIT", "true") and not force
     slot_minute = int(slot_dt.minute)
@@ -1816,27 +1843,30 @@ def main():
         if slot_minute == 0:
             source_lane = "rss"
         elif slot_minute == 30:
-            x_every_hours = max(1, _env_int("X_SEARCH_EVERY_HOURS", 1))
-            first_hour = min(ACTIVE_HOURS) if ACTIVE_HOURS else 0
-            if (slot_dt.hour - first_hour) % x_every_hours != 0:
-                log(f"[INFO] X Search interval skip: every {x_every_hours} hours")
-                finalize_skip("x_search_interval", mark_attempted=True)
-                return
-            source_lane = "x_search"
+            if stagnation_fallback:
+                source_lane = "rss_fallback"
+            else:
+                x_every_hours = max(1, _env_int("X_SEARCH_EVERY_HOURS", 1))
+                first_hour = min(ACTIVE_HOURS) if ACTIVE_HOURS else 0
+                if (slot_dt.hour - first_hour) % x_every_hours != 0:
+                    log(f"[INFO] X Search interval skip: every {x_every_hours} hours")
+                    finalize_skip("x_search_interval", mark_attempted=True)
+                    return
+                source_lane = "x_search"
         else:
             finalize_skip("unsupported_minute", mark_attempted=True)
             return
 
     # RSS枠では有料のX Searchを呼ばない。X枠では事実確認用RSSも同時取得する。
-    news_items = gather_candidate_news(include_x=(source_lane != "rss"))
+    news_items = gather_candidate_news(include_x=(source_lane not in {"rss", "rss_fallback"}))
     log(f"[INFO] News items fetched: {len(news_items)}")
 
     # 毎時00分はRSS/公式情報、毎時30分はXレーダーでも確認されたRSS話題に分離する。
     # 他者の文章・画像・動画の再アップロードは行わず、どちらも独自テキストを生成する。
     if source_split:
-        if slot_minute == 0:
+        if source_lane in {"rss", "rss_fallback"}:
             pass
-        elif slot_minute == 30:
+        elif source_lane == "x_search":
             news_items = [
                 it for it in news_items
                 if "x_search" in set(it.get("discovered_via") or [])
@@ -1855,7 +1885,11 @@ def main():
         if value.strip().isdigit() and 0 <= int(value) <= 23
     }
     digest_window = now_jst.hour in digest_hours and slot_dt.minute == 0
-    target_news = prefilter_news(news_items, top_n=3 if digest_window else None)
+    target_news = prefilter_news(
+        news_items,
+        top_n=3 if digest_window else None,
+        allow_low_quality=stagnation_fallback,
+    )
     if digest_window and len(target_news) >= 2:
         digest_items = target_news[:3]
         target_news = [{
@@ -1908,14 +1942,16 @@ def main():
         enriched["post_type"] = classify_post_type(enriched, now_jst)
         enriched["hook_type"] = classify_hook_type(enriched, history)
         enriched["critique_axis"] = classify_critique_axis(enriched)
-        if post_type_quota_reached(enriched["post_type"], history, now_jst):
+        if not stagnation_fallback and post_type_quota_reached(
+            enriched["post_type"], history, now_jst
+        ):
             blocked_for_type_quota = True
             continue
         cooldown_reason = topic_cooldown_skip_reason(
             enriched["topic_key"], enriched.get("title", ""), recent_topics,
             now_jst, TOPIC_COOLDOWN_HOURS,
         )
-        if cooldown_reason:
+        if cooldown_reason and not stagnation_fallback:
             blocked_for_topic = True
             continue
         eligible_news.append(enriched)
@@ -1994,12 +2030,18 @@ def main():
         log("[INFO] QUALITY_GATE_ENABLED=false -> 品質スコア判定をスキップ（実績学習運用）")
         can_post = True
     else:
-        can_post = (
-            force_bypass_score
-            or best_score >= MIN_POST_SCORE
-            or rescue_rule_applied
+        can_post = _score_gate_allows(
+            best_score,
+            force_bypass_score,
+            rescue_rule_applied,
+            stagnation_fallback,
         )
         log(f"[INFO] Rescue rule applied: {str(rescue_rule_applied).lower()}")
+        if stagnation_fallback:
+            log(
+                "[INFO] Low-quality fallback applied: score threshold and "
+                "topic/type quota relaxed; safety gates remain active"
+            )
         if force_bypass_score:
             log("[INFO] FORCE_BYPASS_SCORE=true -> score gate bypassed")
 
@@ -2095,6 +2137,7 @@ def main():
         "x_unique_accounts": best.get("x_unique_accounts", 0),
         "x_velocity_score": best.get("x_velocity_score", 0.0),
         "final_news_score": best.get("final_news_score", 0.0),
+        "low_quality_fallback": stagnation_fallback,
         "openai_model": best.get("openai_model", ""),
     })
     save_recent_topic({
@@ -2117,6 +2160,7 @@ def main():
         "ban_risk": ban,
         "post_format": post_format,
         "openai_model": best.get("openai_model", ""),
+        "low_quality_fallback": stagnation_fallback,
         "attempted_recorded": True,
         "posted_recorded": True,
     })
