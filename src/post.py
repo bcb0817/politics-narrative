@@ -42,7 +42,6 @@ from publishing_policy import (
     CRITIQUE_AXES,
     HOOK_TYPES,
     POST_TYPE_DAILY_LIMITS,
-    budget_reached,
     classify_critique_axis,
     classify_hook_type,
     classify_post_type,
@@ -53,6 +52,12 @@ from publishing_policy import (
     topic_cooldown_skip_reason,
 )
 from x_attention import final_news_score
+from model_router import ModelRouter, is_auth_error
+from openai_usage import (
+    load_usage_state,
+    record_usage,
+    today_usage,
+)
 
 # ---------------------------------------------------------------------------
 # 定数
@@ -115,6 +120,8 @@ POSTED_SLOTS_FILE = STATE_DIR / "posted_slots.json"     # 投稿成功したslot
 ATTEMPTED_SLOTS_FILE = STATE_DIR / "attempted_slots.json"  # 投稿トライ済みslot（成功＋低スコアskip等）
 POSTED_URLS_FILE = STATE_DIR / "posted_urls.json"       # 投稿履歴（post_history）
 OPENAI_USAGE_FILE = STATE_DIR / "openai_usage.json"      # OpenAI推定使用量・予算管理
+OPENAI_USAGE_HISTORY_DIR = STATE_DIR / "openai_usage_history"
+OPENAI_PRICING_FILE = ROOT_DIR / "config" / "openai_model_pricing.json"
 RECENT_TOPICS_FILE = STATE_DIR / "recent_topics.json"    # トピック冷却状態
 BOT_LOG_FILE = LOG_DIR / "bot.log"
 
@@ -337,13 +344,6 @@ def _score_gate_allows(
         or effective_score >= MIN_POST_SCORE
         or rescue_rule_applied
     )
-
-OPENAI_MODEL_DEFAULT = os.getenv("OPENAI_MODEL_DEFAULT", "gpt-5-nano").strip() or "gpt-5-nano"
-OPENAI_MODEL_IMPORTANT = os.getenv("OPENAI_MODEL_IMPORTANT", "gpt-5-mini").strip() or "gpt-5-mini"
-OPENAI_REASONING_EFFORT = os.getenv("OPENAI_REASONING_EFFORT", "minimal").strip().lower()
-OPENAI_MAX_OUTPUT_TOKENS = max(800, _env_int("OPENAI_MAX_OUTPUT_TOKENS", 2400))
-DAILY_IMPORTANT_MODEL_LIMIT = max(0, _env_int("DAILY_IMPORTANT_MODEL_LIMIT", 8))
-OPENAI_MONTHLY_BUDGET_USD = max(0.0, _env_float("OPENAI_MONTHLY_BUDGET_USD", 8.0))
 
 # ---------------------------------------------------------------------------
 # ログ
@@ -1053,6 +1053,11 @@ _CANDIDATE_PROPERTIES = {
     },
     "overall": {"type": "integer"},
     "decision_reason": {"type": "string"},
+    "importance_score": {"type": "number"},
+    "source_reliability_score": {"type": "number"},
+    "claim_risk": {"type": "string", "enum": ["low", "medium", "high"]},
+    "final_text": {"type": "string"},
+    "quality_score": {"type": "number"},
 }
 
 CANDIDATE_RESPONSE_SCHEMA = {
@@ -1118,11 +1123,6 @@ def _load_performance_patterns(topic_key: str = "", max_chars: int = 900) -> str
     return out[:max_chars]
 
 
-def _split_keywords(raw: str) -> list[str]:
-    parts = re.split(r"[,、;；|\n]+", raw or "")
-    return [p.strip() for p in parts if p.strip()]
-
-
 _DEFAULT_IMPORTANT_KEYWORDS = [
     "首相", "内閣", "国会", "選挙", "政権", "法案", "予算", "補正予算",
     "消費税", "所得税", "法人税", "社会保険料", "年金", "社会保障",
@@ -1134,124 +1134,33 @@ _DEFAULT_IMPORTANT_KEYWORDS = [
 
 
 def _openai_usage_state() -> dict:
-    now = datetime.now(JST)
-    month = now.strftime("%Y-%m")
-    state = _load_json(OPENAI_USAGE_FILE, {})
-    if not isinstance(state, dict) or state.get("month") != month:
-        state = {
-            "month": month,
-            "estimated_cost_usd": 0.0,
-            "input_tokens": 0,
-            "cached_input_tokens": 0,
-            "output_tokens": 0,
-            "calls": 0,
-            "important_calls": 0,
-            "days": {},
-            "models": {},
-        }
-    return state
+    return load_usage_state(OPENAI_USAGE_FILE)
 
 
 def _today_usage(state: dict) -> dict:
-    day = datetime.now(JST).date().isoformat()
-    days = state.setdefault("days", {})
-    current = days.setdefault(day, {"calls": 0, "important_calls": 0, "estimated_cost_usd": 0.0})
-    return current
+    return today_usage(state)
 
 
-def _model_rates(model: str, tier: str) -> tuple[float, float, float]:
-    """Return (uncached input, cached input, output) USD per 1M tokens.
-
-    Defaults match gpt-5-nano and gpt-5-mini. Override them in .env when using
-    another model or when pricing changes.
-    """
-    if tier == "important":
-        defaults = (0.25, 0.025, 2.00)
-        prefix = "OPENAI_IMPORTANT"
-    else:
-        defaults = (0.05, 0.005, 0.40)
-        prefix = "OPENAI_DEFAULT"
-    return (
-        _env_float(f"{prefix}_INPUT_USD_PER_1M", defaults[0]),
-        _env_float(f"{prefix}_CACHED_INPUT_USD_PER_1M", defaults[1]),
-        _env_float(f"{prefix}_OUTPUT_USD_PER_1M", defaults[2]),
+def _record_openai_usage(response, model: str, tier: str, *, fallback_used: bool = False) -> float:
+    event = record_usage(
+        response=response,
+        model=model,
+        task_type="post_generation",
+        pricing=ModelRouter(OPENAI_PRICING_FILE).pricing,
+        state_path=OPENAI_USAGE_FILE,
+        history_dir=OPENAI_USAGE_HISTORY_DIR,
+        fallback_used=fallback_used,
     )
-
-
-def _select_openai_model(news_item: dict) -> tuple[str, str, str]:
-    raw_keywords = os.getenv("OPENAI_IMPORTANT_KEYWORDS", "")
-    keywords = _split_keywords(raw_keywords) if raw_keywords.strip() else _DEFAULT_IMPORTANT_KEYWORDS
-    haystack = " ".join([
-        str(news_item.get("title", "")),
-        str(news_item.get("summary", "")),
-        str(news_item.get("source_name", "")),
-    ])
-    matched = next((kw for kw in keywords if kw and kw in haystack), "")
-    state = _openai_usage_state()
-    today = _today_usage(state)
-    can_use_important = (
-        bool(matched)
-        and DAILY_IMPORTANT_MODEL_LIMIT > 0
-        and int(today.get("important_calls", 0) or 0) < DAILY_IMPORTANT_MODEL_LIMIT
-        and OPENAI_MODEL_IMPORTANT != OPENAI_MODEL_DEFAULT
-    )
-    if can_use_important:
-        return OPENAI_MODEL_IMPORTANT, "important", matched
-    return OPENAI_MODEL_DEFAULT, "default", matched
-
-
-def _obj_value(obj, name: str, default=0):
-    if isinstance(obj, dict):
-        return obj.get(name, default)
-    return getattr(obj, name, default)
-
-
-def _record_openai_usage(response, model: str, tier: str) -> float:
-    usage = getattr(response, "usage", None)
-    input_tokens = int(_obj_value(usage, "input_tokens", 0) or 0)
-    output_tokens = int(_obj_value(usage, "output_tokens", 0) or 0)
-    input_details = _obj_value(usage, "input_tokens_details", {}) or {}
-    cached_tokens = int(_obj_value(input_details, "cached_tokens", 0) or 0)
-    cached_tokens = max(0, min(cached_tokens, input_tokens))
-    uncached_tokens = max(0, input_tokens - cached_tokens)
-    in_rate, cached_rate, out_rate = _model_rates(model, tier)
-    cost = (
-        uncached_tokens * in_rate / 1_000_000
-        + cached_tokens * cached_rate / 1_000_000
-        + output_tokens * out_rate / 1_000_000
-    )
-
-    state = _openai_usage_state()
-    today = _today_usage(state)
-    state["estimated_cost_usd"] = round(float(state.get("estimated_cost_usd", 0.0)) + cost, 8)
-    state["input_tokens"] = int(state.get("input_tokens", 0) or 0) + input_tokens
-    state["cached_input_tokens"] = int(state.get("cached_input_tokens", 0) or 0) + cached_tokens
-    state["output_tokens"] = int(state.get("output_tokens", 0) or 0) + output_tokens
-    state["calls"] = int(state.get("calls", 0) or 0) + 1
-    if tier == "important":
-        state["important_calls"] = int(state.get("important_calls", 0) or 0) + 1
-    today["calls"] = int(today.get("calls", 0) or 0) + 1
-    if tier == "important":
-        today["important_calls"] = int(today.get("important_calls", 0) or 0) + 1
-    today["estimated_cost_usd"] = round(float(today.get("estimated_cost_usd", 0.0)) + cost, 8)
-    models = state.setdefault("models", {})
-    model_rec = models.setdefault(model, {"calls": 0, "input_tokens": 0, "cached_input_tokens": 0,
-                                          "output_tokens": 0, "estimated_cost_usd": 0.0})
-    model_rec["calls"] += 1
-    model_rec["input_tokens"] += input_tokens
-    model_rec["cached_input_tokens"] += cached_tokens
-    model_rec["output_tokens"] += output_tokens
-    model_rec["estimated_cost_usd"] = round(float(model_rec["estimated_cost_usd"]) + cost, 8)
-    _save_json(OPENAI_USAGE_FILE, state)
     log(
-        f"[INFO] OpenAI usage: model={model} tier={tier} input={input_tokens} "
-        f"cached={cached_tokens} output={output_tokens} estimated_usd={cost:.6f} "
-        f"month_total_usd={state['estimated_cost_usd']:.4f}"
+        f"[INFO] OpenAI usage: model={model} tier={tier} input={event['input_tokens']} "
+        f"cached={event['cached_input_tokens']} output={event['output_tokens']} "
+        f"estimated_usd={event['estimated_cost_usd']:.6f}"
     )
-    return cost
+    return float(event["estimated_cost_usd"])
 
 
-def _call_openai(client, *, model: str, system: str, user: str, max_toks: int):
+def _call_openai(client, *, model: str, system: str, user: str, max_toks: int,
+                 reasoning_effort: str = "none"):
     kwargs = {
         "model": model,
         "instructions": system,
@@ -1267,19 +1176,9 @@ def _call_openai(client, *, model: str, system: str, user: str, max_toks: int):
         },
         "store": False,
     }
-    if OPENAI_REASONING_EFFORT and OPENAI_REASONING_EFFORT not in ("none", "off", "false"):
-        kwargs["reasoning"] = {"effort": OPENAI_REASONING_EFFORT}
-    try:
-        return client.responses.create(**kwargs)
-    except Exception as exc:
-        # A model can support a different set of reasoning-effort values. If the
-        # request itself is rejected for this option, retry once without it.
-        msg = str(exc).lower()
-        if "reasoning" in kwargs and any(x in msg for x in ("reasoning", "effort", "unsupported", "invalid")):
-            log(f"[WARN] reasoning setting rejected; retrying without it: {exc}")
-            kwargs.pop("reasoning", None)
-            return client.responses.create(**kwargs)
-        raise
+    if reasoning_effort and reasoning_effort not in ("none", "off", "false", "minimal"):
+        kwargs["reasoning"] = {"effort": reasoning_effort}
+    return client.responses.create(**kwargs)
 
 
 
@@ -1294,6 +1193,8 @@ _META_LEAK_PATTERNS = [
     r"AIとして",
     r"編集部として",
     r"投稿型",
+    r"\bgpt-[\w.\-]+\b",
+    r"(?:Model route|Route reason|route_reason|fallback_used)",
 ]
 _FINANCE_TERMS = [
     "税", "予算", "財源", "給付", "補助金", "費用", "負担", "保険料",
@@ -1372,7 +1273,7 @@ def _candidate_quality_violations(candidate: dict, news_item: dict) -> list[str]
 LAST_GENERATION_FAILURE_REASON = ""
 
 
-def generate_candidates(news_item: dict, regeneration_attempt: int = 0) -> list:
+def generate_candidates(news_item: dict, regeneration_attempt: int = 0, retries_used: int = 0) -> list:
     """Generate structured X post candidates with the OpenAI Responses API."""
     api_key = os.environ.get("OPENAI_API_KEY", "").strip()
     if not api_key:
@@ -1384,19 +1285,31 @@ def generate_candidates(news_item: dict, regeneration_attempt: int = 0) -> list:
         log(f"[ERROR] openai SDK import failed: {e}")
         return []
 
-    state = _openai_usage_state()
-    spent = float(state.get("estimated_cost_usd", 0.0) or 0.0)
-    if budget_reached(spent, OPENAI_MONTHLY_BUDGET_USD):
-        log(
-            f"[ERROR] OpenAI monthly budget reached: estimated_usd={spent:.4f} "
-            f"budget_usd={OPENAI_MONTHLY_BUDGET_USD:.2f}"
-        )
-        return []
-
     n = CANDIDATES_PER_NEWS
-    model, tier, matched_keyword = _select_openai_model(news_item)
+    state = _openai_usage_state()
+    router = ModelRouter(OPENAI_PRICING_FILE)
+    route = router.select_model(
+        "post_generation",
+        importance_score=float(news_item.get("final_news_score", 0) or 0),
+        genre=str(news_item.get("genre", "")),
+        source_reliability=float(news_item.get("source_reliability_score", 0) or 0),
+        claim_risk=str(news_item.get("claim_risk", "low") or "low"),
+        budget_state=state,
+        daily_usage=_today_usage(state),
+        text=f"{news_item.get('title', '')} {news_item.get('summary', '')}",
+    )
+    model = route.get("model", "")
+    log(f"[INFO] Model route: {model or 'skip'}")
+    log(f"[INFO] Route reason: {route.get('route_reason', '')}")
+    if not model:
+        global LAST_GENERATION_FAILURE_REASON
+        LAST_GENERATION_FAILURE_REASON = route.get("skip_reason", "model_route_skip")
+        log(f"[WARN] OpenAI generation skipped: {LAST_GENERATION_FAILURE_REASON}")
+        return []
+    fallback_used = bool(route.get("fallback_used"))
+    tier = "important" if route.get("route_reason", "").startswith("important") else "default"
     timeout = max(15.0, _env_float("OPENAI_TIMEOUT_SECONDS", 90.0))
-    client = OpenAI(api_key=api_key, timeout=timeout, max_retries=1)
+    client = OpenAI(api_key=api_key, timeout=timeout, max_retries=0)
     system = GENERATION_SYSTEM.format(n_candidates=n)
     user = GENERATION_USER_TMPL.format(
         n_candidates=n,
@@ -1411,36 +1324,45 @@ def generate_candidates(news_item: dict, regeneration_attempt: int = 0) -> list:
     perf = _load_performance_patterns(news_item.get("topic_key", ""))
     if perf:
         user += "\n\n実績データ（report コマンドで集計した実際のインプレッション傾向）:\n" + perf
+    user += (
+        "\n\n出力補足: final_text は tweet_lines を改行で連結した公開本文と完全一致させる。"
+        "importance_score・source_reliability_score・claim_risk・quality_scoreも必ず評価する。"
+        "モデル名、料金、ルーティング理由など内部情報は公開本文へ書かない。"
+    )
 
     # One candidate normally fits well under this cap. Reasoning tokens are also
     # counted against max_output_tokens, so keep a modest configurable buffer.
-    max_toks = min(8000, max(OPENAI_MAX_OUTPUT_TOKENS, 4000 * n))
+    max_toks = int(route["max_output_tokens"])
     log(
-        f"[INFO] OpenAI model selected: {model} tier={tier} "
-        f"important_keyword={matched_keyword or '-'} max_output_tokens={max_toks}"
+        f"[INFO] OpenAI model selected: {model} tier={tier} max_output_tokens={max_toks}"
     )
     try:
         response = _call_openai(
-            client, model=model, system=system, user=user, max_toks=max_toks
+            client, model=model, system=system, user=user, max_toks=max_toks,
+            reasoning_effort=route.get("reasoning_effort", "none"),
         )
     except Exception as first_error:
-        # If the optional important model is unavailable, fall back to the cheap
-        # default model once. Normal successful runs still make exactly one call.
-        if tier == "important" and model != OPENAI_MODEL_DEFAULT:
-            log(f"[WARN] important model call failed; falling back to {OPENAI_MODEL_DEFAULT}: {first_error}")
-            model, tier = OPENAI_MODEL_DEFAULT, "default"
+        fallbacks = route.get("fallback_models", [])
+        can_retry = retries_used < max(0, min(_env_int("OPENAI_MAX_RETRIES", 1), 1))
+        if fallbacks and can_retry and not is_auth_error(first_error):
+            model = fallbacks[0]
+            tier = "default"
+            fallback_used = True
+            log(f"[WARN] model unavailable; one fallback to {model}: {type(first_error).__name__}")
             try:
                 response = _call_openai(
-                    client, model=model, system=system, user=user, max_toks=max_toks
+                    client, model=model, system=system, user=user, max_toks=max_toks,
+                    reasoning_effort=os.environ.get("OPENAI_REASONING_EFFORT_DEFAULT", "none"),
                 )
             except Exception as second_error:
-                log(f"[ERROR] candidate generation failed: {second_error}")
+                log(f"[ERROR] candidate generation failed after fallback: {type(second_error).__name__}")
                 return []
         else:
-            log(f"[ERROR] candidate generation failed: {first_error}")
+            reason = "authentication_error_no_retry" if is_auth_error(first_error) else "retry_limit"
+            log(f"[ERROR] candidate generation failed: {reason} ({type(first_error).__name__})")
             return []
 
-    _record_openai_usage(response, model, tier)
+    _record_openai_usage(response, model, tier, fallback_used=fallback_used)
     status = str(getattr(response, "status", "") or "")
     if status == "incomplete":
         details = getattr(response, "incomplete_details", None)
@@ -1460,7 +1382,6 @@ def generate_candidates(news_item: dict, regeneration_attempt: int = 0) -> list:
     if not isinstance(candidates, list):
         return []
 
-    global LAST_GENERATION_FAILURE_REASON
     LAST_GENERATION_FAILURE_REASON = ""
     cleaned = []
     rejected_violations = []
@@ -1468,7 +1389,10 @@ def generate_candidates(news_item: dict, regeneration_attempt: int = 0) -> list:
         if not isinstance(c, dict):
             continue
         lines = c.get("tweet_lines") or []
-        c["tweet_text"] = "\n".join(str(x) for x in lines).strip()
+        joined_text = "\n".join(str(x) for x in lines).strip()
+        c["tweet_text"] = (c.get("final_text") or joined_text).strip()
+        if joined_text and c["tweet_text"] != joined_text:
+            c["tweet_text"] = joined_text
         if "\n\n" not in c["tweet_text"]:
             nonempty_lines = [line.strip() for line in c["tweet_text"].splitlines() if line.strip()]
             if len(nonempty_lines) >= 3:
@@ -1496,6 +1420,8 @@ def generate_candidates(news_item: dict, regeneration_attempt: int = 0) -> list:
         c["source_name"] = c.get("source_name") or news_item.get("source_name", "")
         c.setdefault("pub_date", news_item.get("pub_date", ""))
         c["openai_model"] = model
+        c["model_route_reason"] = route.get("route_reason", "")
+        c["model_fallback_used"] = fallback_used
         if not (c.get("hook") or "").strip():
             first_line = next((str(x).strip() for x in lines if str(x).strip()), "")
             c["hook"] = first_line or (c.get("title") or "").strip()
@@ -1506,14 +1432,16 @@ def generate_candidates(news_item: dict, regeneration_attempt: int = 0) -> list:
             else "internal_label_leak" if any(v.startswith("meta_leak:") for v in rejected_violations)
             else "relevance_gate_failed"
         )
-        if regeneration_attempt < 1:
+        max_retry = max(0, min(_env_int("OPENAI_MAX_RETRIES", 1), 1))
+        retry_consumed = retries_used + (1 if fallback_used else 0)
+        if regeneration_attempt < 1 and retry_consumed < max_retry:
             log("[INFO] Candidate quality rejection; regenerating once")
             retry_item = dict(news_item)
             retry_item["summary"] = (
                 f"{news_item.get('summary', '')}\n再生成指示: 前回は品質検査で拒否。"
                 "内部ラベルを本文へ出さず、ニュース固有の事実と指定した批判軸だけで書き直す。"
             )
-            return generate_candidates(retry_item, regeneration_attempt + 1)
+            return generate_candidates(retry_item, regeneration_attempt + 1, retry_consumed + 1)
     return cleaned
 
 # 実効スコアの加重（合計で割って 0〜10 相当に正規化する）

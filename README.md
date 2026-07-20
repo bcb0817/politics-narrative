@@ -286,6 +286,9 @@ Botは30分ごとにニュースを監視しますが、全枠で投稿しませ
 
 ## OpenAIモデル設定の安全な更新
 
+用途別の中央ルーター、月額予算、利用量履歴、日次・週次分析については
+[MIGRATION_ModelRouting.md](MIGRATION_ModelRouting.md) を参照してください。🧠
+
 `.env` のAPIキーや他の設定を維持したまま、モデル名・推論設定・料金単価だけを更新できます。
 実行前に `.env.backup.YYYYMMDD-HHMMSS` が自動作成されます。
 

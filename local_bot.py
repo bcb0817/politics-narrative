@@ -553,11 +553,13 @@ def cmd_report() -> int:
         )
     except KeyError as e:
         log(f"[ERROR] report: missing X API key: {e}")
-        return 1
+        log("[WARN] report: review skipped without stopping the posting daemon")
+        return 0
     except Exception as e:
         log(f"[ERROR] report: failed to retrieve metrics: {e}")
         log("[INFO] report: confirm X API read credits and user authentication")
-        return 1
+        log("[WARN] report: review skipped without stopping the posting daemon")
+        return 0
 
     metrics = {}
     for t in (resp.data or []):
@@ -585,7 +587,7 @@ def cmd_report() -> int:
 
     if not metrics:
         log("[WARN] report: no matching metrics returned for local bot posts")
-        return 1
+        return 0
 
     growth_weights = {
         "impressions_per_hour": float(os.environ.get("SCORE_WEIGHT_IMPRESSIONS_PER_HOUR", "0.25")),
@@ -738,6 +740,20 @@ def cmd_report() -> int:
         "repeated_structures": repeated_structures,
         "all_posts": rows,
     }
+    # Local aggregation is authoritative; one bounded LLM call adds trend analysis.
+    # Failure is recorded but never makes the daily review fail or blocks posting.
+    from report_ai import analyze_report, compact_daily_payload  # noqa: E402
+    llm_result = analyze_report(
+        task_type="daily_review",
+        payload=compact_daily_payload(review_payload),
+        root_dir=ROOT_DIR,
+        state_dir=dirs["state"],
+    )
+    review_payload["llm_analysis"] = llm_result.get("analysis")
+    review_payload["llm_route"] = llm_result.get("route", {})
+    review_payload["llm_error"] = llm_result.get("error", "")
+    if review_payload["llm_error"]:
+        log(f"[WARN] report: LLM analysis unavailable; local review retained ({review_payload['llm_error']})")
     dated_file = reviews_dir / f"{now_jst:%Y-%m-%d}.json"
     latest_file = dirs["state"] / "daily_review_latest.json"
     payload_text = json.dumps(review_payload, ensure_ascii=False, indent=2)
@@ -810,6 +826,60 @@ def cmd_report() -> int:
     log("[INFO] report: next post generation will use the latest winning patterns")
     return 0
 
+
+def _run_long_report(task_type: str, output_folder: str, premium_requested: bool = False) -> int:
+    """Create a local-only long report. It never calls the X posting API."""
+    load_env()
+    dirs = ensure_dirs()
+    if str(SRC_DIR) not in sys.path:
+        sys.path.insert(0, str(SRC_DIR))
+    from report_ai import analyze_report  # noqa: E402
+
+    reviews_dir = dirs["state"] / "daily_reviews"
+    review_files = sorted(reviews_dir.glob("*.json"))[-7:]
+    compact = []
+    for path in review_files:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            compact.append({
+                "date": path.stem,
+                "reviewed_count": data.get("reviewed_count", 0),
+                "performance_breakdown": data.get("performance_breakdown", {}),
+                "llm_analysis": data.get("llm_analysis"),
+            })
+        except (OSError, json.JSONDecodeError):
+            continue
+    result = analyze_report(
+        task_type=task_type,
+        payload={"daily_reviews": compact},
+        root_dir=ROOT_DIR,
+        state_dir=dirs["state"],
+        premium_requested=premium_requested,
+    )
+    if result.get("error"):
+        log(f"[INFO] {task_type}: {result['error']}; no local report generated")
+        return 0
+    analysis = result.get("analysis") or {}
+    out_dir = ROOT_DIR / "outputs" / output_folder
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_file = out_dir / f"{datetime.now(JST):%Y-%m-%d_%H%M}.md"
+    lines = [f"# {task_type.replace('_', ' ').title()}", "", analysis.get("summary", "")]
+    for title, key in (("Strengths", "strengths"), ("Weaknesses", "weaknesses"),
+                       ("Recommendations", "recommendations"), ("Timing", "timing_findings")):
+        lines.extend(["", f"## {title}", ""])
+        lines.extend(f"- {item}" for item in analysis.get(key, []))
+    out_file.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+    log(f"[INFO] {task_type}: local-only report saved to {out_file}")
+    return 0
+
+
+def cmd_weekly_report() -> int:
+    return _run_long_report("weekly_report", "weekly_reports")
+
+
+def cmd_premium_report() -> int:
+    return _run_long_report("premium_report", "premium_reports", premium_requested=True)
+
 def cmd_status() -> int:
     load_env(require=False)
     dirs = ensure_dirs()
@@ -853,8 +923,10 @@ def cmd_status() -> int:
     print(f"TOPIC_COOLDOWN_HOURS : {os.environ.get('TOPIC_COOLDOWN_HOURS', '(未設定→4)')}")
     print(f"CATCH_UP_HOURS       : {os.environ.get('CATCH_UP_HOURS', '(未設定→24)')}")
     print(f"MAX_POSTS_PER_RUN    : {os.environ.get('MAX_POSTS_PER_RUN', '(未設定→1)')}")
-    print(f"OPENAI_MODEL_DEFAULT : {os.environ.get('OPENAI_MODEL_DEFAULT', '(未設定→gpt-5-nano)')}")
-    print(f"OPENAI_MODEL_IMPORTANT: {os.environ.get('OPENAI_MODEL_IMPORTANT', '(未設定→gpt-5-mini)')}")
+    print(f"OPENAI_MODEL_CLASSIFIER: {os.environ.get('OPENAI_MODEL_CLASSIFIER', '(未設定→gpt-5.4-nano)')}")
+    print(f"OPENAI_MODEL_DEFAULT : {os.environ.get('OPENAI_MODEL_DEFAULT', '(未設定→gpt-5.4-mini)')}")
+    print(f"OPENAI_MODEL_IMPORTANT: {os.environ.get('OPENAI_MODEL_IMPORTANT', '(未設定→gpt-5.6-luna)')}")
+    print(f"OPENAI_MODEL_DAILY_REVIEW: {os.environ.get('OPENAI_MODEL_DAILY_REVIEW', '(未設定→important)')}")
     print(f"OPENAI_MONTHLY_BUDGET_USD: {os.environ.get('OPENAI_MONTHLY_BUDGET_USD', '(未設定→8.0)')}")
     usage_file = state_dir / "openai_usage.json"
     try:
@@ -904,6 +976,8 @@ def main() -> int:
     sub.add_parser("init-state", help="初回用: 過去スロットを処理済み化（バックログ暴発防止）")
     sub.add_parser("status", help="状態確認")
     sub.add_parser("report", help="投稿実績（インプレッション等）を取得しknowledge/へ学習パターンを書き出す")
+    sub.add_parser("weekly-report", help="週次AI分析をローカル保存（既定では無効・X投稿なし）")
+    sub.add_parser("premium-report", help="手動プレミアム分析をローカル保存（既定では無効・X投稿なし）")
 
     args = parser.parse_args()
 
@@ -919,6 +993,10 @@ def main() -> int:
         return cmd_status()
     if args.command == "report":
         return cmd_report()
+    if args.command == "weekly-report":
+        return cmd_weekly_report()
+    if args.command == "premium-report":
+        return cmd_premium_report()
     parser.print_help()
     return 1
 
