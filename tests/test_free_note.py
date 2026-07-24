@@ -74,6 +74,11 @@ class FreeNoteTests(unittest.TestCase):
             article_type, dry_run=True, path=self.db,
             now=now or datetime(2026, 7, 22, 12, tzinfo=JST))
 
+    def mark_as_production(self, result):
+        folder, metadata = free_note.load_note(result["content_id"])
+        metadata["generation_mode"] = "openai"
+        free_note._atomic_json(folder / "metadata.json", metadata)
+
     def test_01_article_type_count(self):
         self.assertEqual(len(free_note.ARTICLE_TYPES), 7)
 
@@ -107,6 +112,13 @@ class FreeNoteTests(unittest.TestCase):
         article = article.replace(free_note.REQUIRED_HEADINGS[0], "")
         self.assertFalse(free_note.quality_check(
             article, title, primary, secondary)["passed"])
+
+    def test_missing_h1_title_fails_quality(self):
+        _, primary, secondary, title, article = self.article()
+        article = article.replace(f"# {title}", "## 導入", 1)
+        checked = free_note.quality_check(
+            article, title, primary, secondary)
+        self.assertIn("missing_title_heading", checked["reasons"])
 
     def test_09_short_article_fails_quality(self):
         _, primary, secondary, title, _ = self.article()
@@ -159,6 +171,13 @@ class FreeNoteTests(unittest.TestCase):
         self.assertEqual(
             names, {"article.md", "metadata.json", "sources.md", "review.md"})
 
+    def test_existing_slug_folder_gets_unique_content_suffix(self):
+        now = datetime(2026, 7, 26, 12, tzinfo=JST)
+        first = self.generate("weekly_top5", now)
+        second = self.generate("weekly_top5", now)
+        self.assertNotEqual(first["path"], second["path"])
+        self.assertTrue(Path(second["path"]).name.endswith("_002"))
+
     def test_19_dry_run_never_publishes_or_writes_x(self):
         result = self.generate()
         self.assertFalse(result["published"])
@@ -195,7 +214,8 @@ class FreeNoteTests(unittest.TestCase):
 
     def test_24_weekly_top5_cooldown_applies_same_week(self):
         now = datetime(2026, 7, 26, 12, tzinfo=JST)
-        self.generate("weekly_top5", now)
+        result = self.generate("weekly_top5", now)
+        self.mark_as_production(result)
         selected = free_note.select_topic(
             "weekly_top5", path=self.db, now=now + timedelta(hours=1))
         self.assertTrue(selected["duplicate"])
@@ -207,9 +227,31 @@ class FreeNoteTests(unittest.TestCase):
             "weekly_top5", path=self.db, now=now + timedelta(days=7))
         self.assertFalse(selected["duplicate"])
 
+    def test_dry_run_does_not_block_production_topic(self):
+        now = datetime(2026, 7, 26, 12, tzinfo=JST)
+        self.generate("weekly_top5", now)
+        selected = free_note.select_topic(
+            "weekly_top5", path=self.db, now=now + timedelta(minutes=5))
+        self.assertFalse(selected["duplicate"])
+
+    def test_revision_required_does_not_block_regeneration(self):
+        now = datetime(2026, 7, 22, 12, tzinfo=JST)
+        result = self.generate(now=now)
+        self.mark_as_production(result)
+        free_note.update_status(
+            result["content_id"], "revision_required", path=self.db)
+        selected = free_note.select_topic(
+            "evergreen_institutional_explainer",
+            "閣議決定と法律成立の違い",
+            path=self.db,
+            now=now + timedelta(minutes=5),
+        )
+        self.assertFalse(selected["duplicate"])
+
     def test_26_evergreen_topic_obeys_long_cooldown(self):
         now = datetime(2026, 7, 22, 12, tzinfo=JST)
-        self.generate(now=now)
+        result = self.generate(now=now)
+        self.mark_as_production(result)
         self.assertTrue(free_note.select_topic(
             "evergreen_institutional_explainer",
             "閣議決定と法律成立の違い",
@@ -239,7 +281,8 @@ class FreeNoteTests(unittest.TestCase):
 
     def test_31_duplicate_returns_update_candidate(self):
         now = datetime(2026, 7, 22, 12, tzinfo=JST)
-        self.generate(now=now)
+        initial = self.generate(now=now)
+        self.mark_as_production(initial)
         result = free_note.generate_free_note(
             "evergreen_institutional_explainer",
             "閣議決定と法律成立の違い", dry_run=True,

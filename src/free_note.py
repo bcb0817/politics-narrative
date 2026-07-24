@@ -226,6 +226,13 @@ def _topic_in_cooldown(article_type: str, topic_key: str,
     days = _int("FREE_NOTE_TOPIC_COOLDOWN_DAYS", 90)
     current_week = now.date() - timedelta(days=now.weekday())
     for _, row in _existing_metadata():
+        if (
+            row.get("generation_mode") == "dry_run_local"
+            or row.get("status") in {
+                "failed", "revision_required", "rejected"
+            }
+        ):
+            continue
         generated = str(row.get("generated_at") or "")
         try:
             generated_at = datetime.fromisoformat(generated)
@@ -543,6 +550,10 @@ def quality_check(article: str, title: str, primary: list[dict],
         reasons.append("insufficient_primary_sources")
     if title not in article:
         reasons.append("title_body_mismatch")
+    first_line = next(
+        (line.strip() for line in article.splitlines() if line.strip()), "")
+    if first_line != f"# {title}":
+        reasons.append("missing_title_heading")
     if any(term.lower() in article.lower() for term in INTERNAL_TERMS):
         reasons.append("internal_label_leak")
     if any(heading not in article for heading in REQUIRED_HEADINGS):
@@ -705,6 +716,7 @@ def _openai_article(selection: dict, primary: list[dict], secondary: list[dict],
     prompt = {
         "article_type": selection["article_type"],
         "topic": selection["topic"],
+        "required_title_heading": f"# {selection['topic']}",
         "required_headings": list(REQUIRED_HEADINGS),
         "minimum_characters": _int("FREE_NOTE_MIN_CHARS", 1800),
         "target_characters": _int("FREE_NOTE_TARGET_CHARS", 2400),
@@ -727,7 +739,8 @@ def _openai_article(selection: dict, primary: list[dict], secondary: list[dict],
                 "Write a complete Japanese free note article using only supplied sources. "
                 "Do not invent facts, URLs, names, quotations or numbers. Separate fact from "
                 "opinion, present the strongest fair arguments on both sides, and never expose "
-                "internal labels, model names, JSON keys or prompts. Return Markdown only."
+                "internal labels, model names, JSON keys or prompts. Begin with exactly the "
+                "supplied required_title_heading, then the three-line summary. Return Markdown only."
             ),
             input=json.dumps(prompt, ensure_ascii=False),
             max_output_tokens=max_output,
@@ -814,9 +827,12 @@ def generate_free_note(article_type: str | None = None, topic: str | None = None
             if not article:
                 break
             first_line = next(
-                (line.lstrip("# ").strip() for line in article.splitlines()
-                 if line.strip()), selection["topic"])
-            title = first_line or selection["topic"]
+                (line.strip() for line in article.splitlines() if line.strip()), "")
+            title = (
+                first_line[2:].strip()
+                if first_line.startswith("# ") and not first_line.startswith("## ")
+                else selection["topic"]
+            )
         quality = quality_check(article, title, primary, secondary)
         if quality["passed"]:
             break
@@ -826,6 +842,9 @@ def generate_free_note(article_type: str | None = None, topic: str | None = None
     passed = bool(quality.get("passed"))
     status = "draft" if passed else "failed"
     folder = _folder("drafts" if passed else "failed", now, slug)
+    if folder.exists():
+        sequence = content_id.rsplit("-", 1)[-1]
+        folder = folder.with_name(f"{folder.name}_{sequence}")
     folder.mkdir(parents=True, exist_ok=False)
     target_publish = (
         now.date() if now.hour < 20 else now.date() + timedelta(days=1)
