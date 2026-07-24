@@ -124,7 +124,8 @@ CREATE TABLE IF NOT EXISTS note_drafts (
  secondary_sources_json TEXT, draft_path TEXT,
  discord_notification_status TEXT, discord_message_id TEXT,
  input_tokens INTEGER, output_tokens INTEGER, estimated_cost_usd REAL,
- quality_score REAL, safety_score REAL, created_at TEXT, updated_at TEXT);
+ quality_score REAL, safety_score REAL, cover_path TEXT, cover_status TEXT,
+ cover_width INTEGER, cover_height INTEGER, created_at TEXT, updated_at TEXT);
 CREATE TABLE IF NOT EXISTS note_generation_runs (
  id INTEGER PRIMARY KEY, run_at TEXT, schedule_type TEXT,
  target_article_type TEXT, selected_topic TEXT, selection_reason TEXT,
@@ -372,6 +373,10 @@ def add_column_if_missing(table: str, column: str, declaration: str,
         },
         "conversion_events": {"event_key": "TEXT"},
         "api_usage_events": {"task_type_source": "TEXT"},
+        "note_drafts": {
+            "cover_path": "TEXT", "cover_status": "TEXT",
+            "cover_width": "INTEGER", "cover_height": "INTEGER",
+        },
     }
     if declaration != allowed.get(table, {}).get(column):
         raise ValueError("unsupported migration")
@@ -439,6 +444,10 @@ def apply_additive_migrations(path: Path | None = None) -> dict:
         },
         "conversion_events": {"event_key": "TEXT"},
         "api_usage_events": {"task_type_source": "TEXT"},
+        "note_drafts": {
+            "cover_path": "TEXT", "cover_status": "TEXT",
+            "cover_width": "INTEGER", "cover_height": "INTEGER",
+        },
     }
     added = {
         table: [

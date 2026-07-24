@@ -530,6 +530,8 @@ REVIEW_MARKDOWN = """# 公開前チェック
 
 ## 公開作業
 
+- [ ] 見出し画像が1280×670pxで正しく表示される
+- [ ] 見出し画像のタイトルが記事と一致している
 - [ ] note上で見出しを確認
 - [ ] 改行・箇条書きを確認
 - [ ] 必要に応じてアイキャッチを設定
@@ -638,13 +640,17 @@ def _save_db(metadata: dict, path: Path | None = None) -> bool:
            primary_topic_key,included_topic_keys_json,source_news_ids_json,
            source_x_post_ids_json,primary_sources_json,secondary_sources_json,draft_path,
            discord_notification_status,discord_message_id,input_tokens,output_tokens,
-           estimated_cost_usd,quality_score,safety_score,created_at,updated_at)
-          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+           estimated_cost_usd,quality_score,safety_score,cover_path,cover_status,
+           cover_width,cover_height,created_at,updated_at)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
           ON CONFLICT(content_id) DO UPDATE SET
            status=excluded.status,published_at=excluded.published_at,
            note_url=excluded.note_url,draft_path=excluded.draft_path,
            discord_notification_status=excluded.discord_notification_status,
-           discord_message_id=excluded.discord_message_id,updated_at=excluded.updated_at""", (
+           discord_message_id=excluded.discord_message_id,
+           cover_path=excluded.cover_path,cover_status=excluded.cover_status,
+           cover_width=excluded.cover_width,cover_height=excluded.cover_height,
+           updated_at=excluded.updated_at""", (
             metadata["content_id"], metadata["title"], metadata["slug"],
             metadata["article_type"], metadata["status"], metadata["generated_at"],
             metadata["target_publish_date"], metadata.get("published_at"),
@@ -660,6 +666,8 @@ def _save_db(metadata: dict, path: Path | None = None) -> bool:
             metadata.get("discord_message_id"), metadata.get("input_tokens", 0),
             metadata.get("output_tokens", 0), metadata["estimated_cost_usd"],
             metadata["quality_score"], metadata["safety_score"],
+            metadata.get("cover_path"), metadata.get("cover_status"),
+            metadata.get("cover_width"), metadata.get("cover_height"),
             metadata["created_at"], metadata["updated_at"],
         ), path)
         return result is not None
@@ -846,6 +854,26 @@ def generate_free_note(article_type: str | None = None, topic: str | None = None
         sequence = content_id.rsplit("-", 1)[-1]
         folder = folder.with_name(f"{folder.name}_{sequence}")
     folder.mkdir(parents=True, exist_ok=False)
+    cover = {
+        "cover_status": "not_generated",
+        "cover_path": None,
+        "cover_width": 1280,
+        "cover_height": 670,
+        "cover_aspect_ratio": round(1280 / 670, 4),
+        "cover_generator": "local_pillow_v1",
+    }
+    if passed and _bool("FREE_NOTE_COVER_ENABLED", "true"):
+        try:
+            from note_cover import generate_cover
+            cover = generate_cover(
+                title,
+                selection["article_type"],
+                folder / "cover.png",
+                generated_at=now,
+            )
+        except Exception as exc:
+            cover["cover_status"] = "failed"
+            cover["cover_error"] = type(exc).__name__
     target_publish = (
         now.date() if now.hour < 20 else now.date() + timedelta(days=1)
     ).isoformat()
@@ -883,6 +911,7 @@ def generate_free_note(article_type: str | None = None, topic: str | None = None
         "created_at": now.isoformat(), "updated_at": now.isoformat(),
         "status_history": [{"status": status, "at": now.isoformat()}],
         "published": False, "automatic_note_publish": False, "x_writes": 0,
+        **cover,
     }
     _atomic_text(folder / "article.md", article or (
         f"# {selection['topic']}\n\n## 構成案\n\n"
@@ -917,6 +946,8 @@ def generate_free_note(article_type: str | None = None, topic: str | None = None
         "quality_score": metadata["quality_score"],
         "safety_score": metadata["safety_score"],
         "path": str(folder), "discord_sent": discord_sent,
+        "cover_status": metadata.get("cover_status"),
+        "cover_path": metadata.get("cover_path"),
         "published": False, "x_writes": 0,
         "estimated_cost_usd": metadata["estimated_cost_usd"],
     }
@@ -927,6 +958,32 @@ def load_note(content_id: str) -> tuple[Path, dict]:
         if metadata.get("content_id") == content_id:
             return path.parent, metadata
     raise FileNotFoundError(f"note draft not found: {content_id}")
+
+
+def generate_note_cover(content_id: str, *, path: Path | None = None) -> dict:
+    """Generate or replace the fixed-size cover for a saved note draft."""
+    folder, metadata = load_note(content_id)
+    from note_cover import generate_cover
+    generated_at = datetime.fromisoformat(
+        str(metadata.get("generated_at") or datetime.now(JST).isoformat())
+    )
+    cover = generate_cover(
+        str(metadata.get("title") or "政治と制度を読み解く"),
+        str(metadata.get("article_type") or ""),
+        folder / "cover.png",
+        generated_at=generated_at,
+    )
+    metadata.update(cover)
+    metadata["updated_at"] = datetime.now(JST).isoformat()
+    _atomic_json(folder / "metadata.json", metadata)
+    if not _save_db(metadata, path):
+        _save_fallback_state(metadata)
+    return {
+        "content_id": content_id,
+        **cover,
+        "automatic_note_publish": False,
+        "x_writes": 0,
+    }
 
 
 def list_notes() -> list[dict]:
@@ -940,6 +997,8 @@ def list_notes() -> list[dict]:
             "character_count": row.get("character_count"),
             "quality_score": row.get("quality_score"),
             "discord_status": row.get("discord_notification_status"),
+            "cover_status": row.get("cover_status"),
+            "cover_path": row.get("cover_path"),
             "local_path": str(path.parent),
         })
     return sorted(rows, key=lambda row: str(row.get("generated_at") or ""), reverse=True)
@@ -972,6 +1031,8 @@ def update_status(content_id: str, status: str, *, note_url: str | None = None,
             raise FileExistsError(f"destination exists: {destination}")
         shutil.move(str(folder), str(destination))
         folder = destination
+        if (folder / "cover.png").exists():
+            metadata["cover_path"] = str(folder / "cover.png")
     metadata["status"] = status
     metadata["updated_at"] = now.isoformat()
     metadata["draft_path"] = str(folder)
@@ -1011,7 +1072,16 @@ def send_note_discord(content_id: str, *, force: bool = False,
             "status": metadata.get("status"),
             "path": str(folder),
         },
-        [folder / "article.md", folder / "sources.md", folder / "review.md"],
+        [
+            folder / "cover.png",
+            folder / "article.md",
+            folder / "sources.md",
+            folder / "review.md",
+        ] if (folder / "cover.png").exists() else [
+            folder / "article.md",
+            folder / "sources.md",
+            folder / "review.md",
+        ],
     )
     metadata["discord_notification_status"] = "sent" if sent else "failed"
     metadata["discord_message_id"] = message_id

@@ -203,7 +203,7 @@ def _note_summary(draft: dict[str, Any]) -> str:
         "**確認事項:** 事実と一次資料／賛否両論の公平性／タイトルの強さ／AI的な定型表現",
         f"**ローカル保存先:** {_clean(draft.get('path'), 600)}",
         "",
-        "article.md・sources.md・review.mdを確認し、人が承認後にnoteへ手動公開してください。",
+        "cover.png・article.md・sources.md・review.mdを確認し、人が承認後にnoteへ手動公開してください。",
     ])
 
 
@@ -228,12 +228,16 @@ def notify_note_draft_files(
     handles = []
     try:
         files = []
-        for path in paths[:3]:
+        for path in paths[:4]:
             resolved = Path(path)
             handle = resolved.open("rb")
             handles.append(handle)
+            content_type = (
+                "image/png" if resolved.suffix.lower() == ".png"
+                else "text/markdown; charset=utf-8"
+            )
             files.append(
-                ("files[]", (resolved.name, handle, "text/markdown; charset=utf-8"))
+                ("files[]", (resolved.name, handle, content_type))
             )
         response = requests.post(
             webhook_url + ("&" if "?" in webhook_url else "?") + "wait=true",

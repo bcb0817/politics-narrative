@@ -46,6 +46,7 @@ class FreeNoteTests(unittest.TestCase):
             "STATE_DIR": str(self.base / "data"),
             "DISCORD_NOTE_ENABLED": "false",
             "NOTE_DRAFT_DISCORD_ENABLED": "false",
+            "FREE_NOTE_COVER_ENABLED": "false",
         }, clear=False)
         self.env_patch.start()
         self.db = self.base / "data" / "metrics.db"
@@ -170,6 +171,17 @@ class FreeNoteTests(unittest.TestCase):
         names = {path.name for path in Path(result["path"]).iterdir()}
         self.assertEqual(
             names, {"article.md", "metadata.json", "sources.md", "review.md"})
+
+    def test_cover_enabled_creates_exact_note_image(self):
+        from PIL import Image
+        with patch.dict(os.environ, {"FREE_NOTE_COVER_ENABLED": "true"}):
+            result = self.generate()
+        cover_path = Path(result["path"], "cover.png")
+        self.assertTrue(cover_path.exists())
+        with Image.open(cover_path) as image:
+            self.assertEqual(image.format, "PNG")
+            self.assertEqual(image.size, (1280, 670))
+        self.assertEqual(result["cover_status"], "generated")
 
     def test_existing_slug_folder_gets_unique_content_suffix(self):
         now = datetime(2026, 7, 26, 12, tzinfo=JST)
@@ -296,8 +308,9 @@ class FreeNoteTests(unittest.TestCase):
                 result["content_id"], path=self.db))
         post.assert_not_called()
 
-    def test_33_discord_sends_three_attachments(self):
-        result = self.generate()
+    def test_33_discord_sends_four_attachments_with_cover(self):
+        with patch.dict(os.environ, {"FREE_NOTE_COVER_ENABLED": "true"}):
+            result = self.generate()
         env = {
             "DISCORD_NOTE_ENABLED": "true",
             "DISCORD_NOTE_WEBHOOK_URL": "https://discord.invalid/hook",
@@ -307,7 +320,10 @@ class FreeNoteTests(unittest.TestCase):
         ) as post:
             self.assertTrue(free_note.send_note_discord(
                 result["content_id"], path=self.db))
-        self.assertEqual(len(post.call_args.kwargs["files"]), 3)
+        files = post.call_args.kwargs["files"]
+        self.assertEqual(len(files), 4)
+        self.assertEqual(files[0][1][0], "cover.png")
+        self.assertEqual(files[0][1][2], "image/png")
         self.assertEqual(
             json.loads(post.call_args.kwargs["data"]["payload_json"])
             ["allowed_mentions"], {"parse": []})
@@ -495,6 +511,7 @@ class FreeNoteTests(unittest.TestCase):
             "primary_sources", "secondary_sources",
             "discord_notification_status", "discord_message_id", "note_url",
             "published_at", "estimated_cost_usd",
+            "cover_path", "cover_status", "cover_width", "cover_height",
         }
         self.assertTrue(required.issubset(metadata))
 

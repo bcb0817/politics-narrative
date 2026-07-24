@@ -1771,6 +1771,17 @@ def cmd_note_discord_send(content_id: str, force: bool) -> int:
     return 0 if sent else 1
 
 
+def cmd_note_generate_cover(content_id: str) -> int:
+    load_env(require=False)
+    ensure_dirs()
+    from free_note import generate_note_cover  # noqa: E402
+    result = generate_note_cover(content_id)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    print("Automatic note publish operations: 0")
+    print("X write operations: 0")
+    return 0
+
+
 def cmd_note_pipeline_status() -> int:
     load_env(require=False)
     ensure_dirs()
@@ -2060,6 +2071,11 @@ def main() -> int:
         "note-discord-send", help="保存済みnote下書きをDiscordへ送信")
     p_note_discord.add_argument("--content-id", required=True)
     p_note_discord.add_argument("--force", action="store_true")
+    p_note_cover = sub.add_parser(
+        "note-generate-cover",
+        help="保存済みnote下書きの1280x670見出し画像を生成",
+    )
+    p_note_cover.add_argument("--content-id", required=True)
     sub.add_parser(
         "note-pipeline-status", help="無料noteパイプラインの状態を表示")
     sub.add_parser(
@@ -2154,6 +2170,8 @@ def main() -> int:
         return cmd_note_mark_published(args.content_id, args.url)
     if args.command == "note-discord-send":
         return cmd_note_discord_send(args.content_id, args.force)
+    if args.command == "note-generate-cover":
+        return cmd_note_generate_cover(args.content_id)
     if args.command == "note-pipeline-status":
         return cmd_note_pipeline_status()
     if args.command == "free-note-due":

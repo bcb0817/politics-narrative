@@ -20,10 +20,11 @@
 4. Terraで1回生成し、失敗時はLunaへ切り替え
 5. 文字数、構成、出典、数値、内部ラベル、安全性を審査
 6. 不合格時は最大1回だけ再生成
-7. 4ファイルをローカル保存
-8. 合格原稿だけDiscordへ概要と3ファイルを通知
-9. 人が確認し、CLIで状態を更新
-10. 人がnoteへ手動公開し、公開URLをCLIで記録
+7. 1280×670 px（1.91:1）の見出し画像をローカル生成
+8. 原稿・画像を含む5ファイルをローカル保存
+9. 合格原稿だけDiscordへ結果概要と4ファイルを通知
+10. 人が確認し、CLIで状態を更新
+11. 人がnoteへ手動公開し、公開URLをCLIで記録
 
 ## 保存先
 
@@ -31,6 +32,7 @@
 outputs/note/
 ├─ drafts/YYYY/YYYY-MM-DD_slug/
 │  ├─ article.md
+│  ├─ cover.png
 │  ├─ metadata.json
 │  ├─ sources.md
 │  └─ review.md
@@ -52,6 +54,7 @@ SQLite障害時は`note_state.json`へフォールバックします。
 .\.venv\Scripts\python.exe local_bot.py note-drafts
 .\.venv\Scripts\python.exe local_bot.py note-pipeline-status
 .\.venv\Scripts\python.exe local_bot.py note-discord-send --content-id note-YYYYMMDD-001
+.\.venv\Scripts\python.exe local_bot.py note-generate-cover --content-id note-YYYYMMDD-001
 .\.venv\Scripts\python.exe local_bot.py note-status --content-id note-YYYYMMDD-001 --status reviewing
 .\.venv\Scripts\python.exe local_bot.py note-status --content-id note-YYYYMMDD-001 --status approved
 .\.venv\Scripts\python.exe local_bot.py note-status --content-id note-YYYYMMDD-001 --status revision_required
@@ -69,7 +72,7 @@ DISCORD_NOTE_CHANNEL_NAME=note-drafts
 DISCORD_NOTE_MENTION=
 ```
 
-現在の実装は、準備済みの`NOTE_DRAFT_DISCORD_WEBHOOK_URL`も後方互換で利用できます。Webhookが空または送信に失敗しても、原稿生成とローカル保存は成功扱いです。添付失敗時は概要だけを再送します。
+現在の実装は、準備済みの`NOTE_DRAFT_DISCORD_WEBHOOK_URL`も後方互換で利用できます。Webhookが空または送信に失敗しても、原稿生成とローカル保存は成功扱いです。Discordには`cover.png`、`article.md`、`sources.md`、`review.md`を添付し、添付失敗時は概要だけを再送します。
 
 ## Windowsタスク
 
