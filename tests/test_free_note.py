@@ -88,7 +88,30 @@ class FreeNoteTests(unittest.TestCase):
 
     def test_03_sources_meet_primary_minimum(self):
         _, primary, _, _, _ = self.article()
-        self.assertGreaterEqual(len(primary), 2)
+        self.assertEqual(len(primary), 2)
+
+    def test_related_books_are_two_amazon_isbn_links(self):
+        selected = self.selection()
+        books = free_note.extract_related_books(selected)
+        self.assertEqual(len(books), 2)
+        self.assertTrue(all(
+            row["amazon_url"].startswith(
+                "https://www.amazon.co.jp/s?i=stripbooks&k="
+            )
+            for row in books
+        ))
+
+    def test_article_has_exactly_two_primary_and_two_amazon_links(self):
+        selected, primary, secondary, _, article = self.article()
+        article_urls = __import__("re").findall(
+            r"https?://[^\s)>\]]+", article)
+        primary_urls = {row["url"] for row in primary}
+        amazon_urls = {
+            url for url in article_urls if "www.amazon.co.jp/" in url
+        }
+        self.assertEqual(len(article_urls), 4)
+        self.assertEqual(set(article_urls) - amazon_urls, primary_urls)
+        self.assertEqual(len(amazon_urls), 2)
 
     def test_04_local_article_meets_minimum_length(self):
         *_, article = self.article()
@@ -138,6 +161,14 @@ class FreeNoteTests(unittest.TestCase):
         article += "\npost_type"
         self.assertFalse(free_note.quality_check(
             article, title, primary, secondary)["passed"])
+
+    def test_missing_amazon_book_link_fails_quality(self):
+        selected, primary, secondary, title, article = self.article()
+        books = free_note.extract_related_books(selected)
+        article = article.replace(books[0]["amazon_url"], "", 1)
+        checked = free_note.quality_check(
+            article, title, primary, secondary, books)
+        self.assertIn("related_book_count_not_two", checked["reasons"])
 
     def test_12_schedule_has_two_slots(self):
         self.assertEqual(len(free_note.schedule_slots(
@@ -509,6 +540,7 @@ class FreeNoteTests(unittest.TestCase):
             "primary_topic_key", "included_topic_keys",
             "source_news_candidate_ids", "source_x_post_ids",
             "primary_sources", "secondary_sources",
+            "related_books",
             "discord_notification_status", "discord_message_id", "note_url",
             "published_at", "estimated_cost_usd",
             "cover_path", "cover_status", "cover_width", "cover_height",
@@ -520,6 +552,8 @@ class FreeNoteTests(unittest.TestCase):
         text = Path(result["path"], "sources.md").read_text(encoding="utf-8")
         for label in ("発行主体", "公開日", "URL", "記事中で使った事実", "確認日時"):
             self.assertIn(label, text)
+        self.assertIn("# 関連書籍（Amazon）", text)
+        self.assertEqual(text.count("- Amazon: https://www.amazon.co.jp/"), 2)
 
     def test_77_review_file_has_required_sections(self):
         result = self.generate()

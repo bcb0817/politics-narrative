@@ -490,7 +490,7 @@ xAIは `XAI_COST_LEDGER_VERIFIED=false` の間、設定が4ドルでも実効上
 停止します。RSS・公式情報のローカル監視と既存キャッシュは継続します。
 # 無料note原稿パイプライン 📝
 
-政治・制度解説を週1〜2本生成し、`outputs/note`へMarkdownで保存できます。同時に、記事タイトル入りの見出し画像`cover.png`を1280×670 px（1.91:1）でローカル生成します。合格原稿は専用Discordへ結果概要、見出し画像、確認用ファイルを通知しますが、noteへの公開は必ず人が行います。
+政治・制度解説を週1〜2本生成し、`outputs/note`へMarkdownで保存できます。記事末尾は「一次資料2リンク＋関連書籍のAmazonリンク2件」に統一し、関連書籍はISBN確認済みカタログから記事種別・タイトルとの一致度で自動選定します。同時に、記事タイトル入りの見出し画像`cover.png`を1280×670 px（1.91:1）でローカル生成します。合格原稿は専用Discordへ結果概要、見出し画像、確認用ファイルを通知しますが、noteへの公開は必ず人が行います。
 
 ```powershell
 .\.venv\Scripts\python.exe local_bot.py generate-free-note --dry-run

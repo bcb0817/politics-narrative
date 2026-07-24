@@ -1,0 +1,51 @@
+[
+  {
+    "title": "日本の統治構造―官僚内閣制から議院内閣制へ",
+    "author": "飯尾潤",
+    "isbn13": "9784121019059",
+    "article_types": ["weekly_deep_dive", "cabinet_decision_vs_law", "evergreen_institutional_explainer"],
+    "keywords": ["政府", "内閣", "行政", "統治", "首相", "首都"]
+  },
+  {
+    "title": "立法学―序論・立法過程論 第4版",
+    "author": "中島誠",
+    "isbn13": "9784589040404",
+    "article_types": ["legislative_process", "cabinet_decision_vs_law", "evergreen_institutional_explainer"],
+    "keywords": ["法律", "法案", "立法", "国会", "審議", "施行"]
+  },
+  {
+    "title": "地方自治講義",
+    "author": "今井照",
+    "isbn13": "9784480069467",
+    "article_types": ["weekly_deep_dive", "evergreen_institutional_explainer"],
+    "keywords": ["地方", "自治", "自治体", "副首都", "分権", "地域"]
+  },
+  {
+    "title": "公共政策学の基礎 第3版",
+    "author": "秋吉貴雄・伊藤修一郎・北山俊哉",
+    "isbn13": "9784641184497",
+    "article_types": ["weekly_top5", "weekly_deep_dive", "party_policy_comparison", "social_insurance_burden"],
+    "keywords": ["政策", "行政", "評価", "財源", "予算", "公約"]
+  },
+  {
+    "title": "日本政治の第一歩 新版",
+    "author": "上神貴佳・三浦まり 編",
+    "isbn13": "9784641151123",
+    "article_types": ["weekly_top5", "party_policy_comparison", "weekly_deep_dive"],
+    "keywords": ["政治", "政党", "選挙", "公約", "国会"]
+  },
+  {
+    "title": "憲法 第8版",
+    "author": "芦部信喜・高橋和之",
+    "isbn13": "9784000613224",
+    "article_types": ["evergreen_institutional_explainer", "legislative_process", "cabinet_decision_vs_law"],
+    "keywords": ["憲法", "権利", "司法", "国会", "内閣"]
+  },
+  {
+    "title": "はじめての社会保障 第19版",
+    "author": "椋野美智子・田中耕太郎",
+    "isbn13": "9784641222021",
+    "article_types": ["social_insurance_burden"],
+    "keywords": ["社会保障", "社会保険", "年金", "医療", "介護", "保険料", "負担"]
+  }
+]

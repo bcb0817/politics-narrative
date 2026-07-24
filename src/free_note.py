@@ -16,7 +16,7 @@ from contextlib import closing
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote_plus, urlparse
 from zoneinfo import ZoneInfo
 
 from api_budget import estimate_openai, finalize, reserve
@@ -38,7 +38,7 @@ STATUSES = {
     "draft", "reviewing", "approved", "revision_required",
     "published", "rejected",
 }
-PROMPT_VERSION = "free-note-v1"
+PROMPT_VERSION = "free-note-v2"
 OFFICIAL_DOMAINS = (
     ".go.jp", "shugiin.go.jp", "sangiin.go.jp", "laws.e-gov.go.jp",
     "elaws.e-gov.go.jp", "courts.go.jp", "ndl.go.jp",
@@ -127,6 +127,64 @@ def _registry_sources() -> list[dict]:
         return [row for row in rows if _official(str(row.get("url", "")))]
     except Exception:
         return []
+
+
+def _book_catalog() -> list[dict]:
+    path = _root() / "config" / "free_note_related_books.json"
+    try:
+        rows = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    books = []
+    for row in rows if isinstance(rows, list) else []:
+        isbn = re.sub(r"\D", "", str(row.get("isbn13") or ""))
+        if len(isbn) != 13:
+            continue
+        book = dict(row)
+        book["isbn13"] = isbn
+        book["amazon_url"] = (
+            "https://www.amazon.co.jp/s?"
+            f"i=stripbooks&k={quote_plus(isbn)}"
+        )
+        book["link_type"] = "amazon_isbn_search"
+        books.append(book)
+    return books
+
+
+def extract_related_books(selection: dict, limit: int = 2) -> list[dict]:
+    """Select related books by article type and topic, without web scraping."""
+    article_type = str(selection.get("article_type") or "")
+    topic = unicodedata.normalize(
+        "NFKC", str(selection.get("topic") or "")
+    ).lower()
+    scored = []
+    for index, book in enumerate(_book_catalog()):
+        types = book.get("article_types") or []
+        keywords = [
+            unicodedata.normalize("NFKC", str(value)).lower()
+            for value in book.get("keywords") or []
+        ]
+        type_score = 4 if article_type in types else 0
+        keyword_score = sum(3 for keyword in keywords if keyword in topic)
+        general_score = 1 if article_type.startswith("weekly") else 0
+        scored.append((
+            type_score + keyword_score + general_score,
+            -index,
+            book,
+        ))
+    selected = [
+        dict(row[2]) for row in sorted(scored, reverse=True)
+        if row[0] > 0
+    ][:limit]
+    if len(selected) < limit:
+        selected_isbns = {row["isbn13"] for row in selected}
+        for book in _book_catalog():
+            if book["isbn13"] in selected_isbns:
+                continue
+            selected.append(dict(book))
+            if len(selected) >= limit:
+                break
+    return selected[:limit]
 
 
 def _candidate_rows(path: Path | None = None, days: int = 7) -> list[dict]:
@@ -348,7 +406,7 @@ def _sources(selection: dict) -> tuple[list[dict], list[dict]]:
         }
         if source["url"] not in {item["url"] for item in primary}:
             primary.append(source)
-    return primary, secondary
+    return primary[:2], secondary
 
 
 def _three_line_summary(selection: dict) -> list[str]:
@@ -366,7 +424,8 @@ def _three_line_summary(selection: dict) -> list[str]:
 
 
 def _local_article(selection: dict, primary: list[dict],
-                   secondary: list[dict]) -> tuple[str, str]:
+                   secondary: list[dict],
+                   related_books: list[dict] | None = None) -> tuple[str, str]:
     title = selection["topic"]
     summary = "\n".join(f"- {line}" for line in _three_line_summary(selection))
     candidates = selection.get("candidates", [])
@@ -388,8 +447,15 @@ def _local_article(selection: dict, primary: list[dict],
         )
     primary_links = "\n".join(
         f"- [{row['name']}]({row['url']})" for row in primary)
-    secondary_links = "\n".join(
-        f"- [{row['name']}]({row['url']})" for row in secondary[:8])
+    related_books = (
+        related_books
+        if related_books is not None
+        else extract_related_books(selection)
+    )
+    book_links = "\n".join(
+        f"- [{row['title']}（{row['author']}）]({row['amazon_url']})"
+        for row in related_books[:2]
+    )
     article = f"""# {title}
 
 {summary}
@@ -440,13 +506,15 @@ def _local_article(selection: dict, primary: list[dict],
 
 ## 一次資料・参考資料
 
-### 一次資料
+### 一次資料（2件）
 
 {primary_links}
 
-### 二次資料
+### 関連書籍（Amazon・2件）
 
-{secondary_links or "- 今回は一次資料を中心に構成"}
+{book_links}
+
+※Amazonの商品情報・在庫・価格は変動します。リンクはISBNによる商品検索です。
 """
     minimum = _int("FREE_NOTE_MIN_CHARS", 1800)
     if len(article) < minimum:
@@ -480,7 +548,8 @@ def _local_article(selection: dict, primary: list[dict],
     return title, article
 
 
-def _sources_markdown(primary: list[dict], secondary: list[dict]) -> str:
+def _sources_markdown(primary: list[dict], secondary: list[dict],
+                      related_books: list[dict] | None = None) -> str:
     def section(title: str, rows: list[dict]) -> str:
         blocks = [f"# {title}", ""]
         if not rows:
@@ -496,7 +565,23 @@ def _sources_markdown(primary: list[dict], secondary: list[dict]) -> str:
                 "",
             ])
         return "\n".join(blocks)
-    return section("一次資料", primary) + "\n\n" + section("二次資料", secondary)
+    books = ["# 関連書籍（Amazon）", ""]
+    for row in (related_books or [])[:2]:
+        books.extend([
+            f"## {row.get('title', '関連書籍')}",
+            f"- 著者: {row.get('author', '')}",
+            f"- ISBN-13: {row.get('isbn13', '')}",
+            f"- Amazon: {row.get('amazon_url', '')}",
+            "- 選定方法: 記事種別・記事タイトルとの一致度による自動選定",
+            "",
+        ])
+    return (
+        section("一次資料（記事掲載2件）", primary[:2])
+        + "\n\n"
+        + section("内部確認用の二次資料", secondary)
+        + "\n\n"
+        + "\n".join(books)
+    )
 
 
 REVIEW_MARKDOWN = """# 公開前チェック
@@ -508,6 +593,9 @@ REVIEW_MARKDOWN = """# 公開前チェック
 - [ ] 法案名・制度名は正しい
 - [ ] 数字と単位は正しい
 - [ ] 一次資料と本文が一致している
+- [ ] 一次資料リンクが正確に2件ある
+- [ ] 関連書籍のAmazonリンクが正確に2件ある
+- [ ] 関連書籍が記事テーマと一致している
 - [ ] 未確認情報を断定していない
 
 ## 編集品質
@@ -540,7 +628,8 @@ REVIEW_MARKDOWN = """# 公開前チェック
 
 
 def quality_check(article: str, title: str, primary: list[dict],
-                  secondary: list[dict]) -> dict:
+                  secondary: list[dict],
+                  related_books: list[dict] | None = None) -> dict:
     reasons = []
     warnings = []
     length = len(article)
@@ -550,6 +639,8 @@ def quality_check(article: str, title: str, primary: list[dict],
         reasons.append("too_long")
     if len(primary) < _int("FREE_NOTE_MIN_PRIMARY_SOURCES", 2):
         reasons.append("insufficient_primary_sources")
+    if len(primary) != 2:
+        reasons.append("primary_source_count_not_two")
     if title not in article:
         reasons.append("title_body_mismatch")
     first_line = next(
@@ -563,13 +654,42 @@ def quality_check(article: str, title: str, primary: list[dict],
     if "## 賛成側の最も強い主張" not in article or "## 反対側の最も強い主張" not in article:
         warnings.append("unbalanced_arguments")
     known_urls = {row.get("url") for row in primary + secondary}
+    if related_books is not None:
+        known_urls.update(row.get("amazon_url") for row in related_books)
     article_urls = re.findall(r"https?://[^\s)>\]]+", article)
+    primary_urls = [str(row.get("url") or "") for row in primary]
+    amazon_urls = [
+        url for url in article_urls
+        if (urlparse(url).hostname or "").lower() == "www.amazon.co.jp"
+    ]
+    if related_books is None:
+        known_urls.update(amazon_urls)
+    if len(amazon_urls) != 2:
+        reasons.append("related_book_count_not_two")
+    if (
+        len([url for url in article_urls if url in primary_urls]) != 2
+        or any(url not in article_urls for url in primary_urls)
+    ):
+        reasons.append("primary_link_count_not_two")
+    if len(article_urls) != 4:
+        reasons.append("reference_link_count_not_four")
+    if any(
+        (urlparse(url).hostname or "").lower() != "www.amazon.co.jp"
+        or "/s?" not in url
+        for url in amazon_urls
+    ):
+        reasons.append("invalid_amazon_book_url")
     if any(url not in known_urls for url in article_urls):
         reasons.append("unknown_or_fabricated_url")
     source_text = " ".join(
         f"{row.get('name','')} {row.get('fact_used','')} {row.get('published_at','')}"
         for row in primary + secondary)
-    numeric_claims = re.findall(r"\d[\d,.]*\s*(?:円|%|％|人|件|億|兆)", article)
+    numeric_body = "\n".join(
+        line for line in article.splitlines()
+        if not line.lstrip().startswith("#") and "](https://" not in line
+    )
+    numeric_claims = re.findall(
+        r"\d[\d,.]*\s*(?:円|%|％|人|件|億|兆)", numeric_body)
     if any(claim.replace(" ", "") not in source_text.replace(" ", "")
            for claim in numeric_claims):
         reasons.append("unsupported_numeric_claim")
@@ -638,16 +758,20 @@ def _save_db(metadata: dict, path: Path | None = None) -> bool:
           (content_id,title,slug,article_type,status,generated_at,target_publish_date,
            published_at,note_url,prompt_version,model,character_count,reading_minutes,
            primary_topic_key,included_topic_keys_json,source_news_ids_json,
-           source_x_post_ids_json,primary_sources_json,secondary_sources_json,draft_path,
+           source_x_post_ids_json,primary_sources_json,secondary_sources_json,
+           related_books_json,draft_path,
            discord_notification_status,discord_message_id,input_tokens,output_tokens,
            estimated_cost_usd,quality_score,safety_score,cover_path,cover_status,
            cover_width,cover_height,created_at,updated_at)
-          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
           ON CONFLICT(content_id) DO UPDATE SET
            status=excluded.status,published_at=excluded.published_at,
            note_url=excluded.note_url,draft_path=excluded.draft_path,
            discord_notification_status=excluded.discord_notification_status,
            discord_message_id=excluded.discord_message_id,
+           primary_sources_json=excluded.primary_sources_json,
+           secondary_sources_json=excluded.secondary_sources_json,
+           related_books_json=excluded.related_books_json,
            cover_path=excluded.cover_path,cover_status=excluded.cover_status,
            cover_width=excluded.cover_width,cover_height=excluded.cover_height,
            updated_at=excluded.updated_at""", (
@@ -662,6 +786,7 @@ def _save_db(metadata: dict, path: Path | None = None) -> bool:
             json.dumps(metadata["source_x_post_ids"], ensure_ascii=False),
             json.dumps(metadata["primary_sources"], ensure_ascii=False),
             json.dumps(metadata["secondary_sources"], ensure_ascii=False),
+            json.dumps(metadata.get("related_books", []), ensure_ascii=False),
             metadata["draft_path"], metadata["discord_notification_status"],
             metadata.get("discord_message_id"), metadata.get("input_tokens", 0),
             metadata.get("output_tokens", 0), metadata["estimated_cost_usd"],
@@ -692,6 +817,7 @@ def _record_run(run: dict, path: Path | None = None) -> None:
 
 
 def _openai_article(selection: dict, primary: list[dict], secondary: list[dict],
+                    related_books: list[dict],
                     path: Path | None = None, client_factory=None) -> dict:
     models = [
         os.environ.get(
@@ -731,6 +857,12 @@ def _openai_article(selection: dict, primary: list[dict], secondary: list[dict],
         "maximum_characters": _int("FREE_NOTE_MAX_CHARS", 3200),
         "primary_sources": primary,
         "secondary_sources": secondary,
+        "related_books": related_books,
+        "required_reference_structure": {
+            "primary_source_links": 2,
+            "amazon_related_book_links": 2,
+            "use_exact_supplied_urls": True,
+        },
     }
     try:
         if client_factory is None:
@@ -748,7 +880,9 @@ def _openai_article(selection: dict, primary: list[dict], secondary: list[dict],
                 "Do not invent facts, URLs, names, quotations or numbers. Separate fact from "
                 "opinion, present the strongest fair arguments on both sides, and never expose "
                 "internal labels, model names, JSON keys or prompts. Begin with exactly the "
-                "supplied required_title_heading, then the three-line summary. Return Markdown only."
+                "supplied required_title_heading, then the three-line summary. In the final "
+                "reference section, include exactly two supplied primary source links and exactly "
+                "two supplied Amazon book links. Copy all URLs exactly. Return Markdown only."
             ),
             input=json.dumps(prompt, ensure_ascii=False),
             max_output_tokens=max_output,
@@ -801,6 +935,7 @@ def generate_free_note(article_type: str | None = None, topic: str | None = None
         }, path)
         return result
     primary, secondary = _sources(selection)
+    related_books = extract_related_books(selection)
     if len(primary) < _int("FREE_NOTE_MIN_PRIMARY_SOURCES", 2):
         result = {
             "status": "skipped", "reason": "insufficient_primary_sources",
@@ -823,14 +958,16 @@ def generate_free_note(article_type: str | None = None, topic: str | None = None
     quality = {}
     for attempt in range(attempts):
         if dry_run:
-            title, article = _local_article(selection, primary, secondary)
+            title, article = _local_article(
+                selection, primary, secondary, related_books)
             generation = {
                 "model": "local-dry-run", "input_tokens": 0, "output_tokens": 0,
                 "estimated_cost_usd": 0.0,
             }
         else:
             generation = _openai_article(
-                selection, primary, secondary, path, client_factory)
+                selection, primary, secondary, related_books,
+                path, client_factory)
             article = generation.get("article", "")
             if not article:
                 break
@@ -841,7 +978,8 @@ def generate_free_note(article_type: str | None = None, topic: str | None = None
                 if first_line.startswith("# ") and not first_line.startswith("## ")
                 else selection["topic"]
             )
-        quality = quality_check(article, title, primary, secondary)
+        quality = quality_check(
+            article, title, primary, secondary, related_books)
         if quality["passed"]:
             break
 
@@ -894,6 +1032,7 @@ def generate_free_note(article_type: str | None = None, topic: str | None = None
         ],
         "source_x_post_ids": [],
         "primary_sources": primary, "secondary_sources": secondary,
+        "related_books": related_books,
         "discord_notification_status": "pending" if passed else "not_eligible",
         "discord_message_id": None, "note_url": None, "published_at": None,
         "input_tokens": generation.get("input_tokens", 0),
@@ -917,7 +1056,10 @@ def generate_free_note(article_type: str | None = None, topic: str | None = None
         f"# {selection['topic']}\n\n## 構成案\n\n"
         "API予算または生成エラーのため、本文生成を停止しました。"
     ))
-    _atomic_text(folder / "sources.md", _sources_markdown(primary, secondary))
+    _atomic_text(
+        folder / "sources.md",
+        _sources_markdown(primary, secondary, related_books),
+    )
     _atomic_text(folder / "review.md", REVIEW_MARKDOWN)
     _atomic_json(folder / "metadata.json", metadata)
     if not _save_db(metadata, path):

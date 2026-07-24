@@ -121,7 +121,7 @@ CREATE TABLE IF NOT EXISTS note_drafts (
  character_count INTEGER, reading_minutes INTEGER, primary_topic_key TEXT,
  included_topic_keys_json TEXT, source_news_ids_json TEXT,
  source_x_post_ids_json TEXT, primary_sources_json TEXT,
- secondary_sources_json TEXT, draft_path TEXT,
+ secondary_sources_json TEXT, related_books_json TEXT, draft_path TEXT,
  discord_notification_status TEXT, discord_message_id TEXT,
  input_tokens INTEGER, output_tokens INTEGER, estimated_cost_usd REAL,
  quality_score REAL, safety_score REAL, cover_path TEXT, cover_status TEXT,
@@ -376,6 +376,7 @@ def add_column_if_missing(table: str, column: str, declaration: str,
         "note_drafts": {
             "cover_path": "TEXT", "cover_status": "TEXT",
             "cover_width": "INTEGER", "cover_height": "INTEGER",
+            "related_books_json": "TEXT",
         },
     }
     if declaration != allowed.get(table, {}).get(column):
@@ -447,6 +448,7 @@ def apply_additive_migrations(path: Path | None = None) -> dict:
         "note_drafts": {
             "cover_path": "TEXT", "cover_status": "TEXT",
             "cover_width": "INTEGER", "cover_height": "INTEGER",
+            "related_books_json": "TEXT",
         },
     }
     added = {
