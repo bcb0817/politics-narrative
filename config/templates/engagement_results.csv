@@ -1,0 +1,2 @@
+queue_id,manual_post_id,impressions,likes,replies,reposts,quotes,bookmarks,profile_clicks,follows,measured_at
+example-queue-id,example-post-id,0,0,0,0,0,0,0,0,2026-07-25T12:00:00+09:00

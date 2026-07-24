@@ -1,0 +1,50 @@
+[
+  {
+    "name": "令和8年 閣議案件",
+    "publisher": "首相官邸",
+    "published_at": "2026",
+    "url": "https://www.kantei.go.jp/jp/kakugi/2026/index.html",
+    "fact_used": "閣議決定・閣議了解された案件の確認",
+    "article_types": ["all"]
+  },
+  {
+    "name": "令和8年7月21日 定例閣議案件",
+    "publisher": "首相官邸",
+    "published_at": "2026-07-21",
+    "url": "https://www.kantei.go.jp/jp/kakugi/2026/kakugi-2026072102.html",
+    "fact_used": "直近の閣議案件の具体的内容の確認",
+    "article_types": ["weekly_top5", "weekly_deep_dive", "cabinet_decision_vs_law"]
+  },
+  {
+    "name": "立法情報",
+    "publisher": "衆議院",
+    "published_at": "",
+    "url": "https://www.shugiin.go.jp/Internet/index.nsf/html/rippo_top.htm",
+    "fact_used": "法律案・議案・審議経過の確認",
+    "article_types": ["all"]
+  },
+  {
+    "name": "国会回次別情報",
+    "publisher": "参議院",
+    "published_at": "",
+    "url": "https://www.sangiin.go.jp/japanese/kaiki/index.html",
+    "fact_used": "会期、議案、審議情報の確認",
+    "article_types": ["weekly_top5", "weekly_deep_dive", "legislative_process", "party_policy_comparison"]
+  },
+  {
+    "name": "法令改正情報",
+    "publisher": "e-Gov法令検索",
+    "published_at": "",
+    "url": "https://laws.e-gov.go.jp/docs/law-data-basic/da91fe9-law-revisions/",
+    "fact_used": "法令の改正履歴と施行関係の確認",
+    "article_types": ["all"]
+  },
+  {
+    "name": "e-Gov法令検索 ヘルプ",
+    "publisher": "デジタル庁",
+    "published_at": "",
+    "url": "https://laws.e-gov.go.jp/help",
+    "fact_used": "法令情報の読み方と収録範囲の確認",
+    "article_types": ["legislative_process", "cabinet_decision_vs_law", "evergreen_institutional_explainer"]
+  }
+]

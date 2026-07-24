@@ -10,6 +10,8 @@ venv/
 data/
 logs/
 outputs/
+reports/
+evals/results/
 archive/
 bot.log
 

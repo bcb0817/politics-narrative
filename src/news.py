@@ -5,6 +5,7 @@ import json
 import os
 import math
 import re
+from contextlib import closing
 from pathlib import Path
 from email.utils import format_datetime
 from datetime import datetime, timedelta, timezone
@@ -16,6 +17,10 @@ from x_attention import (
     env_int,
     match_topics_to_rss,
 )
+from api_budget import (estimate_x, finalize as finalize_budget, forecast as cost_forecast,
+                        reserve as reserve_budget, usage_totals)
+from metrics_db import connect, db_path, init_db
+from xai_radar import apply_verified_attention, search as fetch_xai_radar
 
 # リポジトリ直下（cwdに依存しない）
 _ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -54,31 +59,42 @@ def _state_dir() -> Path:
 RSS_FEEDS = [
     {
         "name": "内閣府公式",
-        "url": "https://www.cao.go.jp/rss/news.rdf"
+        "url": "https://www.cao.go.jp/rss/news.rdf",
+        "source_type": "government_official"
+    },
+    {
+        "name": "首相官邸公式",
+        "url": "https://www.kantei.go.jp/jp/rss/index.rdf",
+        "source_type": "government_official"
+    },
+    {
+        "name": "外務省公式",
+        "url": "https://www.mofa.go.jp/mofaj/rss/whatsnew.rdf",
+        "source_type": "ministry_official"
     },
     {
         "name": "NHK政治",
-        "url": "https://www.nhk.or.jp/rss/news/cat4.xml"
+        "url": "https://www.nhk.or.jp/rss/news/cat4.xml", "source_type": "trusted_media"
     },
     {
         "name": "NHK経済",
-        "url": "https://www.nhk.or.jp/rss/news/cat5.xml"
+        "url": "https://www.nhk.or.jp/rss/news/cat5.xml", "source_type": "trusted_media"
     },
     {
         "name": "NHK国際",
-        "url": "https://www.nhk.or.jp/rss/news/cat6.xml"
+        "url": "https://www.nhk.or.jp/rss/news/cat6.xml", "source_type": "trusted_media"
     },
     {
         "name": "Yahoo!ニュース政治",
-        "url": "https://news.yahoo.co.jp/rss/topics/domestic.xml"
+        "url": "https://news.yahoo.co.jp/rss/topics/domestic.xml", "source_type": "news_aggregator"
     },
     {
         "name": "Yahoo!ニュース経済",
-        "url": "https://news.yahoo.co.jp/rss/topics/business.xml"
+        "url": "https://news.yahoo.co.jp/rss/topics/business.xml", "source_type": "news_aggregator"
     },
     {
         "name": "Yahoo!ニュース国際",
-        "url": "https://news.yahoo.co.jp/rss/topics/world.xml"
+        "url": "https://news.yahoo.co.jp/rss/topics/world.xml", "source_type": "news_aggregator"
     },
 ]
 
@@ -92,12 +108,17 @@ def _env_bool(name, default="false"):
     return os.environ.get(name, default).strip().lower() in ("true", "1", "yes")
 
 
-def _save_x_search_results(topics: list[dict], queries: list[dict]) -> None:
+def _save_x_search_results(topics: list[dict], queries: list[dict], resources: int = 0,
+                           estimated_cost: float = 0.0) -> None:
     state = _state_dir()
     now = datetime.now(timezone.utc)
     payload = {
-        "collected_at": now.isoformat(),
+        "provider": "native_x",
+        "generated_at": now.isoformat(),
+        "expires_at": (now + timedelta(minutes=env_int(os.environ.get("X_SEARCH_CACHE_TTL_MINUTES"), 360, 1, 1440))).isoformat(),
         "query_count": len(queries),
+        "post_resources_read": resources,
+        "estimated_cost_usd": estimated_cost,
         "queries": [{"label": query.get("label", ""), "dynamic": query.get("dynamic", False)}
                     for query in queries],
         "topic_count": len(topics),
@@ -112,34 +133,127 @@ def _save_x_search_results(topics: list[dict], queries: list[dict]) -> None:
         handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
+def load_x_search_cache(now: datetime | None = None) -> list[dict]:
+    now = now or datetime.now(timezone.utc)
+    try:
+        payload = json.loads((_state_dir() / "x_search_latest.json").read_text(encoding="utf-8"))
+        expires = datetime.fromisoformat(payload.get("expires_at", ""))
+        if expires.tzinfo is None:
+            expires = expires.replace(tzinfo=timezone.utc)
+        if now <= expires and _env_bool("X_SEARCH_REUSE_RESULTS", "true"):
+            return payload.get("topics", []) if isinstance(payload.get("topics"), list) else []
+    except Exception:
+        pass
+    return []
+
+
+def should_run_x_search(now_jst: datetime | None = None) -> bool:
+    now_jst = now_jst or datetime.now(ZoneInfo("Asia/Tokyo"))
+    schedule = {value.strip() for value in os.environ.get("X_SEARCH_SCHEDULE", "06:00,12:00,18:00").split(",")}
+    return now_jst.strftime("%H:%M") in schedule
+
+
+def _already_ran_current_schedule(now_jst: datetime) -> bool:
+    try:
+        payload = json.loads((_state_dir() / "x_search_latest.json").read_text(encoding="utf-8"))
+        generated = datetime.fromisoformat(payload.get("generated_at", "")).astimezone(ZoneInfo("Asia/Tokyo"))
+        return generated.strftime("%Y-%m-%d %H:%M") == now_jst.strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return False
+
+
+def _load_seen_x_post_ids() -> set[str]:
+    try:
+        values = json.loads((_state_dir() / "x_search_seen_post_ids.json").read_text(encoding="utf-8"))
+        return {str(value) for value in values if value}
+    except Exception:
+        return set()
+
+
+def _save_seen_x_post_ids(values: set[str]) -> None:
+    # Snowflake IDs are time-sortable; retaining the newest 10,000 bounds local state.
+    newest = sorted(values, key=lambda value: int(value) if value.isdigit() else 0)[-10000:]
+    (_state_dir() / "x_search_seen_post_ids.json").write_text(
+        json.dumps(newest, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _daily_x_search_reads(path: Path | None = None) -> int:
+    init_db(path)
+    day = datetime.now(ZoneInfo("Asia/Tokyo")).date().isoformat()
+    try:
+        with closing(connect(path)) as conn:
+            return int(conn.execute("""SELECT COALESCE(SUM(resource_count),0) FROM api_usage_events
+                WHERE provider='x' AND operation='x_search' AND timestamp LIKE ?""", (day + "%",)).fetchone()[0])
+    except Exception:
+        return 0
+
+
 def fetch_x_search_topics(rss_items: list[dict]) -> list[dict]:
     """Use X Recent Search only as a cross-account attention radar."""
     if not _env_bool("X_SEARCH_ENABLED"):
         return []
+
+    now_jst = datetime.now(ZoneInfo("Asia/Tokyo"))
+    if not should_run_x_search(now_jst):
+        return load_x_search_cache()
+    from audit_tools import guard_provider_execution
+    if not guard_provider_execution("native_x", now_jst):
+        print("Discovery provider conflict: xai already executed in this slot")
+        return load_x_search_cache()
+    if _already_ran_current_schedule(now_jst):
+        return load_x_search_cache()
+    if cost_forecast(db_path()).get("pause_x_search"):
+        print("X Search paused: projected monthly budget reached the 93% restriction stage")
+        return load_x_search_cache()
 
     bearer_token = os.environ.get("X_BEARER_TOKEN", "").strip()
     if not bearer_token:
         print("X Search unavailable -> continuing with RSS candidates")
         return []
 
-    max_queries = env_int(os.environ.get("X_SEARCH_MAX_QUERIES_PER_RUN"), 5, 1, 5)
-    max_results = env_int(os.environ.get("X_SEARCH_MAX_RESULTS_PER_QUERY"), 20, 10, 100)
-    lookback_minutes = env_int(os.environ.get("X_SEARCH_LOOKBACK_MINUTES"), 90, 10, 1440)
+    max_queries = env_int(os.environ.get("X_SEARCH_MAX_QUERIES_PER_RUN"), 3, 1, 3)
+    max_results = env_int(os.environ.get("X_SEARCH_MAX_RESULTS_PER_QUERY"), 6, 1, 100)
+    lookback_minutes = env_int(os.environ.get("X_SEARCH_LOOKBACK_MINUTES"), 240, 10, 1440)
     min_accounts = env_int(os.environ.get("X_SEARCH_MIN_UNIQUE_ACCOUNTS"), 3, 2, 100)
     min_posts = env_int(os.environ.get("X_SEARCH_MIN_POST_COUNT"), 3, 2, 100)
     max_topics = env_int(os.environ.get("X_SEARCH_MAX_TOPIC_RESULTS"), 10, 1, 50)
     queries = build_search_queries(rss_items, max_queries=max_queries)
+    per_run_cap = env_int(os.environ.get("X_SEARCH_MAX_POST_READS_PER_RUN"), 18, 1, 10000)
+    daily_cap = env_int(os.environ.get("X_SEARCH_MAX_POST_READS_PER_DAY"), 54, 1, 10000)
+    monthly_cap = env_int(os.environ.get("X_SEARCH_MAX_POST_READS_PER_MONTH"), 1620, 1, 100000)
+    if queries:
+        max_results = min(max_results, max(1, per_run_cap // len(queries)))
+    totals = usage_totals(db_path())
+    planned_reads = len(queries) * max_results
+    if _daily_x_search_reads() + planned_reads > daily_cap:
+        print("X Search daily read cap reached")
+        print("Continuing with RSS and cached X attention data")
+        return load_x_search_cache()
+    if totals.get("x_search_reads", 0) + planned_reads > monthly_cap:
+        print("X Search monthly read cap reached")
+        print("Continuing with RSS and cached X attention data")
+        return load_x_search_cache()
+    reservation, budget_reason = reserve_budget(
+        "x", "x_search", "recent_search", estimate_x("post_read_per_resource", planned_reads),
+        planned_reads, {"query_count": len(queries)})
+    if not reservation:
+        print(f"X Search skipped: {budget_reason}")
+        return load_x_search_cache()
 
     try:
         import tweepy
 
         client = tweepy.Client(bearer_token=bearer_token, wait_on_rate_limit=False)
     except Exception as e:
+        finalize_budget(reservation, 0, success=False, error_type=type(e).__name__, resource_count=0)
         print(f"X Search unavailable -> continuing with RSS candidates ({type(e).__name__})")
         return []
 
     all_topics = []
     successful_queries = 0
+    resources_read = 0
+    seen_tweet_ids = _load_seen_x_post_ids()
+    newly_seen_tweet_ids = set()
     start_time = datetime.now(timezone.utc) - timedelta(minutes=lookback_minutes)
     for query in queries:
         try:
@@ -158,7 +272,15 @@ def fetch_x_search_topics(rss_items: list[dict]) -> list[dict]:
         includes = getattr(response, "includes", None) or {}
         users = {str(user.id): user for user in includes.get("users", [])}
         posts = []
-        for tweet in response.data or []:
+        response_posts = list(response.data or [])[:max_results]
+        resources_read += len(response_posts)
+        for tweet in response_posts:
+            if len(posts) >= max_results:
+                break
+            if str(tweet.id) in seen_tweet_ids:
+                continue
+            seen_tweet_ids.add(str(tweet.id))
+            newly_seen_tweet_ids.add(str(tweet.id))
             metrics = tweet.public_metrics or {}
             author = users.get(str(tweet.author_id))
             posts.append({
@@ -182,6 +304,8 @@ def fetch_x_search_topics(rss_items: list[dict]) -> list[dict]:
         ))
 
     if successful_queries == 0:
+        finalize_budget(reservation, 0, success=False, error_type="x_search_failed",
+                        resource_count=resources_read)
         print("X Search unavailable -> continuing with RSS candidates")
         return []
     merged = {}
@@ -191,7 +315,11 @@ def fetch_x_search_topics(rss_items: list[dict]) -> list[dict]:
         if current is None or topic["x_attention_score"] > current["x_attention_score"]:
             merged[key] = topic
     topics = sorted(merged.values(), key=lambda row: row["x_attention_score"], reverse=True)[:max_topics]
-    _save_x_search_results(topics, queries)
+    actual_cost = estimate_x("post_read_per_resource", resources_read) or 0
+    finalize_budget(reservation, actual_cost, success=True, resource_count=resources_read)
+    if newly_seen_tweet_ids:
+        _save_seen_x_post_ids(seen_tweet_ids)
+    _save_x_search_results(topics, queries, resources_read, actual_cost)
     print(f"X Search topics found: {len(all_topics)}")
     print(f"X Search qualified topics: {len(topics)}")
     for topic in topics[:5]:
@@ -267,6 +395,7 @@ def fetch_all_items(include_x=True):
                     "title": title,
                     "link": link,
                     "source": feed["name"],
+                    "source_type": feed.get("source_type", "rss"),
                     "pub_date": pub_date,
                     "summary": summary,
                     "discovered_via": ["rss"],
@@ -280,13 +409,20 @@ def fetch_all_items(include_x=True):
             print(f"{feed['name']} 取得エラー: {e}")
             continue
 
-    if include_x and _env_bool("X_SEARCH_ENABLED"):
+    if include_x:
+        provider = os.environ.get("X_TOPIC_DISCOVERY_PROVIDER", "xai").strip().lower()
         try:
-            topics = fetch_x_search_topics(all_items)
-            all_items = match_topics_to_rss(all_items, topics)
+            if provider == "xai" and _env_bool("XAI_ENABLED", "true"):
+                all_items = apply_verified_attention(
+                    all_items, fetch_xai_radar(candidates=all_items))
+            elif provider == "native_x" and _env_bool("X_NATIVE_SEARCH_ENABLED", "false") \
+                    and _env_bool("X_SEARCH_ENABLED"):
+                all_items = match_topics_to_rss(all_items, fetch_x_search_topics(all_items))
+            elif provider not in {"xai", "native_x", "none"}:
+                print(f"Unknown X_TOPIC_DISCOVERY_PROVIDER={provider}; using RSS only")
         except Exception as e:
-            # X is an optional attention signal. Never expose credentials or stop RSS.
-            print(f"X Search unavailable -> continuing with RSS candidates ({type(e).__name__})")
+            # Never switch to another paid discovery provider automatically.
+            print(f"Topic discovery unavailable -> continuing with RSS candidates ({type(e).__name__})")
 
     return all_items
 

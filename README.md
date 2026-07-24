@@ -24,7 +24,9 @@
 ```
 local_bot.py daemon          ← 常駐。JST 毎時07分・37分に起動
    └── src/post.py diagram   ← 1回分の投稿処理（既存ロジックそのまま）
-         ├── src/news.py     ← RSS取得とX Searchレーダーの接続
+        ├── src/news.py     ← RSS取得と選択式トピックレーダーの接続
+        ├── src/xai_radar.py ← xAI X Search（事実認定には不使用）
+        ├── src/engagement_queue.py ← 人間承認用の引用・返信候補
          ├── src/x_attention.py ← X注目度集計・スパム補正・RSS照合
          ├── OpenAI API   ← 投稿候補の生成・スコアリング
          └── tweepy          ← X へ投稿（既定はテキスト＋スレッド返信）
@@ -66,7 +68,25 @@ cp .env.example .env        # Windows: copy .env.example .env
 
 `.env` は `.gitignore` 済みです。**絶対にコミットしないでください。**
 
-### X Searchを有効にする
+### トピック探索プロバイダー
+
+`X_TOPIC_DISCOVERY_PROVIDER=xai|native_x|none` で選択します。有料プロバイダーは同時実行せず、
+失敗時に別の有料プロバイダーへ自動切替しません。`xai` はX上の伸び始めを検出するだけで、
+事実はRSS・公式資料・信頼できる報道で別途確認します。
+
+```dotenv
+X_TOPIC_DISCOVERY_PROVIDER=xai
+X_NATIVE_SEARCH_ENABLED=false
+XAI_ENABLED=true
+XAI_MODEL=grok-4.5
+XAI_SEARCH_SCHEDULE=06:00,09:00,12:00,15:00,18:00,21:00
+```
+
+xAIレーダーは`tool_choice=required`、`max_turns=1`、`parallel_tool_calls=false`で実行します。
+実際の`server_side_tool_usage_details.x_search_calls`と`cost_in_usd_ticks`を保存し、
+複数検索が報告された場合は再試行せず停止します。
+
+### ネイティブX Searchを有効にする
 
 X Developer PortalでBearer Tokenを取得し、`.env`へ次を追加します。
 
@@ -88,14 +108,15 @@ X投稿を直接候補にせず、RSS・公式情報で確認済みの候補に�
 いいね、リポスト、返信、引用を経過時間で補正し、単一アカウント、コピー投稿、
 返信スパム、反応誘導、新規・低活動アカウントなどには保守的な減点を行います。
 
-検索は固定政策語とRSS見出しから抽出した固有語を組み合わせ、1回最大5クエリです。
+検索は固定政策語とRSS見出しから抽出した固有語を組み合わせ、1回最大3クエリ・各6件（合計18件）です。
 集計は `data/x_search_latest.json` と `data/x_search_history/YYYY-MM-DD.jsonl` に保存します。
 X API障害やレート制限時はRSSだけで継続します。投稿形式は常に久世ゆい独自の
 通常投稿で、X上の意見や文章の模倣・引用ポストは行いません。
 
-`SOURCE_SCHEDULE_SPLIT=true` の場合、毎時00分はRSS・官公庁公式情報を基にした
-独自テキスト、毎時30分は外部確認済みのX Search話題を基にした独自テキストを
-生成します。他者の文章、画像、動画をダウンロードして再投稿する機能はありません。
+RSS・官公庁公式情報は05:00〜23:00の毎時00分（1日19枠）に監視し、
+X Searchは06:00・12:00・18:00だけ更新します。
+それ以外の監視では6時間キャッシュ済みの集計値だけを参照します。
+キャッシュは集計値だけを含み、他者の文章、画像、動画を再投稿する機能はありません。
 
 ## 初回だけ: init-state（重要）
 
@@ -109,7 +130,7 @@ catch-up 仕様があります。GitHub Actions 運用では意図された挙�
 **過去24時間分（最大48スロット）のバックログ投稿が始まってしまいます。**
 
 `init-state` は、過去24時間以内に開始済みのスロットを「処理済み」として登録し
-（実投稿はしません）、以後は未来の 07分/37分 スロットから通常運用にします。
+（実投稿はしません）、以後は未来の毎時00分スロットから通常運用にします。
 
 **ローカルで初めて動かす前に必ず1回実行してください。**
 
@@ -262,19 +283,53 @@ logs/                   ログ（git管理外）
 
 ## 選別投稿ポリシー
 
-Botは30分ごとにニュースを監視しますが、全枠で投稿しません。JST基準で次を適用します。
+Botは05:00〜23:00の毎時00分にニュースを監視しますが、全枠で投稿しません。JST基準で次を適用します。
 
-- `MAX_DAILY_POSTS=16`: 1日の成功投稿上限
-- `MIN_POST_INTERVAL_MINUTES=45`: 成功投稿間の最短間隔
+- `ORIGINAL_DAILY_POST_MIN=6`: 目標値（投稿ノルマではない）
+- `ORIGINAL_DAILY_POST_MAX=8`: 通常投稿の上限
+- `BREAKING_DAILY_POST_LIMIT=2` / `MAX_DAILY_AUTOMATED_POSTS=10`: 重大速報・総投稿上限
+- `MIN_POST_INTERVAL_MINUTES=60`: 成功投稿間の最短間隔
 - `TOPIC_COOLDOWN_HOURS=4`: 同一テーマの冷却時間
-- `LOW_QUALITY_FALLBACK_HOURS=3`: 3時間以上成功投稿がなければ得点・型・テーマ枠を緩和
+- `LOW_QUALITY_FALLBACK_ENABLED=false`: 無投稿でも品質基準を緩和しない
+- `EVERGREEN_MIN_SILENCE_HOURS=3`: 3時間無投稿なら公式資料に基づく制度解説を最大1件検討
 - `QUALITY_GATE_ENABLED=true` / `MIN_POST_SCORE=7.0`: 品質スコアゲート
 
 低品質フォールバック中も、RSS確認、政治関連性、重複URL、未確認情報、BANリスク、
-1日16件の上限は緩和しません。
+1日10件の上限は緩和しません。絵文字は選択式で、約25％・最大1個です。重大事件では使いません。
 
 投稿タイプは `breaking_news`、`issue_diagram`、`strong_opinion`、
-`comparison_factcheck`、`morning_evening_digest` の5種類です。内部ラベルは本文へ出しません。
+`comparison_factcheck`、`digest` の5種類です。内部ラベルは本文へ出しません。
+
+## Phase 1〜3・APIコスト管理 🛡️
+
+共通SQLiteは `data/bot_metrics.db` です。既存JSONを維持しながら、ニュース候補、生成投稿、
+公開投稿、1h/24h/72h指標、日次・週次レビュー、API費用を二重記録します。
+
+```powershell
+.\.venv\Scripts\python.exe local_bot.py db-status
+.\.venv\Scripts\python.exe local_bot.py collect-metrics
+.\.venv\Scripts\python.exe local_bot.py daily-review
+.\.venv\Scripts\python.exe local_bot.py weekly-review
+.\.venv\Scripts\python.exe local_bot.py preview-extensions
+.\.venv\Scripts\python.exe local_bot.py budget-status
+.\.venv\Scripts\python.exe local_bot.py cost-forecast
+```
+
+OpenAI `$8`、xAI `$2`、X `$13`、合計 `$23` の月額上限は、API呼び出し前にSQLiteトランザクションで
+最大予想額を予約して判定します。通常投稿へURLが含まれる場合は投稿しません。🔒
+OpenAI予算は投稿生成 `$5`、分類 `$0.5`、日次レビュー `$1.5`、週次レビュー `$0.5`、
+予備 `$0.5` に分離し、レビューが投稿生成枠を消費しないようにしています。
+`cost-forecast` は監視・X利用件数、モデル別費用、月末予測、円換算残額を表示します。
+月末予測が4,500円超で警告、4,800円超でxAI X Searchと低優先LLM処理を停止します。
+
+人間承認用キューとプロフィール監査はXへ書き込みません。
+
+```powershell
+.\.venv\Scripts\python.exe local_bot.py engagement-queue
+.\.venv\Scripts\python.exe local_bot.py queue-status
+.\.venv\Scripts\python.exe local_bot.py queue-update --type quote --id 1 --status approved
+.\.venv\Scripts\python.exe local_bot.py profile-audit
+```
 テーマ履歴は `data/recent_topics.json`、最新レビューは
 `data/daily_review_latest.json`、日別レビューは `data/daily_reviews/YYYY-MM-DD.json` に保存します。
 
@@ -283,6 +338,27 @@ Botは30分ごとにニュースを監視しますが、全枠で投稿しませ
 `knowledge/viral_patterns/` の `winning_patterns.md`、`losing_patterns.md`、
 `avoid_patterns.md` を更新します。次回生成では成功形式を最大3件、失敗・禁止ルールを
 最大5件だけ読み込み、プロンプトコストを制限します。
+
+## OpenAI Batch API
+
+日次レビューと週次レビューは、既定でOpenAI Batch API（`/v1/responses`、完了枠`24h`）へ
+非同期送信します。速報・通常投稿の生成は遅延を避けるため同期Responses APIのままです。
+
+```dotenv
+OPENAI_BATCH_ENABLED=true
+OPENAI_BATCH_TASKS=daily_review,weekly_report
+```
+
+デーモンは起動時と毎時処理後に完了結果を回収します。手動操作も可能です。
+
+```powershell
+.\.venv\Scripts\python.exe local_bot.py batch-status
+.\.venv\Scripts\python.exe local_bot.py batch-collect
+```
+
+入力JSONLとジョブ状態は`data/openai_batches/`およびSQLiteの`openai_batch_jobs`へ保存されます。
+同じ日次・週次処理は`custom_id`で重複送信を防止します。Batchの利用額は同期単価の50%として
+既存のOpenAI月額予算と用途別レビュー予算へ計上されます。取得エラーでもX投稿処理は停止しません。
 
 ## OpenAIモデル設定の安全な更新
 
@@ -294,13 +370,14 @@ Botは30分ごとにニュースを監視しますが、全枠で投稿しませ
 
 ```powershell
 # 変更内容だけ確認
-.\production\update_openai_models.ps1 -Profile recommended -WhatIf
+.\production\set_current_openai_models.ps1
 
 # 推奨構成: gpt-5.4-nano + gpt-5.4-mini
-.\production\update_openai_models.ps1 -Profile recommended
+.\production\set_current_openai_models.ps1 -Apply
 
 # 最新世代重視: gpt-5.4-nano + gpt-5.6-luna
-.\production\update_openai_models.ps1 -Profile latest
+# Legacy model profiles were quarantined. See:
+# .\production\DEPRECATED_MODEL_SCRIPTS.md
 ```
 
 更新後は `PoliticsNarrativeBot` の再起動が必要です。
@@ -316,3 +393,104 @@ Bot に読み込ませ、生成品質を実績ベースで改善していく設�
 
 GitHub Actions での運用は廃止しました。`.github/workflows/post.yml` は削除済みです。
 もしリポジトリに残っている場合は削除してください（scheduleが発火すると二重投稿の原因になります）。
+# Growth / cost / quality v2
+
+The production defaults keep hourly RSS and official-source monitoring while
+reducing xAI X Search to `06:00,12:00,18:00` (or `06:00,18:00` on locally
+detected low-volatility days). X-only claims are never treated as verified.
+
+Daily review runs synchronously at 04:40 JST with a 04:55 deadline and a
+local-only fallback. OpenAI Batch is reserved for weekly review and explicit
+offline quality evaluation. Automatic use of `gpt-5.6-sol` is disabled.
+
+Human-operated and quality commands:
+
+```powershell
+.\.venv\Scripts\python.exe local_bot.py eval-quality --mode rule-only
+.\.venv\Scripts\python.exe local_bot.py eval-quality --mode sample --limit 10
+.\.venv\Scripts\python.exe local_bot.py engagement-queue
+.\.venv\Scripts\python.exe local_bot.py engagement-brief
+.\.venv\Scripts\python.exe local_bot.py queue-update --type quote --id 1 --status posted_manually
+.\.venv\Scripts\python.exe local_bot.py import-human-review --file .\reports\human_review\reviewed.csv
+.\.venv\Scripts\python.exe local_bot.py import-conversions --file .\data\imports\conversions.csv
+.\.venv\Scripts\python.exe local_bot.py follower-status
+.\.venv\Scripts\python.exe local_bot.py quality-dashboard
+```
+
+The engagement queue never sends replies or quote posts. `follower-status
+--capture` performs an owned-account read only; the scheduled daemon uses it at
+00:05 and 23:55 JST. Post-level follower attribution is explicitly reported as
+a time-window estimate.
+
+## Discord notifications
+
+The webhook URL must be stored only in the ignored `.env` file. Startup,
+successful X posts, and fatal posting/daemon errors are enabled by default;
+ordinary skips are disabled to prevent notification noise.
+
+```dotenv
+DISCORD_NOTIFICATIONS_ENABLED=true
+DISCORD_WEBHOOK_URL=
+DISCORD_NOTIFY_STARTUP=true
+DISCORD_NOTIFY_POST_SUCCESS=true
+DISCORD_NOTIFY_ERROR=true
+DISCORD_NOTIFY_RUN_LOG=true
+DISCORD_NOTIFY_SKIP=false
+```
+
+Send a manual connection test:
+
+```powershell
+.\.venv\Scripts\python.exe local_bot.py discord-test
+.\.venv\Scripts\python.exe local_bot.py discord-log --source bot --lines 40
+.\.venv\Scripts\python.exe local_bot.py discord-log --source attempts --lines 20
+```
+
+note draftは通常ログとは別のWebhookへ通知できます。Webhook URLは`.env`の
+`NOTE_DRAFT_DISCORD_WEBHOOK_URL`だけに保存し、GitHubへコミットしません。
+
+```dotenv
+NOTE_DRAFT_DISCORD_ENABLED=true
+NOTE_DRAFT_DISCORD_WEBHOOK_URL=
+NOTE_DRAFT_DISCORD_WEBHOOK_USERNAME=久世ゆい note Bot
+```
+
+接続テストは次のコマンドで実行します。記事作成や公開は行いません。
+
+```powershell
+.\.venv\Scripts\python.exe local_bot.py discord-note-draft-test
+```
+# 2026-07-24 起動・xAI台帳差分
+
+- 自動起動は `PoliticsNarrativeBot` へ統一しました。
+- `production\register_task.ps1` は登録のみ行い、自動開始しません。
+- xAI費用の正本はSQLite `xai_usage_events` です。
+- `XAI_COST_LEDGER_VERIFIED=false` の間、xAI実効月額上限は2ドルです。
+- xAIは原則06:00・12:00・18:00、低変動日は06:00・18:00に実行します。
+- `xai-roi` と `openai-usage-breakdown` で費用対効果と用途別費用を確認できます。
+- 詳細は `AUDIT_BUDGET_STARTUP_XAI.md` を参照してください。
+# API予算 💰
+
+現行の月額API予算は、OpenAI `$15`、xAI `$4`、X API `$16`、
+合計 `$35` です。reserve `$2` は総額に追加せず、35ドル内の保留額として扱うため、
+通常の実効利用可能額は `$33` です。
+
+円表示は固定5,000円ではなく、`TOTAL_MONTHLY_API_BUDGET_USD` と
+`BUDGET_USD_JPY_RATE` から動的に計算します。標準レート165円では5,775円です。
+
+xAIは `XAI_COST_LEDGER_VERIFIED=false` の間、設定が4ドルでも実効上限を
+2ドルに制限します。台帳検証が全項目PASSした場合だけ4ドルへ変更できます。
+
+予算ステージは85%で警告、93%で補助機能を順次縮小、100%で新規の有料API処理を
+停止します。RSS・公式情報のローカル監視と既存キャッシュは継続します。
+# 無料note原稿パイプライン 📝
+
+政治・制度解説を週1〜2本生成し、`outputs/note`へMarkdownで保存できます。合格原稿は専用Discordへ概要と確認用ファイルを通知しますが、noteへの公開は必ず人が行います。
+
+```powershell
+.\.venv\Scripts\python.exe local_bot.py generate-free-note --dry-run
+.\.venv\Scripts\python.exe local_bot.py note-drafts
+.\.venv\Scripts\python.exe local_bot.py note-pipeline-status
+```
+
+設定、承認CLI、Windowsタスク登録、ロールバックは[OPERATIONS_FREE_NOTE_DISCORD.md](OPERATIONS_FREE_NOTE_DISCORD.md)を参照してください。

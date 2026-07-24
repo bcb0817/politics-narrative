@@ -92,11 +92,13 @@ def record_usage(
     history_dir: Path,
     success: bool = True,
     fallback_used: bool = False,
+    cost_multiplier: float = 1.0,
     now_jst: datetime | None = None,
 ) -> dict:
     now_jst = now_jst or datetime.now(JST)
     input_tokens, cached_tokens, output_tokens = usage_from_response(response)
-    cost = calculate_cost(pricing, model, input_tokens, cached_tokens, output_tokens)
+    cost = round(calculate_cost(pricing, model, input_tokens, cached_tokens, output_tokens)
+                 * max(0.0, float(cost_multiplier)), 8)
     state = load_usage_state(state_path, now_jst)
     today = today_usage(state, now_jst)
 
@@ -139,6 +141,7 @@ def record_usage(
         "estimated_cost_usd": cost,
         "success": bool(success),
         "fallback_used": bool(fallback_used),
+        "processing_mode": "batch" if cost_multiplier == 0.5 else "standard",
     }
     state["last_event"] = event
     state_path.parent.mkdir(parents=True, exist_ok=True)

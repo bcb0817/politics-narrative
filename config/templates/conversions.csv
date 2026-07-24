@@ -1,0 +1,2 @@
+occurred_at,event_type,value,source_post_id,campaign,content_id,notes
+2026-07-25T12:00:00+09:00,note_click,1,example-post-id,example-campaign,example-content,example

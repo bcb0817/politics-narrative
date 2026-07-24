@@ -18,6 +18,17 @@ IMPORTANT_TERMS = (
     "逮捕", "災害", "重大事件", "与党案", "野党案", "一次資料",
 )
 
+# Override legacy mojibake constants with valid Japanese routing terms.
+HIGH_RISK_TERMS = (
+    "選挙結果", "辞任", "逮捕", "犯罪", "死亡", "戦争", "停戦", "災害",
+    "再審", "判決", "司法", "検察", "証拠", "移民", "難民", "名誉毀損",
+)
+IMPORTANT_TERMS = (
+    "選挙", "首相", "閣僚", "党首", "重要法案", "司法制度", "重要判決",
+    "再審", "外交", "安全保障", "開戦", "停戦", "重大な政策転換",
+    "逮捕", "大規模災害", "一次資料", "情報が矛盾", "名誉毀損",
+)
+
 
 def _bool(name: str, default: str = "false") -> bool:
     return os.environ.get(name, default).strip().lower() in {"1", "true", "yes"}
@@ -55,8 +66,8 @@ class ModelRouter:
 
     def _affordable(self, model: str, max_output_tokens: int, budget_state: dict,
                     task_type: str = "post_generation") -> bool:
-        budget = _float("OPENAI_MONTHLY_BUDGET_USD", 8.0)
-        reserve = max(0.0, _float("OPENAI_BUDGET_RESERVE_USD", 0.50))
+        budget = _float("OPENAI_MONTHLY_BUDGET_USD", 15.0)
+        reserve = max(0.0, _float("OPENAI_BUDGET_RESERVE_USD", 0.75))
         if budget <= 0:
             return True
         if model not in self.pricing:
@@ -87,38 +98,38 @@ class ModelRouter:
     ) -> dict:
         budget_state = budget_state or {}
         daily_usage = daily_usage or {}
-        legacy_default = os.environ.get("OPENAI_MODEL_DEFAULT", "gpt-5.4-mini").strip() or "gpt-5.4-mini"
+        legacy_default = os.environ.get("OPENAI_MODEL_POST", os.environ.get("OPENAI_MODEL_DEFAULT", "gpt-5.4-mini")).strip() or "gpt-5.4-mini"
         legacy_important = os.environ.get("OPENAI_MODEL_IMPORTANT", "gpt-5.6-luna").strip() or "gpt-5.6-luna"
         settings = {
             "classifier": (
                 os.environ.get("OPENAI_MODEL_CLASSIFIER", "gpt-5.4-nano"),
                 os.environ.get("OPENAI_REASONING_EFFORT_CLASSIFIER", "none"),
-                _int("OPENAI_MAX_OUTPUT_TOKENS_POST", 1400),
-                ["gpt-5-nano"],
+                _int("OPENAI_MAX_OUTPUT_TOKENS_CLASSIFIER", 600),
+                [os.environ.get("OPENAI_MODEL_CLASSIFIER_FALLBACK", "gpt-5-nano")],
             ),
             "default": (
                 legacy_default,
-                os.environ.get("OPENAI_REASONING_EFFORT_DEFAULT", os.environ.get("OPENAI_REASONING_EFFORT", "none")),
+                os.environ.get("OPENAI_REASONING_EFFORT_POST", os.environ.get("OPENAI_REASONING_EFFORT_DEFAULT", "low")),
                 _int("OPENAI_MAX_OUTPUT_TOKENS_POST", 1400),
-                [os.environ.get("OPENAI_MODEL_CLASSIFIER", "gpt-5.4-nano")],
+                [os.environ.get("OPENAI_MODEL_POST_FALLBACK", "gpt-5-mini")],
             ),
             "important": (
                 legacy_important,
                 os.environ.get("OPENAI_REASONING_EFFORT_IMPORTANT", os.environ.get("OPENAI_REASONING_EFFORT", "low")),
                 _int("OPENAI_MAX_OUTPUT_TOKENS_POST", 1400),
-                [legacy_default, os.environ.get("OPENAI_MODEL_CLASSIFIER", "gpt-5.4-nano")],
+                [legacy_default, os.environ.get("OPENAI_MODEL_POST_FALLBACK", "gpt-5-mini")],
             ),
             "daily_review": (
-                os.environ.get("OPENAI_MODEL_DAILY_REVIEW", legacy_important),
+                os.environ.get("OPENAI_MODEL_DAILY_REVIEW", legacy_default),
                 os.environ.get("OPENAI_REASONING_EFFORT_DAILY_REVIEW", "low"),
                 _int("OPENAI_MAX_OUTPUT_TOKENS_DAILY_REVIEW", 3000),
-                [legacy_default, os.environ.get("OPENAI_MODEL_CLASSIFIER", "gpt-5.4-nano")],
+                [os.environ.get("OPENAI_MODEL_DAILY_REVIEW_FALLBACK", "local_only")],
             ),
             "weekly_report": (
-                os.environ.get("OPENAI_MODEL_WEEKLY_REPORT", "gpt-5.6-terra"),
-                os.environ.get("OPENAI_REASONING_EFFORT_WEEKLY_REPORT", "medium"),
+                os.environ.get("OPENAI_MODEL_WEEKLY_REVIEW", os.environ.get("OPENAI_MODEL_WEEKLY_REPORT", "gpt-5.6-terra")),
+                os.environ.get("OPENAI_REASONING_EFFORT_WEEKLY_REVIEW", os.environ.get("OPENAI_REASONING_EFFORT_WEEKLY_REPORT", "medium")),
                 _int("OPENAI_MAX_OUTPUT_TOKENS_WEEKLY_REPORT", 6000),
-                [os.environ.get("OPENAI_MODEL_DAILY_REVIEW", legacy_important), legacy_default],
+                [os.environ.get("OPENAI_MODEL_WEEKLY_REVIEW_FALLBACK", os.environ.get("OPENAI_MODEL_DAILY_REVIEW", legacy_important)), legacy_default],
             ),
             "premium_report": (
                 os.environ.get("OPENAI_MODEL_PREMIUM", "gpt-5.6-sol"),
@@ -131,7 +142,7 @@ class ModelRouter:
         if task_type == "classifier" and not _bool("OPENAI_CLASSIFIER_ENABLED"):
             return {"model": "", "reasoning_effort": "none", "max_output_tokens": 0,
                     "route_reason": "local_classifier", "fallback_models": [], "skip_reason": ""}
-        if task_type == "weekly_report" and not _bool("WEEKLY_REPORT_ENABLED"):
+        if task_type == "weekly_report" and not (_bool("WEEKLY_REVIEW_ENABLED") or _bool("WEEKLY_REPORT_ENABLED")):
             return {"model": "", "reasoning_effort": "none", "max_output_tokens": 0,
                     "route_reason": "weekly_report_disabled", "fallback_models": [], "skip_reason": "weekly_report_disabled"}
         if task_type == "premium_report" and (not premium_requested or not _bool("OPENAI_PREMIUM_ENABLED")):
@@ -147,13 +158,16 @@ class ModelRouter:
                 float(importance_score or 0.0) >= threshold
                 or any(term in text for term in IMPORTANT_TERMS)
                 or high_risk
+                or genre in {"外交・安全保障", "移民政策", "司法", "再審", "国会法案"}
                 or genre in {"安全保障", "移民政策"}
             )
             route_key = "important" if important else "default"
             route_reason = "important_news" if important else "normal_news"
             if any(term in text for term in ("司法", "判決", "再審", "検察")):
                 route_reason = "important_judicial_news"
-            limit = max(0, _int("DAILY_IMPORTANT_MODEL_LIMIT", 4))
+            if any(term in text for term in ("司法", "判決", "再審", "検察")):
+                route_reason = "important_judicial_news"
+            limit = max(0, _int("DAILY_IMPORTANT_MODEL_LIMIT", 2))
             if route_key == "important" and int(daily_usage.get("important_calls", 0) or 0) >= limit:
                 route_key = "default"
                 route_reason = "important_daily_limit_fallback"
@@ -162,14 +176,19 @@ class ModelRouter:
                             "route_reason": route_reason, "fallback_models": [],
                             "skip_reason": "important_limit_high_risk"}
         elif task_type == "daily_review":
-            limit = max(0, _int("DAILY_REVIEW_MODEL_LIMIT", 1))
-            if int(daily_usage.get("daily_review_calls", 0) or 0) >= limit:
+            limit = max(0, _int("OPENAI_DAILY_REVIEW_MAX_CALLS_PER_DAY", _int("DAILY_REVIEW_MODEL_LIMIT", 1)))
+            forced = _bool("FORCE_REPORT")
+            if int(daily_usage.get("daily_review_calls", 0) or 0) >= limit and not forced:
                 return {"model": "", "reasoning_effort": "none", "max_output_tokens": 0,
                         "route_reason": "daily_review_limit", "fallback_models": [],
                         "skip_reason": "daily_review_model_limit"}
 
         model, effort, max_tokens, fallbacks = settings[route_key]
-        candidates = [model] + [item for item in fallbacks if item and item != model]
+        candidates = [model] + [
+            item for item in fallbacks
+            if item and item != model and item != "local_only"
+            and (task_type == "premium_report" or "sol" not in item.lower())
+        ]
         selected = ""
         fallback_used = False
         for index, candidate in enumerate(candidates):

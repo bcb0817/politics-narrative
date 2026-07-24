@@ -12,6 +12,10 @@ if (Test-Path $Python) {
 Write-Host "`n=== スケジュールタスク ===" -ForegroundColor Cyan
 Get-ScheduledTask -TaskName "PoliticsNarrativeBot" -ErrorAction SilentlyContinue | Format-List TaskName, State
 Write-Host "日次レビュー: Bot本体へ統合済み" -ForegroundColor Cyan
+$Legacy = Get-ScheduledTask -TaskName "PoliticsNarrativeDailyReview" -ErrorAction SilentlyContinue
+if ($Legacy) {
+    Write-Host "旧日次レビュータスク: $($Legacy.State)" -ForegroundColor DarkGray
+}
 
 Write-Host "`n=== Botの最新ログ ===" -ForegroundColor Cyan
 if (Test-Path ".\logs\bot.log") {

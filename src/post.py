@@ -31,6 +31,7 @@ import sys
 import json
 import re
 import shutil
+from difflib import SequenceMatcher
 from pathlib import Path
 from datetime import datetime, time, timedelta
 from email.utils import parsedate_to_datetime
@@ -45,9 +46,11 @@ from publishing_policy import (
     classify_critique_axis,
     classify_hook_type,
     classify_post_type,
+    choose_post_style,
     normalize_topic_key,
     post_type_quota_reached,
     pre_generation_skip_reason,
+    phase_daily_limit_reached,
     stagnation_fallback_active,
     topic_cooldown_skip_reason,
 )
@@ -58,6 +61,12 @@ from openai_usage import (
     record_usage,
     today_usage,
 )
+from api_budget import (estimate_openai, estimate_x, finalize as finalize_budget,
+                        forecast as cost_forecast, record_local_event,
+                        reserve as reserve_budget)
+from metrics_db import insert_generated, insert_news, insert_published, write as db_write
+from phase2 import classify_if_needed, save_extension_previews
+from discord_notify import notify_error, notify_post_success
 
 # ---------------------------------------------------------------------------
 # 定数
@@ -167,17 +176,18 @@ def _migrate_legacy_state() -> None:
 _migrate_legacy_state()
 
 # 投稿スロット（JST）— 24時間対象。
-# スロット間隔は SLOT_INTERVAL_MINUTES で可変（既定30分=1日48スロット）。
+# 監視間隔はMONITOR_INTERVAL_MINUTESで可変（既定60分）。
 # 45分なら1日32スロット（45×32=1440で1日に綺麗に割り切れる）。
 # 1440 を割り切る値のみ許可（割り切れない値は既定30にフォールバック）。
 def _get_slot_interval_minutes() -> int:
     try:
-        v = int(os.getenv("SLOT_INTERVAL_MINUTES", "30"))
+        v = int(os.getenv("MONITOR_INTERVAL_MINUTES",
+                          os.getenv("SLOT_INTERVAL_MINUTES", "60")))
     except (TypeError, ValueError):
-        return 30
+        return 60
     if v < 1 or 1440 % v != 0:
         print(f"[WARN] SLOT_INTERVAL_MINUTES={v} は1440を割り切れないため既定30を使用", flush=True)
-        return 30
+        return 60
     return v
 
 
@@ -219,7 +229,12 @@ def build_post_slots() -> list:
     00:00 起点。現在時刻に依存しない（純粋関数）。
     """
     step = SLOT_INTERVAL_MINUTES
-    slots = [f"{(m // 60):02d}:{(m % 60):02d}" for m in range(0, 1440, step)]
+    try:
+        schedule_minute = max(0, min(59, int(os.getenv("MONITOR_SCHEDULE_MINUTE", "0"))))
+    except (TypeError, ValueError):
+        schedule_minute = 0
+    slots = [f"{(m // 60):02d}:{(m % 60):02d}"
+             for m in range(schedule_minute, 1440, step)]
     return [s for s in slots if int(s[:2]) in ACTIVE_HOURS]
 
 
@@ -289,6 +304,8 @@ POST_TYPES = {
     "issue_diagram": "文章・改行・矢印・対比で争点を図解する",
     "strong_opinion": "政策原則から明確な意見を示す",
     "comparison_factcheck": "複数案・一次資料・改正前後を比較する",
+    "steelman_counterargument": "反対側の最も強い主張を公平に整理して結論を示す",
+    "evergreen_explainer": "公式資料に基づく制度解説",
     "morning_evening_digest": "朝刊・夕刊として複数ニュースを整理する",
 }
 POST_TYPE_KEYS = list(POST_TYPES.keys())
@@ -298,7 +315,7 @@ SCORE_POST_ALWAYS = 9   # 9-10 必ず投稿
 SCORE_POST = 7          # 7-8 投稿（参考用。投稿可否の最終判定は MIN_POST_SCORE）
 SCORE_SAVE = 5          # 5-6 保存のみ（参考用）
 # 4以下は投稿しない
-BAN_RISK_BLOCK = 7      # 炎上・BANリスクがこの値以上なら他が高くても投稿しない
+BAN_RISK_BLOCK = max(1, _env_int("MAX_BAN_RISK", 3) + 1)
 
 
 def _env_float(name: str, default: float) -> float:
@@ -310,14 +327,46 @@ def _env_float(name: str, default: float) -> float:
 
 # 投稿可否の最終しきい値: effective_score がこの値以上で投稿可。
 MIN_POST_SCORE = _env_float("MIN_POST_SCORE", 6.3)
-MAX_DAILY_POSTS = max(0, _env_int("MAX_DAILY_POSTS", 16))
-MIN_POST_INTERVAL_MINUTES = max(0, _env_int("MIN_POST_INTERVAL_MINUTES", 45))
+MAX_DAILY_POSTS = max(0, _env_int("MAX_DAILY_AUTOMATED_POSTS",
+                                  _env_int("MAX_DAILY_POSTS", 10)))
+MIN_POST_INTERVAL_MINUTES = max(0, _env_int("MIN_POST_INTERVAL_MINUTES", 60))
 TOPIC_COOLDOWN_HOURS = max(0.0, _env_float("TOPIC_COOLDOWN_HOURS", 4.0))
 LOW_QUALITY_FALLBACK_HOURS = max(0.0, _env_float("LOW_QUALITY_FALLBACK_HOURS", 3.0))
+LOW_QUALITY_FALLBACK_ENABLED = os.environ.get(
+    "LOW_QUALITY_FALLBACK_ENABLED", "false").lower() in ("1", "true", "yes")
 
 # 古いニュースの自動投稿を避ける。pubDateを解釈できる記事だけ厳密に判定し、
 # 時刻不明の記事は候補として残す。
 MAX_NEWS_AGE_HOURS = max(1, _env_int("MAX_NEWS_AGE_HOURS", 12))
+
+EVERGREEN_TOPICS = (
+    ("閣議決定と法律成立の違い", "閣議決定は内閣の意思決定。法律は国会の議決と公布を経て成立します。", "https://www.clb.go.jp/recent-laws/process/"),
+    ("衆議院の優越", "予算・条約・内閣総理大臣の指名などでは、憲法上、衆議院の議決が優越する場合があります。", "https://www.shugiin.go.jp/internet/itdb_annai.nsf/html/statics/ugoki/h14ugoki/yougo.htm"),
+    ("法案成立までの流れ", "法律案は提出、委員会審査、本会議、両院の議決などを経て成立します。", "https://www.sangiin.go.jp/japanese/aramashi/houritu.html"),
+    ("内閣不信任案", "衆議院で内閣不信任決議が可決された場合、内閣は衆議院解散か総辞職を選びます。", "https://www.shugiin.go.jp/"),
+    ("補正予算と当初予算", "当初予算は年度開始前の基本予算、補正予算は成立後の事情に応じた追加・変更です。", "https://www.mof.go.jp/policy/budget/"),
+    ("政令・省令・法律の違い", "法律は国会が制定し、政令は内閣、省令は各省大臣が法律の委任範囲で定めます。", "https://elaws.e-gov.go.jp/"),
+)
+
+
+def _evergreen_candidate(history: list[dict], now_jst: datetime) -> dict | None:
+    if os.environ.get("EVERGREEN_FALLBACK_ENABLED", "true").lower() not in ("1", "true", "yes"):
+        return None
+    if not stagnation_fallback_active(history, now_jst,
+                                      _env_float("EVERGREEN_MIN_SILENCE_HOURS", 3.0)):
+        return None
+    today_count = sum(1 for row in history if row.get("post_type") == "evergreen_explainer"
+                      and str(row.get("posted_at_jst", "")).startswith(now_jst.date().isoformat()))
+    if today_count >= _env_int("EVERGREEN_MAX_PER_DAY", 1):
+        return None
+    used = {row.get("topic_key") for row in history[-30:]}
+    title, summary, url = next((row for row in EVERGREEN_TOPICS if row[0] not in used), EVERGREEN_TOPICS[0])
+    return {"title": title, "summary": summary, "url": url, "link": url,
+            "source_name": "政府・国会公式資料", "source": "政府・国会公式資料",
+            "source_type": "government_official", "pub_date": now_jst.isoformat(),
+            "discovered_via": ["official", "evergreen"], "verified": True,
+            "verification_reason": "curated_official_reference", "is_evergreen": True,
+            "topic_key": title, "x_attention_score": 0.0}
 
 # QUALITY_GATE_ENABLED: 品質スコア(MIN_POST_SCORE)による投稿審査を行うか。
 # 既定 false = 審査せずどんどん投稿し、実際のインプレッション実績(report)で改善する運用。
@@ -340,7 +389,6 @@ def _score_gate_allows(
     """Relax only the performance score; safety checks run before this gate."""
     return bool(
         force_bypass
-        or stagnation_fallback
         or effective_score >= MIN_POST_SCORE
         or rescue_rule_applied
     )
@@ -572,6 +620,7 @@ def is_duplicate(candidate: dict, history: list) -> bool:
     url = (candidate.get("source_url") or "").strip()
     title = (candidate.get("title") or "").strip()
     kw = set(candidate.get("keywords") or [])
+    text = re.sub(r"\s+", "", candidate.get("tweet_text") or candidate.get("final_text") or "")
     for h in history[-120:]:
         if url and url == (h.get("source_url") or "").strip():
             return True
@@ -579,6 +628,9 @@ def is_duplicate(candidate: dict, history: list) -> bool:
             return True
         hkw = set(h.get("keywords") or [])
         if kw and hkw and len(kw & hkw) >= max(2, min(len(kw), len(hkw))):
+            return True
+        old_text = re.sub(r"\s+", "", h.get("tweet_text") or "")
+        if text and old_text and SequenceMatcher(None, text, old_text).ratio() >= 0.88:
             return True
     return False
 
@@ -639,6 +691,12 @@ def gather_candidate_news(include_x: bool = True) -> list:
             "x_unique_accounts": int(it.get("x_unique_accounts", 0) or 0),
             "x_velocity_score": float(it.get("x_velocity_score", 0) or 0),
             "x_topic_key": (it.get("x_topic_key") or "").strip(),
+            "xai_topic_match": bool(it.get("xai_topic_match")),
+            "xai_attention_score": float(it.get("xai_attention_score", 0) or 0),
+            "xai_velocity_score": float(it.get("xai_velocity_score", 0) or 0),
+            "xai_discovered_at": str(it.get("xai_discovered_at", "") or ""),
+            "xai_cost_allocated_usd": float(
+                it.get("xai_cost_allocated_usd", 0) or 0),
         })
     return items
 
@@ -896,9 +954,9 @@ GENERATION_SYSTEM = """\
   根拠がない数字を使った場合は uses_unverified_number=true にする。
 - 選挙について論評する場合も、投票方法・日時・投票所の虚偽や投票妨害はしない。
 - 本文にURLは入れない。ハッシュタグは原則なし、最大1個。
-- 絵文字は必須。内容に合う異なる絵文字を2〜5個使い、同じ絵文字の連打はしない。
-- 見出し、箇条書き、空行を使って視線の流れを作る。絵文字は見出しや転換点の目印として使う。
-- 🌷➡️🚨 のように、状況・変化・警告を表す絵文字を意味の通る順序で使ってよい。
+- 絵文字は必須ではない。70〜80％は絵文字なし、使用する場合も最大1個とする。
+- 司法、戦争、災害、死亡、逮捕、重大事件では絵文字を使わない。速報は「【速報】」を優先する。
+- 見出し、箇条書き、空行を使って視線の流れを作る。テンプレ感のある装飾は避ける。
 - 本文に内部ラベルや制作過程を出さない。「A型」「F型」「post_type」「hook_type」「critique_axis」「decision_reason」「保守寄りの視点からは」「右派の観点からは」「AIとして」「編集部として」は禁止。
 - 「表の争点→本当の争点」などの定型句は、実際に二つの異なる争点を具体語で示せる場合だけ使う。
 - 中立的な要約だけで終わらせない。必ず監視軸を1つ選び、根拠に基づく厳しい意見を示す。
@@ -906,6 +964,7 @@ GENERATION_SYSTEM = """\
 - 批判軸はニュースとの因果関係が明確なものだけを選ぶ。右寄りに見せるためだけに財源・移民・安全保障を持ち込まない。
 - 司法・刑事手続・再審・裁判・検察・証拠開示のニュースでは、冤罪防止、適正手続、判決の安定性、証拠開示、被害者保護、捜査・検察の説明責任を中心に論じる。
 - ニュース本文に税、予算、給付、補助金、費用、保険料などの明示がない限り、「給付→財源→負担者」「国民負担」「財政健全性」「費用増」を使わない。
+- steelman投稿では反対側の最も強い主張を誠実に示し、架空の主張、意図的な弱体化、嘲笑、属性攻撃、「左派は」「右派は」という一括りを禁止する。
 
 【投稿の基本構造：ニュース → 文章図解 → 意見】
 本文 tweet_lines だけで完結させる。画像も補助資料もない。
@@ -998,8 +1057,9 @@ X検索の高反応投稿から参考にしてよいのは、見出し、改行�
 司法・再審・裁判に関するニュースへ、財源・給付・国民負担のテンプレを流用しない。
 内部の投稿型名や「保守寄り」という説明を本文に書かない。
 本文 tweet_lines は1行ずつの配列。空行は "" を入れる。
-本文には、内容に合う異なる絵文字を必ず2〜5個入れる。見出しまたは転換点へ配置し、
-同じ絵文字を連打しない。見出し・箇条書き・空行を組み合わせ、ひと目で論点が分かる構成にする。
+絵文字は原則使わない。自然に意味がある場合だけ最大1個とし、司法・戦争・災害・死亡・逮捕・重大事件では使わない。
+見出し・箇条書き・空行を組み合わせ、ひと目で論点が分かる構成にする。
+steelman_counterargumentでは、反対側の最も強い主張、その合理的部分、最終判断の順にし、嘲笑・属性攻撃・架空の主張を禁止する。
 """
 
 # OpenAI Structured Outputs 用JSON Schema。
@@ -1024,6 +1084,7 @@ _SCORE_KEYS = [
 ]
 
 _CANDIDATE_PROPERTIES = {
+    "topic_key": {"type": "string"},
     "post_type": {"type": "string", "enum": POST_TYPE_KEYS},
     "hook_type": {"type": "string", "enum": list(HOOK_TYPES)},
     "title": {"type": "string"},
@@ -1056,8 +1117,10 @@ _CANDIDATE_PROPERTIES = {
     "importance_score": {"type": "number"},
     "source_reliability_score": {"type": "number"},
     "claim_risk": {"type": "string", "enum": ["low", "medium", "high"]},
+    "is_breaking": {"type": "boolean"},
     "final_text": {"type": "string"},
     "quality_score": {"type": "number"},
+    "ban_risk": {"type": "integer"},
 }
 
 CANDIDATE_RESPONSE_SCHEMA = {
@@ -1184,8 +1247,8 @@ def _call_openai(client, *, model: str, system: str, user: str, max_toks: int,
 
 _META_LEAK_PATTERNS = [
     r"(?:^|[\s：:])(?:A|B|C|D|E|F|G|H|I|J|K|L)型(?:の問い)?",
-    r"\b(?:post_type|hook_type|critique_axis|decision_reason)\b",
-    r"(?:breaking_news|issue_diagram|strong_opinion|comparison_factcheck|morning_evening_digest)",
+    r"\b(?:post_type|hook_type|critique_axis|decision_reason|quality_score|importance_score|ban_risk)\b",
+    r"(?:breaking_news|issue_diagram|strong_opinion|comparison_factcheck|steelman_counterargument|evergreen_explainer|digest|morning_evening_digest)",
     r"(?:fact_reversal|issue_redefinition|conclusion_first)",
     r"(?:システムプロンプト|内部スコア|JSONキー)",
     r"保守寄りの視点からは",
@@ -1260,11 +1323,15 @@ def _candidate_quality_violations(candidate: dict, news_item: dict) -> list[str]
             violations.append(f"classification_mismatch:{key}")
     if len(text) < 100:
         violations.append("too_short")
+    if re.search(r"(?i)(?:https?://|www\.)", text):
+        violations.append("url_detected_in_post")
     emojis = _EMOJI_PATTERN.findall(text)
-    if len(emojis) < 2:
-        violations.append("missing_required_emojis")
-    elif len(set(emojis)) < 2:
-        violations.append("insufficient_emoji_variety")
+    if len(emojis) > max(0, _env_int("EMOJI_MAX_PER_POST", 1)):
+        violations.append("too_many_emojis")
+    serious = any(term in source_text for term in (
+        "司法", "裁判", "判決", "逮捕", "死亡", "死者", "災害", "地震", "戦争", "開戦", "停戦"))
+    if serious and emojis:
+        violations.append("emoji_on_serious_news")
     if "\n\n" not in text:
         violations.append("missing_section_break")
     return violations
@@ -1333,6 +1400,29 @@ def generate_candidates(news_item: dict, regeneration_attempt: int = 0, retries_
     # One candidate normally fits well under this cap. Reasoning tokens are also
     # counted against max_output_tokens, so keep a modest configurable buffer.
     max_toks = int(route["max_output_tokens"])
+    reservation_id = None
+    budget_reason = ""
+    for budget_model in [model] + [m for m in route.get("fallback_models", []) if m != model]:
+        reservation_id, budget_reason = reserve_budget(
+            "openai", "post_generation", budget_model,
+            estimate_openai(budget_model, 5000, max_toks),
+            metadata={
+                "is_breaking": news_item.get("post_type") == "breaking_news",
+                "route_reason": route.get("route_reason", ""),
+                "generation_reason": "initial_candidate_generation",
+            },
+        )
+        if reservation_id:
+            if budget_model != model:
+                log(f"[WARN] Budget downgrade: {model} -> {budget_model}")
+                model = budget_model
+                tier = "default"
+                fallback_used = True
+            break
+    if not reservation_id:
+        LAST_GENERATION_FAILURE_REASON = budget_reason
+        log(f"[WARN] OpenAI generation skipped: {budget_reason}")
+        return []
     log(
         f"[INFO] OpenAI model selected: {model} tier={tier} max_output_tokens={max_toks}"
     )
@@ -1342,7 +1432,7 @@ def generate_candidates(news_item: dict, regeneration_attempt: int = 0, retries_
             reasoning_effort=route.get("reasoning_effort", "none"),
         )
     except Exception as first_error:
-        fallbacks = route.get("fallback_models", [])
+        fallbacks = [item for item in route.get("fallback_models", []) if item != model]
         can_retry = retries_used < max(0, min(_env_int("OPENAI_MAX_RETRIES", 1), 1))
         if fallbacks and can_retry and not is_auth_error(first_error):
             model = fallbacks[0]
@@ -1355,14 +1445,24 @@ def generate_candidates(news_item: dict, regeneration_attempt: int = 0, retries_
                     reasoning_effort=os.environ.get("OPENAI_REASONING_EFFORT_DEFAULT", "none"),
                 )
             except Exception as second_error:
+                finalize_budget(reservation_id, 0, success=False, fallback_used=True,
+                                error_type=type(second_error).__name__)
                 log(f"[ERROR] candidate generation failed after fallback: {type(second_error).__name__}")
                 return []
         else:
             reason = "authentication_error_no_retry" if is_auth_error(first_error) else "retry_limit"
+            finalize_budget(reservation_id, 0, success=False, error_type=reason)
             log(f"[ERROR] candidate generation failed: {reason} ({type(first_error).__name__})")
             return []
 
-    _record_openai_usage(response, model, tier, fallback_used=fallback_used)
+    actual_cost = _record_openai_usage(response, model, tier, fallback_used=fallback_used)
+    usage = getattr(response, "usage", None)
+    input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
+    output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
+    details = getattr(usage, "input_tokens_details", None)
+    cached_tokens = int(getattr(details, "cached_tokens", 0) or 0)
+    finalize_budget(reservation_id, actual_cost, success=True, input_tokens=input_tokens,
+                    cached_tokens=cached_tokens, output_tokens=output_tokens, fallback_used=fallback_used)
     status = str(getattr(response, "status", "") or "")
     if status == "incomplete":
         details = getattr(response, "incomplete_details", None)
@@ -1415,6 +1515,14 @@ def generate_candidates(news_item: dict, regeneration_attempt: int = 0, retries_
         c["x_post_count"] = int(news_item.get("x_post_count", 0) or 0)
         c["x_unique_accounts"] = int(news_item.get("x_unique_accounts", 0) or 0)
         c["x_velocity_score"] = float(news_item.get("x_velocity_score", 0) or 0)
+        c["xai_topic_match"] = bool(news_item.get("xai_topic_match"))
+        c["xai_attention_score"] = float(
+            news_item.get("xai_attention_score", 0) or 0)
+        c["xai_velocity_score"] = float(
+            news_item.get("xai_velocity_score", 0) or 0)
+        c["xai_discovered_at"] = str(news_item.get("xai_discovered_at", "") or "")
+        c["xai_cost_allocated_usd"] = float(
+            news_item.get("xai_cost_allocated_usd", 0) or 0)
         c["final_news_score"] = float(news_item.get("final_news_score", 0) or 0)
         c["topic_key"] = news_item.get("topic_key", "")
         c["source_name"] = c.get("source_name") or news_item.get("source_name", "")
@@ -1422,9 +1530,16 @@ def generate_candidates(news_item: dict, regeneration_attempt: int = 0, retries_
         c["openai_model"] = model
         c["model_route_reason"] = route.get("route_reason", "")
         c["model_fallback_used"] = fallback_used
+        c["input_tokens"] = input_tokens
+        c["cached_input_tokens"] = cached_tokens
+        c["output_tokens"] = output_tokens
+        c["estimated_cost_usd"] = actual_cost
+        c["prompt_version"] = os.environ.get("PROMPT_VERSION", "x-growth-quality-v2")
+        c["is_exploration"] = bool(news_item.get("is_exploration"))
         if not (c.get("hook") or "").strip():
             first_line = next((str(x).strip() for x in lines if str(x).strip()), "")
             c["hook"] = first_line or (c.get("title") or "").strip()
+        c["_db_generated_id"] = insert_generated(news_item.get("_db_news_id"), c)
         cleaned.append(c)
     if not cleaned and rejected_violations:
         LAST_GENERATION_FAILURE_REASON = (
@@ -1561,8 +1676,8 @@ def build_reply_texts(c: dict) -> list:
     背景・争点・見るべきポイントを、余っている素材から最大1件まで作る。
     各要素は X_SAFE_CHARS 以内。無ければ空配列（=単発投稿）。
     """
-    if not THREAD_ENABLED:
-        return []
+    # Phase 1 contract: thread/reply auto-posting is never allowed.
+    return []
 
     replies = []
 
@@ -1622,34 +1737,15 @@ def post_to_x(text: str, reply_texts: list = None):
     戻り値: (親tweet_id, [各投稿の文字数])。
     reply_texts があれば、親投稿への返信チェーンとして投稿する。
     """
-    # URL付き投稿の課金を避けるため、送信直前にも本文からURLを除去する。
-    def strip_urls(value: str) -> str:
-        value = re.sub(r"(?i)https?://\S+|www\.\S+", "", value or "")
-        value = re.sub(r"[ \t]+\n", "\n", value)
-        value = re.sub(r"\n{3,}", "\n\n", value)
-        return value.strip()
-
-    text = strip_urls(text)
-    if not text:
-        raise ValueError("post text became empty after URL removal")
+    if re.search(r"(?i)(?:https?://|www\.)", text or ""):
+        raise ValueError("url_detected_in_post")
+    if reply_texts:
+        raise ValueError("automatic_replies_disabled")
 
     client = _x_client()
     resp = client.create_tweet(text=text)
     parent_id = str(resp.data.get("id"))
     lengths = [_x_len(text)]
-
-    prev_id = parent_id
-    for r in (reply_texts or []):
-        r = strip_urls(r)
-        if not r:
-            continue
-        try:
-            rr = client.create_tweet(text=r, in_reply_to_tweet_id=prev_id)
-            prev_id = str(rr.data.get("id"))
-            lengths.append(_x_len(r))
-        except Exception as e:
-            log(f"[WARN] thread reply failed (parent kept): {e}")
-            break
 
     return parent_id, lengths
 
@@ -1762,15 +1858,16 @@ def main():
 
     # --- 素材収集 ---
     history = load_post_history()
-    stagnation_fallback = stagnation_fallback_active(
-        history, now_jst, LOW_QUALITY_FALLBACK_HOURS
-    )
+    stagnation_fallback = LOW_QUALITY_FALLBACK_ENABLED and stagnation_fallback_active(
+        history, now_jst, LOW_QUALITY_FALLBACK_HOURS)
     log(
         f"[INFO] Low-quality fallback after hours: {LOW_QUALITY_FALLBACK_HOURS:g} "
         f"active={str(stagnation_fallback).lower()}"
     )
     # FORCE_POSTは時刻スロットのソース分割を適用せず、混合候補で安全に検証できるようにする。
-    source_split = _env_bool("SOURCE_SCHEDULE_SPLIT", "true") and not force
+    # RSS/official monitoring always runs. news.py independently refreshes
+    # X Search only at 06:00/12:00/18:00 and otherwise reuses its cache.
+    source_split = False
     slot_minute = int(slot_dt.minute)
     source_lane = "mixed"
     if source_split:
@@ -1792,10 +1889,11 @@ def main():
             return
 
     # RSS枠では有料のX Searchを呼ばない。X枠では事実確認用RSSも同時取得する。
-    news_items = gather_candidate_news(include_x=(source_lane not in {"rss", "rss_fallback"}))
+    news_items = gather_candidate_news(include_x=True)
+    record_local_event("news_monitor", 1, {"slot": slot_dt.isoformat()})
     log(f"[INFO] News items fetched: {len(news_items)}")
 
-    # 毎時00分はRSS/公式情報、毎時30分はXレーダーでも確認されたRSS話題に分離する。
+    # RSS/公式情報は毎時00分。X Searchは06:00/12:00/18:00だけ更新し、他はキャッシュを使う。
     # 他者の文章・画像・動画の再アップロードは行わず、どちらも独自テキストを生成する。
     if source_split:
         if source_lane in {"rss", "rss_fallback"}:
@@ -1837,8 +1935,13 @@ def main():
     log(f"[INFO] News after prefilter: {len(target_news)}")
 
     if not target_news:
-        finalize_skip("no_qualified_news", mark_attempted=True)
-        return
+        evergreen = _evergreen_candidate(history, now_jst)
+        if evergreen:
+            target_news = [evergreen]
+            log("[INFO] Evergreen fallback selected; quality and verification gates remain unchanged")
+        else:
+            finalize_skip("no_qualified_news", mark_attempted=True)
+            return
 
     # ニュース監視後、OpenAI生成前に日次上限と投稿間隔を判定する。
     policy_skip = pre_generation_skip_reason(
@@ -1873,9 +1976,37 @@ def main():
         enriched["topic_key"] = normalize_topic_key(
             enriched.get("title", ""), enriched.get("keywords") or []
         )
-        enriched["post_type"] = classify_post_type(enriched, now_jst)
+        enriched["post_type"], enriched["is_exploration"] = choose_post_style(
+            enriched, history, now_jst)
         enriched["hook_type"] = classify_hook_type(enriched, history)
         enriched["critique_axis"] = classify_critique_axis(enriched)
+        genre_hits = {
+            genre: sum(keyword in f"{enriched.get('title','')} {enriched.get('summary','')}" for keyword in keywords)
+            for genre, keywords in GENRE_KEYWORDS.items()
+        }
+        best_genre, best_hits = max(genre_hits.items(), key=lambda pair: pair[1])
+        ties = sum(value == best_hits for value in genre_hits.values())
+        enriched["genre"] = best_genre if best_hits else "未分類"
+        enriched["classification_confidence"] = 0.9 if best_hits >= 2 and ties == 1 else (0.7 if best_hits == 1 and ties == 1 else 0.4)
+        if _env_bool("PHASE2_ENABLED", "true") and enriched["classification_confidence"] < 0.65:
+            classified = classify_if_needed(enriched)
+            if classified is None:
+                continue
+            enriched = classified
+        is_breaking = enriched["post_type"] == "breaking_news"
+        normal_daily_limit = _env_int("ORIGINAL_DAILY_POST_MAX", 8)
+        if cost_forecast().get("restriction_level", 0) >= 7:
+            normal_daily_limit = min(
+                normal_daily_limit,
+                _env_int("NORMAL_DAILY_POST_MIN", 6),
+            )
+        if phase_daily_limit_reached(
+            history, now_jst, is_breaking,
+            normal_daily_limit, _env_int("BREAKING_DAILY_POST_LIMIT", 2),
+            MAX_DAILY_POSTS,
+        ):
+            blocked_for_type_quota = True
+            continue
         if not stagnation_fallback and post_type_quota_reached(
             enriched["post_type"], history, now_jst
         ):
@@ -1888,6 +2019,7 @@ def main():
         if cooldown_reason and not stagnation_fallback:
             blocked_for_topic = True
             continue
+        enriched["_db_news_id"] = insert_news(enriched)
         eligible_news.append(enriched)
 
     if not eligible_news:
@@ -1970,6 +2102,9 @@ def main():
             rescue_rule_applied,
             stagnation_fallback,
         )
+        if btype == "evergreen_explainer" and best_score < _env_float(
+                "EVERGREEN_MIN_QUALITY_SCORE", 7.0):
+            can_post = False
         log(f"[INFO] Rescue rule applied: {str(rescue_rule_applied).lower()}")
         if stagnation_fallback:
             log(
@@ -2004,6 +2139,14 @@ def main():
     log(f"[INFO] use_thread: {str(use_thread).lower()}")
     log(f"[INFO] thread_reply_count: {len(reply_texts)}")
     log(f"[INFO] each_post_length: {each_len}")
+    if re.search(r"(?i)(?:https?://|www\.)", tweet_text):
+        finalize_skip("url_detected_in_post", mark_attempted=True, extra={"title": best.get("title", "")})
+        return
+
+    if _env_bool("PHASE2_ENABLED", "true"):
+        previews = save_extension_previews(best, ROOT_DIR)
+        if previews:
+            log(f"[INFO] Preview extensions saved: {len(previews)} (auto-post disabled)")
 
     # 画像生成・画像アップロード機能は廃止。常にテキスト投稿。
 
@@ -2019,15 +2162,30 @@ def main():
         return
 
     # --- 投稿 ---
+    x_reservation, x_budget_reason = reserve_budget(
+        "x", "post_create", "post_create", estimate_x("post_create_per_request", 1), 1,
+        {"is_breaking": btype == "breaking_news"},
+    )
+    if not x_reservation:
+        finalize_skip(x_budget_reason, mark_attempted=False, extra={"title": best.get("title", "")})
+        return
     log("[INFO] Decision: post")
     try:
         tweet_id, sent_lengths = post_to_x(tweet_text, reply_texts)
+        finalize_budget(x_reservation, estimate_x("post_create_per_request", 1) or 0, success=True)
         log(f"[INFO] Posted tweet id: {tweet_id}")
         log(f"[INFO] each_post_length (sent): {sent_lengths}")
     except Exception as e:
+        finalize_budget(x_reservation, 0, success=False, error_type=type(e).__name__)
         # 投稿失敗は一時失敗扱い: attempted に記録しない（=未処理のまま再挑戦できる）
         log(f"[ERROR] post_to_x failed: {e}")
         log_error({"where": "post_to_x", "error": str(e), "slot_key": slot_key})
+        notify_error(
+            "post_to_x",
+            f"{type(e).__name__}: {e}",
+            slot=slot_key,
+            title=best.get("title", ""),
+        )
         finalize_skip("post_to_x_failed", mark_attempted=False, extra={
             "title": best.get("title", ""), "post_type": btype, "genre": bgenre})
         return
@@ -2037,7 +2195,7 @@ def main():
     mark_slot_posted(slot_key)
     log("[INFO] Slot marked as attempted.")
     log("[INFO] Slot marked as posted.")
-    save_post_record({
+    post_record = {
         "slot_key": slot_key,
         "posted_at_jst": now_jst.isoformat(),
         "tweet_id": tweet_id,
@@ -2070,10 +2228,35 @@ def main():
         "x_post_count": best.get("x_post_count", 0),
         "x_unique_accounts": best.get("x_unique_accounts", 0),
         "x_velocity_score": best.get("x_velocity_score", 0.0),
+        "xai_topic_match": bool(best.get("xai_topic_match")),
+        "xai_attention_score": best.get("xai_attention_score", 0.0),
+        "xai_velocity_score": best.get("xai_velocity_score", 0.0),
+        "xai_discovered_at": best.get("xai_discovered_at", ""),
+        "xai_cost_allocated_usd": best.get("xai_cost_allocated_usd", 0.0),
         "final_news_score": best.get("final_news_score", 0.0),
         "low_quality_fallback": stagnation_fallback,
         "openai_model": best.get("openai_model", ""),
-    })
+        "prompt_version": best.get("prompt_version", "x-growth-quality-v2"),
+        "is_exploration": bool(best.get("is_exploration")),
+        "automation_type": "automated_original",
+    }
+    if best.get("post_type") == "morning_evening_digest":
+        digest_items = best.get("digest_items") or []
+        post_record["digest_type"] = "morning" if now_jst.hour < 12 else "evening"
+        post_record["digest_date"] = now_jst.date().isoformat()
+        post_record["included_topic_keys"] = [
+            item.get("topic_key") or normalize_topic_key(item.get("title", ""))
+            for item in digest_items
+        ] or [best.get("topic_key", "")]
+        post_record["primary_topic_key"] = best.get("topic_key", "")
+    post_record["posted_hour_jst"] = now_jst.hour
+    save_post_record(post_record)
+    insert_published(best.get("_db_generated_id"), post_record)
+    db_write("""INSERT INTO post_style_experiments
+      (tweet_id,post_type,hook_type,is_exploration,experiment_name,created_at,result_json)
+      VALUES (?,?,?,?,?,?,?)""", (str(tweet_id), best.get("post_type", ""), best.get("hook_type", ""),
+      int(bool(best.get("is_exploration"))), "style_80_20" if best.get("is_exploration") else "exploit",
+      now_jst.isoformat(), "{}"))
     save_recent_topic({
         "topic_key": best.get("topic_key", ""),
         "last_posted_at": now_jst.isoformat(),
@@ -2098,6 +2281,7 @@ def main():
         "attempted_recorded": True,
         "posted_recorded": True,
     })
+    notify_post_success(post_record)
 
 
 if __name__ == "__main__":

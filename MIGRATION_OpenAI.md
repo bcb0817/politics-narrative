@@ -1,30 +1,25 @@
-# OpenAI API migration
+# OpenAI API移行メモ 🤖
 
-This version replaces the Anthropic SDK with the OpenAI Python SDK and the Responses API.
+このBotはOpenAI Responses APIと用途別モデルルーティングへ移行済みです。
+新規環境では `.env.example` を参考に `.env` を作成し、
+`OPENAI_API_KEY` を設定してください。
 
-## Defaults
-
-- Normal news: `gpt-5-nano`
-- Important news: `gpt-5-mini`
-- Important-model limit: 8 calls/day
-- One news item and one generated candidate per post slot
-- Monthly OpenAI estimated budget: USD 8
-- Structured Outputs preserves the existing scoring and text-diagram fields
-
-## Windows upgrade
+## Windowsセットアップ
 
 ```powershell
 cd "D:\SNS Bot\politics-narrative"
-powershell -ExecutionPolicy Bypass -File .\production\stop.ps1
-powershell -ExecutionPolicy Bypass -File .\production\migrate_to_openai.ps1
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe local_bot.py status
 ```
 
-Enter `OPENAI_API_KEY` in `.env`, save it, then run:
+モデル名だけを現行構成に合わせる場合は、次の安全なスクリプトを使います。
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe local_bot.py force
-powershell -ExecutionPolicy Bypass -File .\production\start.ps1
+.\production\set_current_openai_models.ps1
+.\production\set_current_openai_models.ps1 -Apply
 ```
 
-The local estimate is stored in `data/openai_usage.json`. It is a guardrail, not an invoice; the OpenAI dashboard remains the source of truth.
+旧 `migrate_to_openai.ps1` は廃止・隔離済みです。使用しないでください。⚠️
+
+利用実績はSQLiteを正本として記録し、`budget-status` と
+`cost-forecast` で確認できます。

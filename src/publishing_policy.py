@@ -7,6 +7,9 @@ rate, cooldown, taxonomy, and review calculations can be unit-tested offline.
 from __future__ import annotations
 
 import re
+import hashlib
+import os
+import unicodedata
 from datetime import datetime, timedelta
 from difflib import SequenceMatcher
 from zoneinfo import ZoneInfo
@@ -19,14 +22,20 @@ POST_TYPES = (
     "issue_diagram",
     "strong_opinion",
     "comparison_factcheck",
+    "steelman_counterargument",
+    "evergreen_explainer",
     "morning_evening_digest",
 )
 POST_TYPE_DAILY_LIMITS = {
-    "breaking_news": 5,
-    "issue_diagram": 4,
-    "strong_opinion": 3,
-    "comparison_factcheck": 2,
+    "breaking_news": 2,
+    "issue_diagram": 4, "strong_opinion": 4, "comparison_factcheck": 3,
+    "steelman_counterargument": 1, "evergreen_explainer": 1,
     "morning_evening_digest": 2,
+}
+POST_STYLE_TARGETS = {
+    "breaking_news": 0.25, "issue_diagram": 0.20, "strong_opinion": 0.20,
+    "comparison_factcheck": 0.15, "steelman_counterargument": 0.10,
+    "morning_evening_digest": 0.10,
 }
 HOOK_TYPES = (
     "fact_reversal",
@@ -53,7 +62,13 @@ CRITIQUE_AXES = (
 
 SIGNIFICANT_UPDATE_TERMS = (
     "成立", "可決", "否決", "採決", "辞任", "逮捕", "起訴", "開戦", "停戦",
-    "撤回", "公式発表", "判決", "被害拡大", "死者", "避難指示", "施行",
+    "撤回", "政策撤回", "外交合意", "公式発表", "公式数値", "重要判決", "判決",
+    "大規模災害", "被害拡大", "死者", "避難指示", "施行",
+)
+
+BREAKING_NEWS_TERMS = (
+    "法案成立", "成立", "重要採決", "採決", "可決", "否決", "辞任", "逮捕",
+    "重要判決", "開戦", "停戦", "大規模災害", "外交合意", "政策撤回",
 )
 
 _TOPIC_PATTERNS = (
@@ -128,7 +143,8 @@ def pre_generation_skip_reason(
 
 
 def normalize_topic_key(title: str, keywords: list[str] | None = None) -> str:
-    text = re.sub(r"https?://\S+", "", title or "")
+    text = unicodedata.normalize("NFKC", title or "")
+    text = re.sub(r"https?://\S+", "", text)
     text = re.sub(r"[【】\[\]（）()「」『』〈〉《》!?！？…・:：|｜]", " ", text)
     text = re.sub(r"\b(?:20\d{2}|\d{1,2})[年/月日時分]\b", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
@@ -183,7 +199,13 @@ def classify_post_type(news: dict, now_jst: datetime) -> str:
     text = f"{news.get('title', '')} {news.get('summary', '')}"
     if now_jst.hour in (5, 6, 17, 18) and news.get("digest_items"):
         return "morning_evening_digest"
-    if any(term in text for term in SIGNIFICANT_UPDATE_TERMS + ("速報", "緊急")):
+    if news.get("is_evergreen"):
+        return "evergreen_explainer"
+    # 「速報」「緊急」という見出しだけでは追加2件の重大速報枠を使わない。
+    official_number_change = bool(news.get("is_major_update")) and bool(re.search(r"\d", text)) and any(
+        marker in text for marker in ("公式", "政府発表", "省発表", "統計")
+    )
+    if any(term in text for term in BREAKING_NEWS_TERMS) or official_number_change:
         return "breaking_news"
     if any(term in text for term in ("比較", "改正前", "改正後", "与党案", "野党案", "一次資料")):
         return "comparison_factcheck"
@@ -192,6 +214,59 @@ def classify_post_type(news: dict, now_jst: datetime) -> str:
     return "strong_opinion"
 
 
+def choose_post_style(news: dict, history: list[dict], now_jst: datetime) -> tuple[str, bool]:
+    """Apply soft ratio balancing and deterministic 80/20 exploration."""
+    base = classify_post_type(news, now_jst)
+    if base in {"breaking_news", "morning_evening_digest", "evergreen_explainer"}:
+        return base, False
+    recent = [row.get("post_type") or row.get("type") for row in history if row.get("post_type") or row.get("type")]
+    last24 = []
+    for row in history:
+        dt = parse_jst(row.get("posted_at_jst") or row.get("posted_at"))
+        if dt and now_jst - dt <= timedelta(hours=24):
+            last24.append(row.get("post_type") or row.get("type"))
+    key = f"{news.get('topic_key','')}|{now_jst.date().isoformat()}"
+    bucket = int(hashlib.sha256(key.encode("utf-8")).hexdigest()[:8], 16) % 100
+    exploration_ratio = float(os.environ.get("STYLE_EXPLORATION_RATIO", "0.20"))
+    exploration = bucket < int(max(0, min(1, exploration_ratio)) * 100)
+    exploration_count = sum(
+        1 for row in history
+        if bool(row.get("is_exploration"))
+        and (parse_jst(row.get("posted_at_jst") or row.get("posted_at")) or now_jst).date()
+        == now_jst.date()
+    )
+    if exploration_count >= int(os.environ.get("STYLE_EXPLORATION_MAX_PER_DAY", "2")):
+        exploration = False
+    candidates = [base, "issue_diagram", "strong_opinion", "comparison_factcheck"]
+    targets = {
+        "breaking_news": float(os.environ.get("POST_STYLE_BREAKING_RATIO", ".25")),
+        "issue_diagram": float(os.environ.get("POST_STYLE_DIAGRAM_RATIO", ".20")),
+        "strong_opinion": float(os.environ.get("POST_STYLE_OPINION_RATIO", ".20")),
+        "comparison_factcheck": float(os.environ.get("POST_STYLE_COMPARISON_RATIO", ".15")),
+        "steelman_counterargument": float(os.environ.get("POST_STYLE_STEELMAN_RATIO", ".10")),
+        "morning_evening_digest": float(os.environ.get("POST_STYLE_DIGEST_RATIO", ".10")),
+    }
+    week_start = now_jst - timedelta(days=7)
+    steelman_count = sum(1 for row in history if (row.get("post_type") or row.get("type")) == "steelman_counterargument"
+                         and (parse_jst(row.get("posted_at_jst") or row.get("posted_at")) or now_jst) >= week_start)
+    if steelman_count < 3 and (exploration or news.get("has_counter_claims")):
+        candidates.append("steelman_counterargument")
+    total = max(1, len(last24))
+    selected = min(candidates, key=lambda style: last24.count(style) / total - targets.get(style, .15))
+    if len(recent) >= 2 and recent[-1] == recent[-2] == selected:
+        selected = next(style for style in candidates if style != selected)
+    return selected, exploration
+
+
+def phase_daily_limit_reached(history: list[dict], now_jst: datetime, is_breaking: bool,
+                              normal_limit: int = 8, breaking_limit: int = 2,
+                              total_limit: int = 10) -> bool:
+    today = successful_posts_today(history, now_jst)
+    if len(today) >= total_limit:
+        return True
+    breaking = sum((row.get("post_type") or row.get("type")) == "breaking_news" for row in today)
+    normal = len(today) - breaking
+    return breaking >= breaking_limit if is_breaking else normal >= normal_limit
 def classify_critique_axis(news: dict) -> str:
     text = f"{news.get('title', '')} {news.get('summary', '')}"
     rules = (

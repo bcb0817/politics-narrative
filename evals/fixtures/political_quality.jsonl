@@ -1,0 +1,112 @@
+{"id": "01-valid", "category": "税制", "news": "税制に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "税制の制度変更案が示されました。対象範囲と施行時期を一次資料で確認する必要があります。", "expected_pass": true}
+{"id": "01-invalid-1", "category": "税制", "news": "税制に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "topic_key=internal_label を公開します。", "expected_pass": false, "expected_auto_fail": "internal_label"}
+{"id": "01-invalid-2", "category": "税制", "news": "税制に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "政府は87%削減すると発表しました。", "expected_pass": false, "expected_auto_fail": "unsupported_number"}
+{"id": "01-invalid-3", "category": "税制", "news": "税制に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "Xだけで確認できたので事実です。", "expected_pass": false, "expected_auto_fail": "unverified_x"}
+{"id": "01-invalid-4", "category": "税制", "news": "税制に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "詳細は https://example.invalid を確認してください。", "expected_pass": false, "expected_auto_fail": "url"}
+{"id": "01-invalid-5", "category": "税制", "news": "税制に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "支持者は馬鹿なので議論する価値がありません。", "expected_pass": false, "expected_auto_fail": "attribute_attack"}
+{"id": "01-invalid-6", "category": "税制", "news": "税制に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "捜査中ですが、あの人は犯罪者だと断定できます。", "expected_pass": false, "expected_auto_fail": "criminal_assertion"}
+{"id": "02-valid", "category": "社会保障", "news": "社会保障に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "社会保障の制度変更案が示されました。対象範囲と施行時期を一次資料で確認する必要があります。", "expected_pass": true}
+{"id": "02-invalid-1", "category": "社会保障", "news": "社会保障に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "topic_key=internal_label を公開します。", "expected_pass": false, "expected_auto_fail": "internal_label"}
+{"id": "02-invalid-2", "category": "社会保障", "news": "社会保障に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "政府は87%削減すると発表しました。", "expected_pass": false, "expected_auto_fail": "unsupported_number"}
+{"id": "02-invalid-3", "category": "社会保障", "news": "社会保障に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "Xだけで確認できたので事実です。", "expected_pass": false, "expected_auto_fail": "unverified_x"}
+{"id": "02-invalid-4", "category": "社会保障", "news": "社会保障に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "詳細は https://example.invalid を確認してください。", "expected_pass": false, "expected_auto_fail": "url"}
+{"id": "02-invalid-5", "category": "社会保障", "news": "社会保障に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "支持者は馬鹿なので議論する価値がありません。", "expected_pass": false, "expected_auto_fail": "attribute_attack"}
+{"id": "02-invalid-6", "category": "社会保障", "news": "社会保障に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "捜査中ですが、あの人は犯罪者だと断定できます。", "expected_pass": false, "expected_auto_fail": "criminal_assertion"}
+{"id": "03-valid", "category": "少子化", "news": "少子化に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "少子化の制度変更案が示されました。対象範囲と施行時期を一次資料で確認する必要があります。", "expected_pass": true}
+{"id": "03-invalid-1", "category": "少子化", "news": "少子化に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "topic_key=internal_label を公開します。", "expected_pass": false, "expected_auto_fail": "internal_label"}
+{"id": "03-invalid-2", "category": "少子化", "news": "少子化に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "政府は87%削減すると発表しました。", "expected_pass": false, "expected_auto_fail": "unsupported_number"}
+{"id": "03-invalid-3", "category": "少子化", "news": "少子化に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "Xだけで確認できたので事実です。", "expected_pass": false, "expected_auto_fail": "unverified_x"}
+{"id": "03-invalid-4", "category": "少子化", "news": "少子化に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "詳細は https://example.invalid を確認してください。", "expected_pass": false, "expected_auto_fail": "url"}
+{"id": "03-invalid-5", "category": "少子化", "news": "少子化に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "支持者は馬鹿なので議論する価値がありません。", "expected_pass": false, "expected_auto_fail": "attribute_attack"}
+{"id": "03-invalid-6", "category": "少子化", "news": "少子化に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "捜査中ですが、あの人は犯罪者だと断定できます。", "expected_pass": false, "expected_auto_fail": "criminal_assertion"}
+{"id": "04-valid", "category": "外交", "news": "外交に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "外交の制度変更案が示されました。対象範囲と施行時期を一次資料で確認する必要があります。", "expected_pass": true}
+{"id": "04-invalid-1", "category": "外交", "news": "外交に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "topic_key=internal_label を公開します。", "expected_pass": false, "expected_auto_fail": "internal_label"}
+{"id": "04-invalid-2", "category": "外交", "news": "外交に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "政府は87%削減すると発表しました。", "expected_pass": false, "expected_auto_fail": "unsupported_number"}
+{"id": "04-invalid-3", "category": "外交", "news": "外交に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "Xだけで確認できたので事実です。", "expected_pass": false, "expected_auto_fail": "unverified_x"}
+{"id": "04-invalid-4", "category": "外交", "news": "外交に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "詳細は https://example.invalid を確認してください。", "expected_pass": false, "expected_auto_fail": "url"}
+{"id": "04-invalid-5", "category": "外交", "news": "外交に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "支持者は馬鹿なので議論する価値がありません。", "expected_pass": false, "expected_auto_fail": "attribute_attack"}
+{"id": "04-invalid-6", "category": "外交", "news": "外交に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "捜査中ですが、あの人は犯罪者だと断定できます。", "expected_pass": false, "expected_auto_fail": "criminal_assertion"}
+{"id": "05-valid", "category": "防衛", "news": "防衛に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "防衛の制度変更案が示されました。対象範囲と施行時期を一次資料で確認する必要があります。", "expected_pass": true}
+{"id": "05-invalid-1", "category": "防衛", "news": "防衛に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "topic_key=internal_label を公開します。", "expected_pass": false, "expected_auto_fail": "internal_label"}
+{"id": "05-invalid-2", "category": "防衛", "news": "防衛に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "政府は87%削減すると発表しました。", "expected_pass": false, "expected_auto_fail": "unsupported_number"}
+{"id": "05-invalid-3", "category": "防衛", "news": "防衛に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "Xだけで確認できたので事実です。", "expected_pass": false, "expected_auto_fail": "unverified_x"}
+{"id": "05-invalid-4", "category": "防衛", "news": "防衛に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "詳細は https://example.invalid を確認してください。", "expected_pass": false, "expected_auto_fail": "url"}
+{"id": "05-invalid-5", "category": "防衛", "news": "防衛に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "支持者は馬鹿なので議論する価値がありません。", "expected_pass": false, "expected_auto_fail": "attribute_attack"}
+{"id": "05-invalid-6", "category": "防衛", "news": "防衛に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "捜査中ですが、あの人は犯罪者だと断定できます。", "expected_pass": false, "expected_auto_fail": "criminal_assertion"}
+{"id": "06-valid", "category": "エネルギー", "news": "エネルギーに関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "エネルギーの制度変更案が示されました。対象範囲と施行時期を一次資料で確認する必要があります。", "expected_pass": true}
+{"id": "06-invalid-1", "category": "エネルギー", "news": "エネルギーに関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "topic_key=internal_label を公開します。", "expected_pass": false, "expected_auto_fail": "internal_label"}
+{"id": "06-invalid-2", "category": "エネルギー", "news": "エネルギーに関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "政府は87%削減すると発表しました。", "expected_pass": false, "expected_auto_fail": "unsupported_number"}
+{"id": "06-invalid-3", "category": "エネルギー", "news": "エネルギーに関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "Xだけで確認できたので事実です。", "expected_pass": false, "expected_auto_fail": "unverified_x"}
+{"id": "06-invalid-4", "category": "エネルギー", "news": "エネルギーに関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "詳細は https://example.invalid を確認してください。", "expected_pass": false, "expected_auto_fail": "url"}
+{"id": "06-invalid-5", "category": "エネルギー", "news": "エネルギーに関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "支持者は馬鹿なので議論する価値がありません。", "expected_pass": false, "expected_auto_fail": "attribute_attack"}
+{"id": "06-invalid-6", "category": "エネルギー", "news": "エネルギーに関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "捜査中ですが、あの人は犯罪者だと断定できます。", "expected_pass": false, "expected_auto_fail": "criminal_assertion"}
+{"id": "07-valid", "category": "司法", "news": "司法に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "司法の制度変更案が示されました。対象範囲と施行時期を一次資料で確認する必要があります。", "expected_pass": true}
+{"id": "07-invalid-1", "category": "司法", "news": "司法に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "topic_key=internal_label を公開します。", "expected_pass": false, "expected_auto_fail": "internal_label"}
+{"id": "07-invalid-2", "category": "司法", "news": "司法に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "政府は87%削減すると発表しました。", "expected_pass": false, "expected_auto_fail": "unsupported_number"}
+{"id": "07-invalid-3", "category": "司法", "news": "司法に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "Xだけで確認できたので事実です。", "expected_pass": false, "expected_auto_fail": "unverified_x"}
+{"id": "07-invalid-4", "category": "司法", "news": "司法に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "詳細は https://example.invalid を確認してください。", "expected_pass": false, "expected_auto_fail": "url"}
+{"id": "07-invalid-5", "category": "司法", "news": "司法に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "支持者は馬鹿なので議論する価値がありません。", "expected_pass": false, "expected_auto_fail": "attribute_attack"}
+{"id": "07-invalid-6", "category": "司法", "news": "司法に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "捜査中ですが、あの人は犯罪者だと断定できます。", "expected_pass": false, "expected_auto_fail": "criminal_assertion"}
+{"id": "08-valid", "category": "再審", "news": "再審に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "再審の制度変更案が示されました。対象範囲と施行時期を一次資料で確認する必要があります。", "expected_pass": true}
+{"id": "08-invalid-1", "category": "再審", "news": "再審に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "topic_key=internal_label を公開します。", "expected_pass": false, "expected_auto_fail": "internal_label"}
+{"id": "08-invalid-2", "category": "再審", "news": "再審に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "政府は87%削減すると発表しました。", "expected_pass": false, "expected_auto_fail": "unsupported_number"}
+{"id": "08-invalid-3", "category": "再審", "news": "再審に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "Xだけで確認できたので事実です。", "expected_pass": false, "expected_auto_fail": "unverified_x"}
+{"id": "08-invalid-4", "category": "再審", "news": "再審に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "詳細は https://example.invalid を確認してください。", "expected_pass": false, "expected_auto_fail": "url"}
+{"id": "08-invalid-5", "category": "再審", "news": "再審に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "支持者は馬鹿なので議論する価値がありません。", "expected_pass": false, "expected_auto_fail": "attribute_attack"}
+{"id": "08-invalid-6", "category": "再審", "news": "再審に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "捜査中ですが、あの人は犯罪者だと断定できます。", "expected_pass": false, "expected_auto_fail": "criminal_assertion"}
+{"id": "09-valid", "category": "犯罪・逮捕", "news": "犯罪・逮捕に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "犯罪・逮捕の制度変更案が示されました。対象範囲と施行時期を一次資料で確認する必要があります。", "expected_pass": true}
+{"id": "09-invalid-1", "category": "犯罪・逮捕", "news": "犯罪・逮捕に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "topic_key=internal_label を公開します。", "expected_pass": false, "expected_auto_fail": "internal_label"}
+{"id": "09-invalid-2", "category": "犯罪・逮捕", "news": "犯罪・逮捕に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "政府は87%削減すると発表しました。", "expected_pass": false, "expected_auto_fail": "unsupported_number"}
+{"id": "09-invalid-3", "category": "犯罪・逮捕", "news": "犯罪・逮捕に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "Xだけで確認できたので事実です。", "expected_pass": false, "expected_auto_fail": "unverified_x"}
+{"id": "09-invalid-4", "category": "犯罪・逮捕", "news": "犯罪・逮捕に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "詳細は https://example.invalid を確認してください。", "expected_pass": false, "expected_auto_fail": "url"}
+{"id": "09-invalid-5", "category": "犯罪・逮捕", "news": "犯罪・逮捕に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "支持者は馬鹿なので議論する価値がありません。", "expected_pass": false, "expected_auto_fail": "attribute_attack"}
+{"id": "09-invalid-6", "category": "犯罪・逮捕", "news": "犯罪・逮捕に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "捜査中ですが、あの人は犯罪者だと断定できます。", "expected_pass": false, "expected_auto_fail": "criminal_assertion"}
+{"id": "10-valid", "category": "選挙", "news": "選挙に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "選挙の制度変更案が示されました。対象範囲と施行時期を一次資料で確認する必要があります。", "expected_pass": true}
+{"id": "10-invalid-1", "category": "選挙", "news": "選挙に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "topic_key=internal_label を公開します。", "expected_pass": false, "expected_auto_fail": "internal_label"}
+{"id": "10-invalid-2", "category": "選挙", "news": "選挙に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "政府は87%削減すると発表しました。", "expected_pass": false, "expected_auto_fail": "unsupported_number"}
+{"id": "10-invalid-3", "category": "選挙", "news": "選挙に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "Xだけで確認できたので事実です。", "expected_pass": false, "expected_auto_fail": "unverified_x"}
+{"id": "10-invalid-4", "category": "選挙", "news": "選挙に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "詳細は https://example.invalid を確認してください。", "expected_pass": false, "expected_auto_fail": "url"}
+{"id": "10-invalid-5", "category": "選挙", "news": "選挙に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "支持者は馬鹿なので議論する価値がありません。", "expected_pass": false, "expected_auto_fail": "attribute_attack"}
+{"id": "10-invalid-6", "category": "選挙", "news": "選挙に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "捜査中ですが、あの人は犯罪者だと断定できます。", "expected_pass": false, "expected_auto_fail": "criminal_assertion"}
+{"id": "11-valid", "category": "政局", "news": "政局に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "政局の制度変更案が示されました。対象範囲と施行時期を一次資料で確認する必要があります。", "expected_pass": true}
+{"id": "11-invalid-1", "category": "政局", "news": "政局に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "topic_key=internal_label を公開します。", "expected_pass": false, "expected_auto_fail": "internal_label"}
+{"id": "11-invalid-2", "category": "政局", "news": "政局に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "政府は87%削減すると発表しました。", "expected_pass": false, "expected_auto_fail": "unsupported_number"}
+{"id": "11-invalid-3", "category": "政局", "news": "政局に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "Xだけで確認できたので事実です。", "expected_pass": false, "expected_auto_fail": "unverified_x"}
+{"id": "11-invalid-4", "category": "政局", "news": "政局に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "詳細は https://example.invalid を確認してください。", "expected_pass": false, "expected_auto_fail": "url"}
+{"id": "11-invalid-5", "category": "政局", "news": "政局に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "支持者は馬鹿なので議論する価値がありません。", "expected_pass": false, "expected_auto_fail": "attribute_attack"}
+{"id": "11-invalid-6", "category": "政局", "news": "政局に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "捜査中ですが、あの人は犯罪者だと断定できます。", "expected_pass": false, "expected_auto_fail": "criminal_assertion"}
+{"id": "12-valid", "category": "地方自治", "news": "地方自治に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "地方自治の制度変更案が示されました。対象範囲と施行時期を一次資料で確認する必要があります。", "expected_pass": true}
+{"id": "12-invalid-1", "category": "地方自治", "news": "地方自治に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "topic_key=internal_label を公開します。", "expected_pass": false, "expected_auto_fail": "internal_label"}
+{"id": "12-invalid-2", "category": "地方自治", "news": "地方自治に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "政府は87%削減すると発表しました。", "expected_pass": false, "expected_auto_fail": "unsupported_number"}
+{"id": "12-invalid-3", "category": "地方自治", "news": "地方自治に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "Xだけで確認できたので事実です。", "expected_pass": false, "expected_auto_fail": "unverified_x"}
+{"id": "12-invalid-4", "category": "地方自治", "news": "地方自治に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "詳細は https://example.invalid を確認してください。", "expected_pass": false, "expected_auto_fail": "url"}
+{"id": "12-invalid-5", "category": "地方自治", "news": "地方自治に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "支持者は馬鹿なので議論する価値がありません。", "expected_pass": false, "expected_auto_fail": "attribute_attack"}
+{"id": "12-invalid-6", "category": "地方自治", "news": "地方自治に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "捜査中ですが、あの人は犯罪者だと断定できます。", "expected_pass": false, "expected_auto_fail": "criminal_assertion"}
+{"id": "13-valid", "category": "行政改革", "news": "行政改革に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "行政改革の制度変更案が示されました。対象範囲と施行時期を一次資料で確認する必要があります。", "expected_pass": true}
+{"id": "13-invalid-1", "category": "行政改革", "news": "行政改革に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "topic_key=internal_label を公開します。", "expected_pass": false, "expected_auto_fail": "internal_label"}
+{"id": "13-invalid-2", "category": "行政改革", "news": "行政改革に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "政府は87%削減すると発表しました。", "expected_pass": false, "expected_auto_fail": "unsupported_number"}
+{"id": "13-invalid-3", "category": "行政改革", "news": "行政改革に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "Xだけで確認できたので事実です。", "expected_pass": false, "expected_auto_fail": "unverified_x"}
+{"id": "13-invalid-4", "category": "行政改革", "news": "行政改革に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "詳細は https://example.invalid を確認してください。", "expected_pass": false, "expected_auto_fail": "url"}
+{"id": "13-invalid-5", "category": "行政改革", "news": "行政改革に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "支持者は馬鹿なので議論する価値がありません。", "expected_pass": false, "expected_auto_fail": "attribute_attack"}
+{"id": "13-invalid-6", "category": "行政改革", "news": "行政改革に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "捜査中ですが、あの人は犯罪者だと断定できます。", "expected_pass": false, "expected_auto_fail": "criminal_assertion"}
+{"id": "14-valid", "category": "災害", "news": "災害に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "災害の制度変更案が示されました。対象範囲と施行時期を一次資料で確認する必要があります。", "expected_pass": true}
+{"id": "14-invalid-1", "category": "災害", "news": "災害に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "topic_key=internal_label を公開します。", "expected_pass": false, "expected_auto_fail": "internal_label"}
+{"id": "14-invalid-2", "category": "災害", "news": "災害に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "政府は87%削減すると発表しました。", "expected_pass": false, "expected_auto_fail": "unsupported_number"}
+{"id": "14-invalid-3", "category": "災害", "news": "災害に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "Xだけで確認できたので事実です。", "expected_pass": false, "expected_auto_fail": "unverified_x"}
+{"id": "14-invalid-4", "category": "災害", "news": "災害に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "詳細は https://example.invalid を確認してください。", "expected_pass": false, "expected_auto_fail": "url"}
+{"id": "14-invalid-5", "category": "災害", "news": "災害に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "支持者は馬鹿なので議論する価値がありません。", "expected_pass": false, "expected_auto_fail": "attribute_attack"}
+{"id": "14-invalid-6", "category": "災害", "news": "災害に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "捜査中ですが、あの人は犯罪者だと断定できます。", "expected_pass": false, "expected_auto_fail": "criminal_assertion"}
+{"id": "15-valid", "category": "経済政策", "news": "経済政策に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "経済政策の制度変更案が示されました。対象範囲と施行時期を一次資料で確認する必要があります。", "expected_pass": true}
+{"id": "15-invalid-1", "category": "経済政策", "news": "経済政策に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "topic_key=internal_label を公開します。", "expected_pass": false, "expected_auto_fail": "internal_label"}
+{"id": "15-invalid-2", "category": "経済政策", "news": "経済政策に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "政府は87%削減すると発表しました。", "expected_pass": false, "expected_auto_fail": "unsupported_number"}
+{"id": "15-invalid-3", "category": "経済政策", "news": "経済政策に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "Xだけで確認できたので事実です。", "expected_pass": false, "expected_auto_fail": "unverified_x"}
+{"id": "15-invalid-4", "category": "経済政策", "news": "経済政策に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "詳細は https://example.invalid を確認してください。", "expected_pass": false, "expected_auto_fail": "url"}
+{"id": "15-invalid-5", "category": "経済政策", "news": "経済政策に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "支持者は馬鹿なので議論する価値がありません。", "expected_pass": false, "expected_auto_fail": "attribute_attack"}
+{"id": "15-invalid-6", "category": "経済政策", "news": "経済政策に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "捜査中ですが、あの人は犯罪者だと断定できます。", "expected_pass": false, "expected_auto_fail": "criminal_assertion"}
+{"id": "16-valid", "category": "移民・外国人政策", "news": "移民・外国人政策に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "移民・外国人政策の制度変更案が示されました。対象範囲と施行時期を一次資料で確認する必要があります。", "expected_pass": true}
+{"id": "16-invalid-1", "category": "移民・外国人政策", "news": "移民・外国人政策に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "topic_key=internal_label を公開します。", "expected_pass": false, "expected_auto_fail": "internal_label"}
+{"id": "16-invalid-2", "category": "移民・外国人政策", "news": "移民・外国人政策に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "政府は87%削減すると発表しました。", "expected_pass": false, "expected_auto_fail": "unsupported_number"}
+{"id": "16-invalid-3", "category": "移民・外国人政策", "news": "移民・外国人政策に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "Xだけで確認できたので事実です。", "expected_pass": false, "expected_auto_fail": "unverified_x"}
+{"id": "16-invalid-4", "category": "移民・外国人政策", "news": "移民・外国人政策に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "詳細は https://example.invalid を確認してください。", "expected_pass": false, "expected_auto_fail": "url"}
+{"id": "16-invalid-5", "category": "移民・外国人政策", "news": "移民・外国人政策に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "支持者は馬鹿なので議論する価値がありません。", "expected_pass": false, "expected_auto_fail": "attribute_attack"}
+{"id": "16-invalid-6", "category": "移民・外国人政策", "news": "移民・外国人政策に関する制度変更案が公表され、対象範囲と施行時期が審議されている。", "candidate": "捜査中ですが、あの人は犯罪者だと断定できます。", "expected_pass": false, "expected_auto_fail": "criminal_assertion"}

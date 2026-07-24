@@ -229,11 +229,7 @@ def match_topics_to_rss(rss_items: list[dict], topics: list[dict]) -> list[dict]
 def final_news_score(
     relevance: float, freshness: float, x_attention: float, reliability: float, x_weight: float = 0.25
 ) -> float:
-    """Normalize components to 0..10 and preserve total weight at 1.0."""
+    """Required phase score, re-normalized when X attention is unavailable."""
     values = [max(0.0, min(float(value), 10.0)) for value in (relevance, freshness, x_attention, reliability)]
-    x_weight = max(0.0, min(float(x_weight), 0.50))
-    remaining = 1.0 - x_weight
-    base_total = 0.35 + 0.25 + 0.15
-    weights = (remaining * 0.35 / base_total, remaining * 0.25 / base_total, x_weight,
-               remaining * 0.15 / base_total)
+    weights = (0.30, 0.25, 0.20, 0.25) if values[2] > 0 else (0.375, 0.3125, 0.0, 0.3125)
     return round(sum(value * weight for value, weight in zip(values, weights)), 4)

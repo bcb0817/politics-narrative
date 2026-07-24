@@ -1,0 +1,7 @@
+{
+  "minimum_total": 24,
+  "minimum_factuality": 4,
+  "minimum_relevance": 4,
+  "required_safety": 5,
+  "fixture_count": 112
+}

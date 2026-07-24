@@ -17,6 +17,8 @@ if ($Text -notmatch '(?m)^POST_ENABLED\s*=\s*true\s*$') {
 & $Python local_bot.py init-state
 if ($LASTEXITCODE -ne 0) { throw "init-state failed." }
 & (Join-Path $PSScriptRoot "register_task.ps1")
-if ($LASTEXITCODE -ne 0) { throw "Scheduled task registration failed." }
+$Task = Get-ScheduledTask -TaskName "PoliticsNarrativeBot" -ErrorAction Stop
+if ($Task.TaskName -ne "PoliticsNarrativeBot") { throw "Scheduled task registration failed." }
+& (Join-Path $PSScriptRoot "start.ps1")
 Write-Host "本番モードを開始しました。日次レビューはBot本体が自動実行します。" -ForegroundColor Green
 & $Python local_bot.py status

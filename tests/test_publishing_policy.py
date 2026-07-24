@@ -75,9 +75,9 @@ class PublishingPolicyTests(unittest.TestCase):
         failed = [{"posted_at_jst": (self.now - timedelta(hours=5)).isoformat()}]
         self.assertFalse(stagnation_fallback_active(failed, self.now, 3))
 
-    def test_low_quality_fallback_relaxes_only_score_threshold(self):
+    def test_low_quality_fallback_does_not_relax_score_threshold(self):
         self.assertFalse(post._score_gate_allows(3.0, False, False, False))
-        self.assertTrue(post._score_gate_allows(3.0, False, False, True))
+        self.assertFalse(post._score_gate_allows(3.0, False, False, True))
 
     def test_topic_cooldown_within_four_hours(self):
         rows = [{

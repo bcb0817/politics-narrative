@@ -36,7 +36,16 @@ Register-ScheduledTask `
     -Description "Politics news and commentary X bot with integrated daily review" `
     -Force | Out-Null
 
-Start-ScheduledTask -TaskName $TaskName
-Start-Sleep -Seconds 3
-Write-Host "タスクを登録して開始しました: $TaskName" -ForegroundColor Green
-Get-ScheduledTask -TaskName $TaskName | Format-List TaskName, State
+$Registered = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+if ($Registered.TaskName -ne $TaskName) {
+    throw "Scheduled task registration could not be verified."
+}
+
+$LegacyTask = Get-ScheduledTask -TaskName "PoliticsNarrativeDailyReview" -ErrorAction SilentlyContinue
+if ($LegacyTask) {
+    Stop-ScheduledTask -TaskName "PoliticsNarrativeDailyReview" -ErrorAction SilentlyContinue
+    Disable-ScheduledTask -TaskName "PoliticsNarrativeDailyReview" -ErrorAction SilentlyContinue | Out-Null
+}
+
+Write-Host "タスクを登録しました（未起動）: $TaskName" -ForegroundColor Green
+$Registered | Format-List TaskName, State

@@ -29,12 +29,14 @@ BASE_ENV = {
     "OPENAI_MODEL_PREMIUM": "gpt-5.6-sol",
     "OPENAI_CLASSIFIER_ENABLED": "false",
     "WEEKLY_REPORT_ENABLED": "false",
+    "WEEKLY_REVIEW_ENABLED": "false",
     "OPENAI_PREMIUM_ENABLED": "false",
     "OPENAI_MONTHLY_BUDGET_USD": "8",
     "OPENAI_BUDGET_RESERVE_USD": "0.5",
     "DAILY_IMPORTANT_MODEL_LIMIT": "4",
     "DAILY_REVIEW_MODEL_LIMIT": "1",
     "OPENAI_MAX_RETRIES": "1",
+    "OPENAI_BATCH_ENABLED": "false",
 }
 
 
@@ -165,7 +167,7 @@ class UsageAndReportTests(unittest.TestCase):
 
     def test_18_daily_analysis_success_is_one_call(self):
         FakeClient.calls, FakeClient.failures = [], []
-        with tempfile.TemporaryDirectory() as td, patch.dict(os.environ, BASE_ENV, clear=False):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td, patch.dict(os.environ, BASE_ENV, clear=False):
             result = analyze_report(task_type="daily_review", payload={}, root_dir=ROOT,
                                     state_dir=Path(td), client_factory=FakeClient)
         self.assertEqual(result["analysis"]["summary"], "ok")
@@ -174,21 +176,20 @@ class UsageAndReportTests(unittest.TestCase):
     def test_19_auth_failure_has_no_retry(self):
         FakeClient.calls = []
         FakeClient.failures = [RuntimeError("Incorrect API key")]
-        with tempfile.TemporaryDirectory() as td, patch.dict(os.environ, BASE_ENV, clear=False):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td, patch.dict(os.environ, BASE_ENV, clear=False):
             result = analyze_report(task_type="daily_review", payload={}, root_dir=ROOT,
                                     state_dir=Path(td), client_factory=FakeClient)
         self.assertEqual(result["error"], "authentication_error_no_retry")
         self.assertEqual(len(FakeClient.calls), 1)
 
-    def test_20_unavailable_model_falls_back_once(self):
+    def test_20_unavailable_daily_model_falls_back_to_local_only(self):
         FakeClient.calls = []
         FakeClient.failures = [RuntimeError("model unavailable")]
-        with tempfile.TemporaryDirectory() as td, patch.dict(os.environ, BASE_ENV, clear=False):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td, patch.dict(os.environ, BASE_ENV, clear=False):
             result = analyze_report(task_type="daily_review", payload={}, root_dir=ROOT,
                                     state_dir=Path(td), client_factory=FakeClient)
-        self.assertFalse(result["error"])
-        self.assertEqual(len(FakeClient.calls), 2)
-        self.assertTrue(result["route"]["fallback_used"])
+        self.assertEqual(result["error"], "RuntimeError")
+        self.assertEqual(len(FakeClient.calls), 1)
 
     def test_21_candidate_schema_has_review_fields(self):
         required = set(post.CANDIDATE_RESPONSE_SCHEMA["properties"]["candidates"]["items"]["required"])

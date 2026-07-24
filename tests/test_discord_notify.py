@@ -1,0 +1,119 @@
+import os
+import sys
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+import discord_notify  # noqa: E402
+
+
+class FakeResponse:
+    def __init__(self, status_code=204):
+        self.status_code = status_code
+
+
+class DiscordNotifyTests(unittest.TestCase):
+    def test_disabled_does_not_send(self):
+        with patch.dict(os.environ, {
+            "DISCORD_NOTIFICATIONS_ENABLED": "false",
+            "DISCORD_WEBHOOK_URL": "https://discord.invalid/webhook",
+        }, clear=False), patch("discord_notify.requests.post") as post:
+            self.assertFalse(discord_notify.notify("startup", "test"))
+            post.assert_not_called()
+
+    def test_success_payload_disables_mentions(self):
+        env = {
+            "DISCORD_NOTIFICATIONS_ENABLED": "true",
+            "DISCORD_NOTIFY_POST_SUCCESS": "true",
+            "DISCORD_WEBHOOK_URL": "https://discord.invalid/webhook",
+        }
+        with patch.dict(os.environ, env, clear=False), patch(
+            "discord_notify.requests.post", return_value=FakeResponse()
+        ) as post:
+            sent = discord_notify.notify_post_success({
+                "tweet_id": "123",
+                "tweet_text": "@everyone test",
+                "post_type": "issue_diagram",
+                "effective_score": 8.1,
+            })
+        self.assertTrue(sent)
+        payload = post.call_args.kwargs["json"]
+        self.assertEqual(payload["allowed_mentions"], {"parse": []})
+        self.assertIn("https://x.com/i/web/status/123",
+                      payload["embeds"][0]["fields"][2]["value"])
+
+    def test_http_error_is_non_fatal(self):
+        env = {
+            "DISCORD_NOTIFICATIONS_ENABLED": "true",
+            "DISCORD_NOTIFY_ERROR": "true",
+            "DISCORD_WEBHOOK_URL": "https://discord.invalid/webhook",
+        }
+        with patch.dict(os.environ, env, clear=False), patch(
+            "discord_notify.requests.post", return_value=FakeResponse(500)
+        ):
+            self.assertFalse(discord_notify.notify_error("daemon", "boom"))
+
+    def test_secrets_are_redacted_from_logs(self):
+        env = {
+            "OPENAI_API_KEY": "sk-" + "test-secret-1234567890",
+            "DISCORD_WEBHOOK_URL":
+                "https://discord.com/api/" +
+                "webhooks/123456789/secret-token-value",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            cleaned = discord_notify.sanitize(
+                f"OPENAI_API_KEY={env['OPENAI_API_KEY']} {env['DISCORD_WEBHOOK_URL']}")
+        self.assertNotIn("secret-token-value", cleaned)
+        self.assertNotIn("sk-test-secret", cleaned)
+        self.assertIn("[REDACTED]", cleaned)
+
+    def test_log_source_is_whitelisted(self):
+        sent, count = discord_notify.notify_log_excerpt("../.env", force=True)
+        self.assertFalse(sent)
+        self.assertEqual(count, 0)
+
+    def test_note_draft_uses_dedicated_webhook(self):
+        env = {
+            "NOTE_DRAFT_DISCORD_ENABLED": "true",
+            "NOTE_DRAFT_DISCORD_WEBHOOK_URL": "https://discord.invalid/note-draft",
+            "NOTE_DRAFT_DISCORD_WEBHOOK_USERNAME": "note bot",
+        }
+        with patch.dict(os.environ, env, clear=False), patch(
+            "discord_notify.requests.post", return_value=FakeResponse()
+        ) as post:
+            self.assertTrue(discord_notify.notify_note_draft_ready({
+                "title": "下書き",
+                "summary": "本文要約",
+                "status": "draft",
+            }))
+            self.assertEqual(post.call_args.args[0], env["NOTE_DRAFT_DISCORD_WEBHOOK_URL"])
+            self.assertEqual(post.call_args.kwargs["json"]["username"], "note bot")
+            self.assertEqual(post.call_args.kwargs["json"]["allowed_mentions"], {"parse": []})
+
+    def test_note_draft_webhook_is_redacted(self):
+        secret = (
+            "https://discord.com/api/" +
+            "webhooks/123456789/note-secret-token"
+        )
+        with patch.dict(os.environ, {
+            "NOTE_DRAFT_DISCORD_WEBHOOK_URL": secret,
+        }, clear=False):
+            cleaned = discord_notify.sanitize(
+                f"NOTE_DRAFT_DISCORD_WEBHOOK_URL={secret}")
+            self.assertNotIn(secret, cleaned)
+
+    def test_note_draft_disabled_does_not_send(self):
+        with patch.dict(os.environ, {
+            "NOTE_DRAFT_DISCORD_ENABLED": "false",
+            "NOTE_DRAFT_DISCORD_WEBHOOK_URL": "https://discord.invalid/note-draft",
+        }, clear=False), patch("discord_notify.requests.post") as post:
+            self.assertFalse(discord_notify.notify_note_draft_ready({"title": "draft"}))
+            post.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()

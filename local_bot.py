@@ -38,16 +38,24 @@ SRC_DIR = ROOT_DIR / "src"
 ENV_FILE = ROOT_DIR / ".env"
 JST = ZoneInfo("Asia/Tokyo")
 
-# スロット間隔（分）。post.py の SLOT_INTERVAL_MINUTES と揃える（既定30分）。
-# .env の SLOT_INTERVAL_MINUTES で変更（例: 45）。1440を割り切る値のみ有効。
+# 監視間隔（分）。MONITOR_INTERVAL_MINUTESを優先し、既定60分。
+# 互換用にSLOT_INTERVAL_MINUTESも読み込む。1440を割り切る値のみ有効。
 def _slot_interval_minutes() -> int:
     try:
-        v = int(os.environ.get("SLOT_INTERVAL_MINUTES", "30"))
+        v = int(os.environ.get("MONITOR_INTERVAL_MINUTES",
+                               os.environ.get("SLOT_INTERVAL_MINUTES", "60")))
     except (TypeError, ValueError):
-        return 30
+        return 60
     if v < 1 or 1440 % v != 0:
-        return 30
+        return 60
     return v
+
+
+def _monitor_schedule_minute() -> int:
+    try:
+        return max(0, min(59, int(os.environ.get("MONITOR_SCHEDULE_MINUTE", "0"))))
+    except (TypeError, ValueError):
+        return 0
 
 # 実行が重ならないようにするロックファイル
 LOCK_STALE_SECONDS = 30 * 60  # 30分以上残っている lock は stale とみなす
@@ -101,12 +109,36 @@ def ensure_dirs() -> dict:
     }
     for p in dirs.values():
         p.mkdir(parents=True, exist_ok=True)
+    if str(SRC_DIR) not in sys.path:
+        sys.path.insert(0, str(SRC_DIR))
+    try:
+        from metrics_db import init_db, migrate_json_state  # noqa: E402
+        db_file = dirs["state"] / "bot_metrics.db"
+        init_db(db_file)
+        migrate_json_state(dirs["state"], db_file)
+    except Exception:
+        pass
     return dirs
 
 
 def log(msg: str) -> None:
     line = f"{datetime.now(JST):%Y-%m-%d %H:%M:%S} {msg}"
     print(line, flush=True)
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    """Replace a state file atomically, including files created by an elevated task."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(text, encoding="utf-8")
+    try:
+        os.replace(temporary, path)
+    except PermissionError:
+        # Files created by an elevated scheduled task can be read-only to the
+        # interactive sandbox user. Preserve them and write an explicit local
+        # fallback instead of weakening directory ACLs.
+        fallback = path.with_name(f"{path.stem}.local{path.suffix}")
+        os.replace(temporary, fallback)
     try:
         log_dir = resolve_dir("LOG_DIR", "logs")
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -178,9 +210,10 @@ def next_slot_dt(now: datetime) -> datetime:
     active = _active_hours()
     base = now.replace(second=0, microsecond=0)
     midnight = base.replace(hour=0, minute=0)
-    minutes_since = int((base - midnight).total_seconds() // 60)
-    idx = (minutes_since // step) + 1
-    cand = midnight + timedelta(minutes=idx * step)
+    origin = midnight + timedelta(minutes=_monitor_schedule_minute())
+    elapsed = (base - origin).total_seconds() / 60
+    idx = max(0, int(elapsed // step) + 1)
+    cand = origin + timedelta(minutes=idx * step)
     # 最大2日分探索すれば必ず有効スロットに当たる
     for _ in range((1440 // step) * 2 + 2):
         if cand > now and cand.hour in active:
@@ -190,15 +223,17 @@ def next_slot_dt(now: datetime) -> datetime:
 
 
 def _daily_review_time() -> time:
-    """DAILY_REVIEW_AT（HH:MM、既定04:45）をJST時刻として返す。"""
-    raw = os.environ.get("DAILY_REVIEW_AT", "04:45").strip()
+    """Return the synchronous daily-review start time in JST."""
+    raw = os.environ.get(
+        "DAILY_REVIEW_TIME", os.environ.get("DAILY_REVIEW_AT", "04:40")
+    ).strip()
     try:
         hour, minute = (int(x) for x in raw.split(":", 1))
         if 0 <= hour <= 23 and 0 <= minute <= 59:
             return time(hour, minute)
     except (TypeError, ValueError):
         pass
-    return time(4, 45)
+    return time(4, 40)
 
 
 def next_review_dt(now: datetime) -> datetime:
@@ -210,6 +245,84 @@ def next_review_dt(now: datetime) -> datetime:
     if candidate <= now:
         candidate += timedelta(days=1)
     return candidate
+
+
+def _parse_clock_list(raw: str) -> list[time]:
+    out = []
+    for value in raw.split(","):
+        try:
+            hour, minute = (int(part) for part in value.strip().split(":", 1))
+            if 0 <= hour <= 23 and 0 <= minute <= 59:
+                out.append(time(hour, minute))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def next_auxiliary_event(now: datetime) -> tuple[datetime, str]:
+    """Return the next non-posting maintenance event."""
+    candidates = []
+    for clock in _parse_clock_list(os.environ.get(
+        "ENGAGEMENT_QUEUE_SCHEDULE", "12:20,20:20")):
+        for day_offset in (0, 1):
+            value = (now + timedelta(days=day_offset)).replace(
+                hour=clock.hour, minute=clock.minute, second=0, microsecond=0)
+            if value > now:
+                candidates.append((value, "engagement_queue"))
+                break
+    for clock in _parse_clock_list(os.environ.get(
+        "FOLLOWER_SNAPSHOT_SCHEDULE", "00:05,23:55")):
+        for day_offset in (0, 1):
+            value = (now + timedelta(days=day_offset)).replace(
+                hour=clock.hour, minute=clock.minute, second=0, microsecond=0)
+            if value > now:
+                candidates.append((value, "follower_snapshot"))
+                break
+    weekday = {"MON": 0, "TUE": 1, "WED": 2, "THU": 3,
+               "FRI": 4, "SAT": 5, "SUN": 6}
+    weekly_specs = (
+        ("WEEKLY_BATCH_SUBMIT_DAY", "SUN", "WEEKLY_BATCH_SUBMIT_TIME", "22:30",
+         "weekly_batch_submit"),
+        ("WEEKLY_BATCH_COLLECT_DAY", "MON", "WEEKLY_BATCH_COLLECT_TIME", "04:15",
+         "weekly_batch_collect"),
+    )
+    for day_key, day_default, time_key, time_default, event_name in weekly_specs:
+        target_day = weekday.get(os.environ.get(day_key, day_default).upper(), weekday[day_default])
+        clocks = _parse_clock_list(os.environ.get(time_key, time_default))
+        clock = clocks[0] if clocks else _parse_clock_list(time_default)[0]
+        for day_offset in range(8):
+            value = (now + timedelta(days=day_offset)).replace(
+                hour=clock.hour, minute=clock.minute, second=0, microsecond=0)
+            if value > now and value.weekday() == target_day:
+                candidates.append((value, event_name))
+                break
+    return min(candidates, key=lambda item: item[0])
+
+
+def _run_auxiliary_event(event_name: str, scheduled_at: datetime) -> None:
+    """Run a local/owned-read maintenance event at most once per slot."""
+    state_path = resolve_dir("STATE_DIR", "data") / "aux_schedule_state.json"
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except Exception:
+        state = {}
+    event_key = f"{event_name}:{scheduled_at:%Y-%m-%dT%H:%M}"
+    if state.get(event_key):
+        return
+    try:
+        if event_name == "engagement_queue":
+            cmd_engagement_queue()
+            cmd_engagement_brief()
+        elif event_name == "follower_snapshot":
+            cmd_follower_status(capture=True)
+        elif event_name == "weekly_batch_submit":
+            cmd_weekly_report()
+        elif event_name == "weekly_batch_collect":
+            cmd_batch_collect()
+    finally:
+        state[event_key] = datetime.now(JST).isoformat()
+        state = dict(list(state.items())[-100:])
+        state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _run_due_review_after_start(now: datetime) -> None:
@@ -344,17 +457,37 @@ def cmd_daemon() -> int:
 
     log("[INFO] daemon: started")
     log(f"[INFO] daemon: POST_ENABLED={str(env_flag('POST_ENABLED')).lower()}")
+    try:
+        from api_budget import startup_budget_lines  # noqa: E402
+        for budget_line in startup_budget_lines():
+            log(f"[INFO] budget: {budget_line}")
+    except Exception as e:
+        log(f"[WARN] daemon: budget configuration log skipped ({type(e).__name__})")
     log(f"[INFO] daemon: integrated daily review at {_daily_review_time():%H:%M} JST")
+    try:
+        from discord_notify import notify_startup  # noqa: E402
+        if notify_startup():
+            log("[INFO] daemon: Discord startup notification sent")
+        else:
+            log("[WARN] daemon: Discord startup notification not sent")
+    except Exception as e:
+        log(f"[WARN] daemon: Discord startup notification skipped ({type(e).__name__})")
+    try:
+        cmd_batch_collect()
+    except Exception as e:
+        log(f"[WARN] daemon: Batch API collection skipped ({type(e).__name__})")
     _run_due_review_after_start(datetime.now(JST))
 
     while not stop["flag"]:
         now = datetime.now(JST)
         post_nxt = next_slot_dt(now)
         review_nxt = next_review_dt(now)
-        is_review = review_nxt < post_nxt
-        nxt = review_nxt if is_review else post_nxt
+        aux_nxt, aux_name = next_auxiliary_event(now)
+        nxt, event_name = min(
+            ((post_nxt, "post"), (review_nxt, "daily_review"), (aux_nxt, aux_name)),
+            key=lambda item: item[0],
+        )
         wait_sec = (nxt - now).total_seconds()
-        event_name = "daily review" if is_review else "post"
         log(f"[INFO] daemon: next {event_name} at {nxt:%Y-%m-%d %H:%M} JST "
             f"(in {int(wait_sec)}s)")
 
@@ -369,20 +502,53 @@ def cmd_daemon() -> int:
         if stop["flag"]:
             break
 
-        if is_review:
+        if event_name == "daily_review":
             log(f"[INFO] daemon: integrated daily review start ({nxt:%H:%M} JST)")
             try:
                 rc = cmd_report()
                 log(f"[INFO] daemon: integrated daily review end (exit={rc})")
             except Exception as e:
                 log(f"[ERROR] daemon: integrated daily review failed: {e}")
-        else:
+        elif event_name == "post":
             log(f"[INFO] daemon: run start (slot {nxt:%H:%M} JST)")
+            attempts_path = resolve_dir("LOG_DIR", "logs") / "post_attempts.jsonl"
+            try:
+                attempts_size = attempts_path.stat().st_size
+            except OSError:
+                attempts_size = 0
             try:
                 rc = run_post()
                 log(f"[INFO] daemon: run end (exit={rc})")
             except Exception as e:
+                rc = 1
                 log(f"[ERROR] daemon: run failed: {e}")
+                try:
+                    from discord_notify import notify_error  # noqa: E402
+                    notify_error("daemon_post_run", f"{type(e).__name__}: {e}",
+                                 slot=f"{nxt:%Y-%m-%d %H:%M} JST")
+                except Exception:
+                    pass
+            try:
+                from discord_notify import notify_attempt_since  # noqa: E402
+                notify_attempt_since(attempts_path, attempts_size, exit_code=rc)
+            except Exception as e:
+                log(f"[WARN] daemon: Discord run log skipped ({type(e).__name__})")
+            if env_flag("PHASE3_ENABLED", "true") and env_flag("POST_METRICS_ENABLED", "true"):
+                try:
+                    cmd_collect_metrics()
+                except Exception as e:
+                    log(f"[WARN] daemon: metrics collection skipped ({type(e).__name__})")
+        else:
+            log(f"[INFO] daemon: auxiliary event start ({event_name})")
+            try:
+                _run_auxiliary_event(event_name, nxt)
+                log(f"[INFO] daemon: auxiliary event end ({event_name})")
+            except Exception as e:
+                log(f"[WARN] daemon: auxiliary event failed ({event_name}, {type(e).__name__})")
+        try:
+            cmd_batch_collect()
+        except Exception as e:
+            log(f"[WARN] daemon: Batch API collection skipped ({type(e).__name__})")
         # 同一スロット内での再実行を防ぐため、スロット時刻+65秒までは必ず進める
         while datetime.now(JST) <= nxt + timedelta(seconds=65) and not stop["flag"]:
             time_mod.sleep(1.0)
@@ -452,6 +618,8 @@ def cmd_report() -> int:
         sys.path.insert(0, str(SRC_DIR))
     import post as post_mod  # noqa: E402
     from publishing_policy import calculate_growth_score  # noqa: E402
+    from review_scoring import (calculate_four_axes, eligible_winning_example,
+                                safety_dimensions, winner_types)  # noqa: E402
 
     now_jst = datetime.now(JST)
     window_hours = 24
@@ -464,8 +632,16 @@ def cmd_report() -> int:
     force_report = env_flag("FORCE_REPORT", "false")
 
     state_file = dirs["state"] / "daily_review_state.json"
+    local_state_file = state_file.with_name(
+        f"{state_file.stem}.local{state_file.suffix}")
+    state_read_file = (
+        local_state_file
+        if local_state_file.exists()
+        and (not state_file.exists() or local_state_file.stat().st_mtime > state_file.stat().st_mtime)
+        else state_file
+    )
     try:
-        state = json.loads(state_file.read_text(encoding="utf-8"))
+        state = json.loads(state_read_file.read_text(encoding="utf-8"))
         if not isinstance(state, dict):
             state = {}
     except Exception:
@@ -511,7 +687,7 @@ def cmd_report() -> int:
             "last_reviewed_at_jst": now_jst.isoformat(),
             "reviewed_count": 0,
         })
-        state_file.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        atomic_write_text(state_file, json.dumps(state, ensure_ascii=False, indent=2))
         return 0
 
     local_by_id = {str(h["tweet_id"]): h for h in recent}
@@ -553,13 +729,12 @@ def cmd_report() -> int:
         )
     except KeyError as e:
         log(f"[ERROR] report: missing X API key: {e}")
-        log("[WARN] report: review skipped without stopping the posting daemon")
-        return 0
+        log("[WARN] report: using stored metrics without stopping the posting daemon")
+        resp = type("StoredMetricsFallback", (), {"data": []})()
     except Exception as e:
         log(f"[ERROR] report: failed to retrieve metrics: {e}")
-        log("[INFO] report: confirm X API read credits and user authentication")
-        log("[WARN] report: review skipped without stopping the posting daemon")
-        return 0
+        log("[INFO] report: using stored 1h/24h/72h metrics")
+        resp = type("StoredMetricsFallback", (), {"data": []})()
 
     metrics = {}
     for t in (resp.data or []):
@@ -586,7 +761,38 @@ def cmd_report() -> int:
     ]
 
     if not metrics:
-        log("[WARN] report: no matching metrics returned for local bot posts")
+        try:
+            from metrics_db import connect as review_connect, db_path as review_db_path  # noqa: E402
+            with review_connect(review_db_path()) as conn:
+                for tid in local_by_id:
+                    row = conn.execute("""SELECT * FROM post_metrics WHERE tweet_id=?
+                      ORDER BY measured_at DESC LIMIT 1""", (tid,)).fetchone()
+                    if row:
+                        metrics[tid] = {
+                            "impressions": int(row["impressions"] or 0),
+                            "likes": int(row["likes"] or 0),
+                            "reposts": int(row["reposts"] or 0),
+                            "replies": int(row["replies"] or 0),
+                            "quotes": int(row["quotes"] or 0),
+                            "bookmarks": int(row["bookmarks"] or 0),
+                            "profile_clicks": (
+                                int(row["profile_clicks"]) if row["profile_clicks"] is not None else None
+                            ),
+                            "url_clicks": (
+                                int(row["url_clicks"]) if row["url_clicks"] is not None else None
+                            ),
+                        }
+        except Exception:
+            pass
+    if not metrics:
+        log("[WARN] report: no current or stored metrics; local empty review retained")
+        state.update({
+            "last_review_date_jst": review_date,
+            "last_reviewed_at_jst": now_jst.isoformat(),
+            "reviewed_count": 0,
+            "local_only": True,
+        })
+        atomic_write_text(state_file, json.dumps(state, ensure_ascii=False, indent=2))
         return 0
 
     growth_weights = {
@@ -596,6 +802,20 @@ def cmd_report() -> int:
         "quotes_bookmarks": float(os.environ.get("SCORE_WEIGHT_QUOTES_BOOKMARKS", "0.15")),
         "follow_conversion": float(os.environ.get("SCORE_WEIGHT_FOLLOW_CONVERSION", "0.15")),
     }
+    follower_change = None
+    external_conversions = None
+    try:
+        from metrics_db import connect as metrics_connect, db_path as current_db_path  # noqa: E402
+        with metrics_connect(current_db_path()) as conn:
+            snapshots = conn.execute("""SELECT followers_count FROM follower_snapshots
+              ORDER BY captured_at DESC LIMIT 2""").fetchall()
+            if len(snapshots) == 2:
+                follower_change = int(snapshots[0][0] or 0) - int(snapshots[1][0] or 0)
+            external_conversions = int(conn.execute("""SELECT COUNT(*) FROM conversion_events
+              WHERE occurred_at>=? AND occurred_at<=?""",
+              (start_jst.isoformat(), now_jst.isoformat())).fetchone()[0])
+    except Exception:
+        pass
     rows = []
     for tid, h in local_by_id.items():
         if tid not in metrics:
@@ -615,6 +835,7 @@ def cmd_report() -> int:
             "hook_type": h.get("hook_type", ""),
             "critique_axis": h.get("critique_axis", ""),
             "model": h.get("openai_model", ""),
+            "prompt_version": h.get("prompt_version", "v1"),
             "posted_at": h.get("posted_at_jst", ""),
             "posted_hour_jst": posted_dt.hour,
             "text_length": len(h.get("tweet_text", "") or ""),
@@ -624,14 +845,37 @@ def cmd_report() -> int:
             "growth_score": 0.0,
             "x_attention_score_at_post": float(h.get("x_attention_score", 0) or 0),
             "x_unique_accounts_at_post": int(h.get("x_unique_accounts", 0) or 0),
+            "follow_gain_estimate": (
+                round(follower_change / max(1, len(local_by_id)), 3)
+                if follower_change is not None else None
+            ),
+            "follow_conversion_estimate": (
+                round(follower_change / max(1, len(local_by_id)), 3)
+                if follower_change is not None else None
+            ),
+            "external_conversions": (
+                round(external_conversions / max(1, len(local_by_id)), 3)
+                if external_conversions is not None else None
+            ),
         }
         row["growth_score"] = calculate_growth_score(row, growth_weights)
+        row["four_axes"] = calculate_four_axes(row)
+        row.update(safety_dimensions(row))
+        row["trust_score"] = row["four_axes"]["trust_score"]
+        row["eligible_winning_example"] = eligible_winning_example(row)
+        row["winner_types"] = winner_types(row)
         rows.append(row)
 
     by_impressions = sorted(rows, key=lambda r: (r["impressions"], r["impressions_per_hour"]), reverse=True)
     by_growth = sorted(rows, key=lambda r: r["growth_score"], reverse=True)
     top3 = by_impressions[:3]
-    growth_top3 = by_growth[:3]
+    eligible_rows = [row for row in rows if row["eligible_winning_example"]]
+    growth_top3 = sorted(eligible_rows, key=lambda r: (
+        r["four_axes"]["balanced_score"] or 0, r["growth_score"]), reverse=True)[:3]
+    trust_top3 = sorted(eligible_rows, key=lambda r: (
+        r["four_axes"]["trust_score"] or 0, r["growth_score"]), reverse=True)[:3]
+    conversation_top3 = sorted(eligible_rows, key=lambda r: (
+        r["four_axes"]["conversation_score"] or 0, r["growth_score"]), reverse=True)[:3]
     bottom3 = by_growth[-3:] if rows else []
 
     def performance_breakdown(field: str) -> dict:
@@ -696,6 +940,37 @@ def cmd_report() -> int:
         if count >= 3
     ]
 
+    prompt_version_comparison = {}
+    for row in rows:
+        version = str(row.get("prompt_version") or "v1")
+        group = prompt_version_comparison.setdefault(version, {
+            "count": 0, "impressions": [], "trust": [], "conversation": [],
+            "follow_conversion_estimate": [], "corrections": 0, "deletions": 0,
+        })
+        group["count"] += 1
+        group["impressions"].append(row.get("impressions"))
+        group["trust"].append(row["four_axes"].get("trust_score"))
+        group["conversation"].append(row["four_axes"].get("conversation_score"))
+        if row.get("follow_conversion_estimate") is not None:
+            group["follow_conversion_estimate"].append(row["follow_conversion_estimate"])
+        group["corrections"] += int(bool(row.get("correction_required")))
+        group["deletions"] += int(bool(row.get("delete_or_hide_required")))
+    for group in prompt_version_comparison.values():
+        def average(values):
+            present = [float(value) for value in values if value is not None]
+            return round(sum(present) / len(present), 4) if present else None
+        count = max(1, group["count"])
+        group.update({
+            "average_impressions": average(group.pop("impressions")),
+            "average_trust_score": average(group.pop("trust")),
+            "average_conversation_score": average(group.pop("conversation")),
+            "follow_conversion_estimate": average(group["follow_conversion_estimate"]),
+            "correction_rate": group.pop("corrections") / count,
+            "deletion_rate": group.pop("deletions") / count,
+            "quality_eval_average": None,
+            "adoption_rate": 1.0,
+        })
+
     quality_errors = list(missing_tweet_errors)
     attempts_file = dirs["log"] / "post_attempts.jsonl"
     try:
@@ -723,42 +998,125 @@ def cmd_report() -> int:
         "reviewed_at_jst": now_jst.isoformat(),
         "window_start_jst": start_jst.isoformat(),
         "window_end_jst": now_jst.isoformat(),
-        "ranking": "impressions_and_growth",
+        "ranking": "spread_trust_conversation_business_balanced",
         "reviewed_count": len(rows),
         "top_impressions_3": top3,
+        "top_trust_3": trust_top3,
+        "top_conversation_3": conversation_top3,
         "top_growth_3": growth_top3,
         "bottom_3": bottom3,
         "quality_errors": quality_errors[-20:],
         "growth_score_weights": growth_weights,
+        "four_axis_method": {
+            "spread": "impressions, impressions/hour, reposts",
+            "trust": "bookmarks, quotes, profile clicks, constructive replies, corrections",
+            "conversation": "replies, unique repliers, manual reply candidates, depth",
+            "business": "follow estimate, profile transitions, external clicks/conversions; missing fields normalize safely",
+        },
         "x_timing_analysis": x_timing_analysis,
         "performance_breakdown": {
             "post_type": performance_breakdown("post_type"),
             "hook_type": performance_breakdown("hook_type"),
             "critique_axis": performance_breakdown("critique_axis"),
             "posted_hour_jst": performance_breakdown("posted_hour_jst"),
+            "prompt_version": performance_breakdown("prompt_version"),
         },
         "repeated_structures": repeated_structures,
         "all_posts": rows,
+        "winner_groups": {
+            winner: [row["tweet_id"] for row in rows if winner in row.get("winner_types", [])]
+            for winner in ("viral_winner", "trust_winner",
+                           "conversation_winner", "conversion_winner")
+        },
+        "prompt_version_comparison": prompt_version_comparison,
     }
+    from usage_reports import xai_roi  # noqa: E402
+    review_payload["xai_attribution_daily"] = xai_roi(days=1)
+    review_payload["xai_attribution_weekly"] = xai_roi(days=7)
     # Local aggregation is authoritative; one bounded LLM call adds trend analysis.
     # Failure is recorded but never makes the daily review fail or blocks posting.
     from report_ai import analyze_report, compact_daily_payload  # noqa: E402
+    dated_file = reviews_dir / f"{now_jst:%Y-%m-%d}.json"
     llm_result = analyze_report(
         task_type="daily_review",
         payload=compact_daily_payload(review_payload),
         root_dir=ROOT_DIR,
         state_dir=dirs["state"],
+        target_json_path=str(dated_file),
+        batch_metadata={"review_date": review_date, "root_dir": str(ROOT_DIR)},
+        batch_dedupe_key=f"daily_review:{review_date}",
     )
     review_payload["llm_analysis"] = llm_result.get("analysis")
     review_payload["llm_route"] = llm_result.get("route", {})
     review_payload["llm_error"] = llm_result.get("error", "")
+    review_payload["llm_usage"] = llm_result.get("usage_event", {})
+    review_payload["llm_pending"] = bool(llm_result.get("pending"))
+    review_payload["llm_batch_job"] = llm_result.get("batch_job", {})
     if review_payload["llm_error"]:
         log(f"[WARN] report: LLM analysis unavailable; local review retained ({review_payload['llm_error']})")
-    dated_file = reviews_dir / f"{now_jst:%Y-%m-%d}.json"
     latest_file = dirs["state"] / "daily_review_latest.json"
     payload_text = json.dumps(review_payload, ensure_ascii=False, indent=2)
-    dated_file.write_text(payload_text, encoding="utf-8")
-    latest_file.write_text(payload_text, encoding="utf-8")
+    atomic_write_text(dated_file, payload_text)
+    atomic_write_text(latest_file, payload_text)
+    reports_dir = ROOT_DIR / "reports" / "daily"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    report_lines = [f"# Daily Review {review_date}", "", f"Reviewed: {len(rows)} posts", ""]
+    if review_payload.get("llm_analysis"):
+        report_lines.append(review_payload["llm_analysis"].get("summary", ""))
+        report_lines.extend(["", "## Recommendations", ""])
+        report_lines.extend(f"- {item}" for item in review_payload["llm_analysis"].get("recommendations", []))
+    (reports_dir / f"{review_date}.md").write_text("\n".join(report_lines).strip() + "\n", encoding="utf-8")
+    from metrics_db import (apply_additive_migrations, db_path as metrics_db_path,
+                            write as db_write)  # noqa: E402
+    review_db = metrics_db_path()
+    apply_additive_migrations(review_db)
+    llm_route = review_payload.get("llm_route") or {}
+    db_write("""INSERT OR REPLACE INTO daily_reviews
+      (review_date,generated_at,review_model,top_posts_json,bottom_posts_json,winning_patterns_json,
+       losing_patterns_json,recommendations_json,input_tokens,output_tokens,estimated_cost_usd)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?)""", (
+        review_date, now_jst.isoformat(), llm_route.get("used_model") or llm_route.get("model", "local"),
+        json.dumps(top3, ensure_ascii=False), json.dumps(bottom3, ensure_ascii=False),
+        json.dumps(growth_top3, ensure_ascii=False), json.dumps(bottom3, ensure_ascii=False),
+        json.dumps((review_payload.get("llm_analysis") or {}).get("recommendations", []), ensure_ascii=False),
+        int((review_payload.get("llm_usage") or {}).get("input_tokens", 0)),
+        int((review_payload.get("llm_usage") or {}).get("output_tokens", 0)),
+        float((review_payload.get("llm_usage") or {}).get("estimated_cost_usd", 0))), review_db)
+    db_write("""UPDATE daily_reviews SET four_axes_json=?,winner_groups_json=?,
+      prompt_version_comparison_json=?,local_only=? WHERE review_date=?""", (
+        json.dumps({
+            "spread": [row["four_axes"].get("spread_score") for row in rows],
+            "trust": [row["four_axes"].get("trust_score") for row in rows],
+            "conversation": [row["four_axes"].get("conversation_score") for row in rows],
+            "conversion": [row["four_axes"].get("business_score") for row in rows],
+        }, ensure_ascii=False),
+        json.dumps(review_payload["winner_groups"], ensure_ascii=False),
+        json.dumps(prompt_version_comparison, ensure_ascii=False),
+        int(not bool(review_payload.get("llm_analysis"))), review_date,
+    ), review_db)
+    for row in rows:
+        db_write("""INSERT INTO post_quality_dimensions
+          (tweet_id,anger_score,personal_attack_score,partisan_bias_score,claim_risk,
+           trust_score,correction_required,manual_delete_required,
+           follow_conversion_estimate,winner_types_json,updated_at)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?)
+          ON CONFLICT(tweet_id) DO UPDATE SET
+           anger_score=excluded.anger_score,
+           personal_attack_score=excluded.personal_attack_score,
+           partisan_bias_score=excluded.partisan_bias_score,
+           claim_risk=excluded.claim_risk,trust_score=excluded.trust_score,
+           correction_required=excluded.correction_required,
+           manual_delete_required=excluded.manual_delete_required,
+           follow_conversion_estimate=excluded.follow_conversion_estimate,
+           winner_types_json=excluded.winner_types_json,updated_at=excluded.updated_at""", (
+            row["tweet_id"], row.get("anger_score"), row.get("personal_attack_score"),
+            row.get("partisan_bias_score"), row.get("claim_risk"),
+            row.get("trust_score"), int(bool(row.get("correction_required"))),
+            int(bool(row.get("delete_or_hide_required"))),
+            row.get("follow_conversion_estimate"),
+            json.dumps(row.get("winner_types", []), ensure_ascii=False),
+            now_jst.isoformat(),
+        ), review_db)
 
     log("[INFO] report: top 3 by impressions")
     for idx, r in enumerate(top3, 1):
@@ -819,7 +1177,7 @@ def cmd_report() -> int:
         "top3_tweet_ids": [r["tweet_id"] for r in top3],
         "latest_file": str(latest_file),
     })
-    state_file.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_text(state_file, json.dumps(state, ensure_ascii=False, indent=2))
 
     log(f"[INFO] report: learning data appended to {patterns_dir}")
     log(f"[INFO] report: full review saved to {dated_file}")
@@ -849,13 +1207,31 @@ def _run_long_report(task_type: str, output_folder: str, premium_requested: bool
             })
         except (OSError, json.JSONDecodeError):
             continue
+    today = datetime.now(JST).date()
+    week_start = today - timedelta(days=today.weekday())
     result = analyze_report(
         task_type=task_type,
-        payload={"daily_reviews": compact},
+        payload={"daily_reviews": compact, "requested_sections": [
+            "weekly winners and losers", "growing and weakening topics", "post types", "hooks",
+            "critique axes", "posting times", "X Search effect", "YouTube Shorts ideas",
+            "long YouTube ideas", "note article ideas", "next week allocation",
+            "prompt improvement proposals", "code improvement proposals for human approval only",
+        ]},
         root_dir=ROOT_DIR,
         state_dir=dirs["state"],
         premium_requested=premium_requested,
+        batch_metadata={
+            "root_dir": str(ROOT_DIR), "report_date": today.isoformat(),
+            "week_start": week_start.isoformat(),
+            "week_end": (week_start + timedelta(days=6)).isoformat(),
+        },
+        batch_dedupe_key=f"{task_type}:{week_start.isoformat()}",
     )
+    if result.get("pending"):
+        job = result.get("batch_job") or {}
+        log(f"[INFO] {task_type}: Batch API submitted ({job.get('batch_id', 'pending')}); "
+            "result will be collected automatically")
+        return 0
     if result.get("error"):
         log(f"[INFO] {task_type}: {result['error']}; no local report generated")
         return 0
@@ -868,17 +1244,563 @@ def _run_long_report(task_type: str, output_folder: str, premium_requested: bool
                        ("Recommendations", "recommendations"), ("Timing", "timing_findings")):
         lines.extend(["", f"## {title}", ""])
         lines.extend(f"- {item}" for item in analysis.get(key, []))
+    expansion = {}
+    if task_type == "weekly_report":
+        recommendations = analysis.get("recommendations", [])
+        expansion = {
+            "youtube_shorts": recommendations[:3],
+            "youtube_long": recommendations[:2],
+            "note_articles": recommendations[:3],
+            "prompt_improvements": analysis.get("weaknesses", [])[:3],
+            "code_improvements_human_approval_required": recommendations[-3:],
+        }
+        for title, key in (("YouTube Shorts Candidates", "youtube_shorts"),
+                           ("YouTube Long-form Candidates", "youtube_long"),
+                           ("note Article Candidates", "note_articles"),
+                           ("Prompt Improvement Proposals", "prompt_improvements"),
+                           ("Code Improvement Proposals (Human Approval Required)", "code_improvements_human_approval_required")):
+            lines.extend(["", f"## {title}", ""])
+            lines.extend(f"- {item}" for item in expansion[key])
     out_file.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+    if task_type == "weekly_report":
+        weekly_dir = ROOT_DIR / "reports" / "weekly"
+        weekly_dir.mkdir(parents=True, exist_ok=True)
+        weekly_file = weekly_dir / f"{datetime.now(JST):%Y-%m-%d}.md"
+        weekly_file.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+        from metrics_db import write as db_write  # noqa: E402
+        today = datetime.now(JST).date()
+        week_start = today - timedelta(days=today.weekday())
+        db_write("""INSERT OR REPLACE INTO weekly_reviews
+          (week_start,week_end,generated_at,review_model,summary_json,media_expansion_json,
+           recommendations_json,estimated_cost_usd) VALUES (?,?,?,?,?,?,?,?)""", (
+            week_start.isoformat(), (week_start + timedelta(days=6)).isoformat(), datetime.now(JST).isoformat(),
+            (result.get("route") or {}).get("used_model") or (result.get("route") or {}).get("model", "local"),
+            json.dumps({"summary": analysis.get("summary", "")}, ensure_ascii=False),
+            json.dumps(expansion, ensure_ascii=False),
+            json.dumps(analysis.get("recommendations", []), ensure_ascii=False),
+            float((result.get("usage_event") or {}).get("estimated_cost_usd", 0))))
     log(f"[INFO] {task_type}: local-only report saved to {out_file}")
     return 0
 
 
 def cmd_weekly_report() -> int:
-    return _run_long_report("weekly_report", "weekly_reports")
+    rc = _run_long_report("weekly_report", "weekly_reports")
+    try:
+        from quality_evals import export_human_review_sample  # noqa: E402
+        log(f"[INFO] human-review sample: {export_human_review_sample()}")
+    except Exception as exc:
+        log(f"[WARN] human-review sample skipped ({type(exc).__name__})")
+    if rc == 0:
+        try:
+            from content_pipeline import build_content_pipeline  # noqa: E402
+            pipeline = build_content_pipeline()
+            log(f"[INFO] content pipeline: status={pipeline.get('status')} "
+                f"shorts={len(pipeline.get('shorts', []))} "
+                f"note={len(pipeline.get('note_articles', []))}")
+        except Exception as exc:
+            log(f"[WARN] content pipeline skipped ({type(exc).__name__})")
+    return rc
 
 
 def cmd_premium_report() -> int:
     return _run_long_report("premium_report", "premium_reports", premium_requested=True)
+
+
+def cmd_collect_metrics() -> int:
+    load_env()
+    dirs = ensure_dirs()
+    if str(SRC_DIR) not in sys.path:
+        sys.path.insert(0, str(SRC_DIR))
+    from post_metrics import collect  # noqa: E402
+    try:
+        history = json.loads((dirs["state"] / "posted_urls.json").read_text(encoding="utf-8"))
+    except Exception:
+        history = []
+    result = collect(history if isinstance(history, list) else [])
+    log(f"[INFO] collect-metrics: {json.dumps(result, ensure_ascii=False)}")
+    return 0
+
+
+def cmd_batch_collect() -> int:
+    load_env()
+    dirs = ensure_dirs()
+    if str(SRC_DIR) not in sys.path:
+        sys.path.insert(0, str(SRC_DIR))
+    from model_router import ModelRouter  # noqa: E402
+    from openai_batch import collect  # noqa: E402
+    pricing = ModelRouter(ROOT_DIR / "config" / "openai_model_pricing.json").pricing
+    result = collect(state_dir=dirs["state"], pricing=pricing)
+    log(f"[INFO] batch-collect: {json.dumps(result, ensure_ascii=False)}")
+    return 0
+
+
+def cmd_batch_status() -> int:
+    load_env()
+    dirs = ensure_dirs()
+    if str(SRC_DIR) not in sys.path:
+        sys.path.insert(0, str(SRC_DIR))
+    from openai_batch import status  # noqa: E402
+    rows = status(dirs["state"])
+    if not rows:
+        print("OpenAI Batch jobs: 0")
+        return 0
+    for row in rows:
+        print(f"{row['status']:<12} {row['task_type']:<16} {row['model']:<20} "
+              f"{row['custom_id']} error={row.get('error_type') or '-'}")
+    return 0
+
+
+def cmd_preview_extensions() -> int:
+    load_env()
+    dirs = ensure_dirs()
+    if str(SRC_DIR) not in sys.path:
+        sys.path.insert(0, str(SRC_DIR))
+    from phase2 import save_extension_previews  # noqa: E402
+    try:
+        history = json.loads((dirs["state"] / "posted_urls.json").read_text(encoding="utf-8"))
+    except Exception:
+        history = []
+    if not history:
+        log("[INFO] preview-extensions: no post history")
+        return 0
+    paths = save_extension_previews(history[-1], ROOT_DIR)
+    log(f"[INFO] preview-extensions: saved={len(paths)} auto_post=false")
+    return 0
+
+
+def cmd_db_status() -> int:
+    load_env(require=False)
+    if str(SRC_DIR) not in sys.path:
+        sys.path.insert(0, str(SRC_DIR))
+    from metrics_db import (apply_additive_migrations, db_path, init_db,
+                            migrate_json_state, table_counts)  # noqa: E402
+    path = db_path()
+    ok = init_db(path)
+    apply_additive_migrations(path)
+    migrate_json_state(path.parent, path)
+    print(f"SQLite: {'OK' if ok else 'fallback'}")
+    print(f"Path: {path}")
+    for name, count in table_counts(path).items():
+        print(f"{name}: {count}")
+    return 0
+
+
+def cmd_budget_status() -> int:
+    # Compatibility labels retained for older diagnostics:
+    # OpenAI今月使用額 / 今月の予測着地
+    load_env(require=False)
+    if str(SRC_DIR) not in sys.path:
+        sys.path.insert(0, str(SRC_DIR))
+    from api_budget import (budget_configuration, effective_xai_limit, forecast,
+                            xai_ledger_verified)  # noqa: E402
+    from usage_reports import openai_usage_breakdown  # noqa: E402
+    result = forecast()
+    actual, projected = result["actual"], result["projected"]
+    cfg = budget_configuration()
+    xai_effective = effective_xai_limit()
+    print("=== Budget status ===")
+    print("OpenAI")
+    print(f"- configured budget: ${cfg['providers']['openai']:.2f}")
+    print(f"- used: ${actual['openai']:.4f}")
+    print(f"- reserved: ${cfg['provider_reserves']['openai']:.2f}")
+    print(f"- remaining: ${max(0, cfg['providers']['openai'] - actual['openai']):.4f}")
+    print(f"- projected month end: ${projected['openai']:.4f}")
+    print("xAI")
+    print(f"- configured budget: ${cfg['providers']['xai']:.2f}")
+    print(f"- effective budget: ${xai_effective:.2f}")
+    print(f"- ledger verified: {str(xai_ledger_verified()).lower()}")
+    print(f"- used: ${actual['xai']:.4f}")
+    print(f"- reserved: ${cfg['provider_reserves']['xai']:.2f}")
+    print(f"- remaining: ${max(0, xai_effective - actual['xai']):.4f}")
+    print(f"- projected month end: ${projected['xai']:.4f}")
+    print("X API")
+    print(f"- configured budget: ${cfg['providers']['x']:.2f}")
+    print(f"- used: ${actual['x']:.4f}")
+    print(f"- reserved: ${cfg['provider_reserves']['x']:.2f}")
+    print(f"- remaining: ${max(0, cfg['providers']['x'] - actual['x']):.4f}")
+    print(f"- projected month end: ${projected['x']:.4f}")
+    print("Total")
+    print(f"- configured budget: ${cfg['configured_total']:.2f}")
+    print(f"- effective spendable budget: ${cfg['effective_spendable']:.2f}")
+    print(f"- used: ${actual['total']:.4f}")
+    print(f"- remaining: ${max(0, cfg['effective_spendable'] - actual['total']):.4f}")
+    print(f"- usage ratio: {result['usage_ratio'] * 100:.2f}%")
+    print(f"- current warning stage: {result['current_warning_stage']}")
+    print(f"- restriction level: {result['restriction_level']}")
+    print(f"- USD/JPY rate: {cfg['usd_jpy_rate']:g}")
+    print(f"- JPY display budget: JPY {cfg['jpy_budget_display']:,.0f}")
+    print(f"- JPY projected month end: JPY {result['projected_jpy']:,.0f}")
+    if not cfg["consistent"]:
+        print("WARNING: provider budget sum does not match total budget")
+    average = actual["xai"] / actual["xai_requests"] \
+        if actual["xai_requests"] else 0
+    print(f"xAI average cost/request: ${average:.6f}")
+    print(f"X Search Post Reads: {actual['x_search_reads']}")
+    print(f"X post creates: {actual['x_post_creates']}")
+    print(f"Owned Reads: {actual['x_owned_reads']}")
+    for model, cost in sorted(actual["models"].items()):
+        print(f"OpenAI {model}: ${cost:.4f}")
+    for task_type, row in openai_usage_breakdown()["task_types"].items():
+        print(f"OpenAI {task_type}: ${row['cost_usd']:.4f} ({row['calls']} calls)")
+    try:
+        from audit_tools import verify_xai_ledger  # noqa: E402
+        print("xAI ledger recommendation: "
+              + verify_xai_ledger()["recommendation"])
+    except Exception:
+        pass
+    print("Content pipeline weekly budget: $"
+          + f"{float(os.environ.get('CONTENT_PIPELINE_WEEKLY_BUDGET_USD', '0.40')):.2f}")
+    print(f"Projected month end: ${projected['total']:.4f}")
+    return 0
+
+
+def cmd_cost_forecast() -> int:
+    load_env(require=False)
+    if str(SRC_DIR) not in sys.path:
+        sys.path.insert(0, str(SRC_DIR))
+    from api_budget import budget_configuration, forecast  # noqa: E402
+    result = forecast()
+    actual, projected = result["actual"], result["projected"]
+    cfg = budget_configuration()
+    usd_jpy = cfg["usd_jpy_rate"]
+    print("=== Cost forecast ===")
+    print(f"News monitor runs this month: {actual['monitor_runs']}")
+    print(f"X Search runs: {actual['x_search_runs']}")
+    print(f"X Search reads: {actual['x_search_reads']}")
+    print(f"X post creates: {actual['x_post_creates']}")
+    print(f"Owned Reads: {actual['x_owned_reads']}")
+    if actual["models"]:
+        for model, cost in sorted(actual["models"].items()):
+            print(f"OpenAI {model}: ${cost:.4f}")
+    else:
+        print("OpenAI model usage: $0.0000")
+    print(f"OpenAI API used: ${actual['openai']:.4f}")
+    print(f"xAI API used: ${actual['xai']:.4f}")
+    print(f"X API used: ${actual['x']:.4f}")
+    print(f"Total used: ${actual['total']:.4f} / about JPY {actual['total'] * usd_jpy:.0f}")
+    print(f"7-day average: ${result['average_daily_usd_7d']:.4f}/day")
+    print(f"Projected OpenAI: ${projected['openai']:.4f}")
+    print(f"Projected xAI: ${projected['xai']:.4f}")
+    print(f"Projected X API: ${projected['x']:.4f}")
+    print(f"Projected total: ${projected['total']:.4f} / about JPY {result['projected_jpy']:.0f}")
+    print(f"Current budget usage ratio: {result['usage_ratio'] * 100:.2f}%")
+    print(f"Projected budget usage ratio: {result['projected_usage_ratio'] * 100:.2f}%")
+    print(f"85% warning predicted date: {result['threshold_dates']['warning_85'] or 'not this month'}")
+    print(f"93% restriction predicted date: {result['threshold_dates']['restrict_93'] or 'not this month'}")
+    print(f"100% stop predicted date: {result['threshold_dates']['hard_stop_100'] or 'not this month'}")
+    print(f"JPY budget display: JPY {cfg['jpy_budget_display']:,.0f}")
+    print(f"Projected JPY remaining: JPY {result['remaining_jpy']:.0f}")
+    print(f"Exchange rate: 1 USD = {usd_jpy:g} JPY")
+    print(f"xAI X Search runs: {actual['xai_search_runs']}")
+    print(f"xAI tool calls: {actual['xai_tool_calls']}")
+    print(f"xAI requests: {actual['xai_requests']}")
+    average = actual['xai'] / actual['xai_requests'] if actual['xai_requests'] else 0
+    print(f"xAI average actual/request: ${average:.6f}")
+    if result["warning"]:
+        print("Cost warning: projected monthly cost reached 85% of budget")
+    if result["pause_x_search"]:
+        print("Paid features restricted: projected monthly cost reached 93% of budget")
+    if result["block_non_breaking"]:
+        print("Paid API operations stopped: projected monthly cost reached 100% of budget")
+    return 0
+
+
+def cmd_xai_roi() -> int:
+    load_env(require=False)
+    if str(SRC_DIR) not in sys.path:
+        sys.path.insert(0, str(SRC_DIR))
+    from usage_reports import xai_roi  # noqa: E402
+    print(json.dumps(xai_roi(), ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_openai_usage_breakdown() -> int:
+    load_env(require=False)
+    if str(SRC_DIR) not in sys.path:
+        sys.path.insert(0, str(SRC_DIR))
+    from usage_reports import openai_usage_breakdown  # noqa: E402
+    print(json.dumps(openai_usage_breakdown(), ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_engagement_queue() -> int:
+    load_env(require=False)
+    if str(SRC_DIR) not in sys.path:
+        sys.path.insert(0, str(SRC_DIR))
+    from engagement_queue import build_all  # noqa: E402
+    result = build_all()
+    print(json.dumps(result, ensure_ascii=False))
+    print("X write operations: 0 (human approval required)")
+    return 0
+
+
+def cmd_engagement_brief() -> int:
+    load_env(require=False)
+    if str(SRC_DIR) not in sys.path:
+        sys.path.insert(0, str(SRC_DIR))
+    from engagement_queue import engagement_brief  # noqa: E402
+    path = engagement_brief()
+    print(f"Engagement brief: {path}")
+    print("X write operations: 0 (human action only)")
+    return 0
+
+
+def cmd_eval_quality(mode: str, limit: int | None, confirm_full: bool) -> int:
+    load_env(require=False)
+    if str(SRC_DIR) not in sys.path:
+        sys.path.insert(0, str(SRC_DIR))
+    from quality_evals import run_quality_eval  # noqa: E402
+    result = run_quality_eval(mode, limit, confirm_full)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 1 if result.get("error") else 0
+
+
+def cmd_import_human_review(source: str) -> int:
+    load_env(require=False)
+    if str(SRC_DIR) not in sys.path:
+        sys.path.insert(0, str(SRC_DIR))
+    from growth_tracking import import_human_reviews  # noqa: E402
+    result = import_human_reviews(Path(source))
+    print(json.dumps(result, ensure_ascii=False))
+    return 0
+
+
+def cmd_import_conversions(source: str) -> int:
+    load_env(require=False)
+    if str(SRC_DIR) not in sys.path:
+        sys.path.insert(0, str(SRC_DIR))
+    from growth_tracking import import_conversions  # noqa: E402
+    result = import_conversions(Path(source))
+    print(json.dumps(result, ensure_ascii=False))
+    return 0
+
+
+def cmd_follower_status(capture: bool = False) -> int:
+    load_env(require=False)
+    if str(SRC_DIR) not in sys.path:
+        sys.path.insert(0, str(SRC_DIR))
+    from growth_tracking import capture_follower_snapshot, follower_status  # noqa: E402
+    if capture:
+        print(json.dumps(capture_follower_snapshot(), ensure_ascii=False))
+    print(json.dumps(follower_status(), ensure_ascii=False, indent=2))
+    print("Follower attribution is a time-window estimate.")
+    return 0
+
+
+def cmd_quality_dashboard() -> int:
+    load_env(require=False)
+    if str(SRC_DIR) not in sys.path:
+        sys.path.insert(0, str(SRC_DIR))
+    from quality_evals import quality_dashboard  # noqa: E402
+    print(json.dumps(quality_dashboard(), ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_queue_status() -> int:
+    load_env(require=False)
+    if str(SRC_DIR) not in sys.path:
+        sys.path.insert(0, str(SRC_DIR))
+    from engagement_queue import status_counts  # noqa: E402
+    labels = {"pending_quote": "pending quote candidates", "pending_reply": "pending reply candidates",
+              "approved": "approved",
+              "rejected": "rejected", "posted_manually": "posted manually", "expired": "expired"}
+    for key, value in status_counts().items():
+        print(f"{labels.get(key, key)}: {value}")
+    return 0
+
+
+def cmd_queue_update(queue_type: str, item_id: int, status: str) -> int:
+    load_env(require=False)
+    if str(SRC_DIR) not in sys.path:
+        sys.path.insert(0, str(SRC_DIR))
+    from engagement_queue import update_status  # noqa: E402
+    ok = update_status(queue_type, item_id, status)
+    print("updated" if ok else "not updated")
+    return 0 if ok else 1
+
+
+def cmd_queue_mark_posted(queue_type: str, item_id: int, post_id: str,
+                          selected_option: str = "", notes: str = "") -> int:
+    load_env(require=False)
+    ensure_dirs()
+    from engagement_queue import mark_posted  # noqa: E402
+    ok = mark_posted(queue_type, item_id, post_id,
+                     selected_option=selected_option, notes=notes)
+    print(json.dumps({
+        "updated": ok, "queue_type": queue_type, "queue_id": item_id,
+        "manual_post_id": post_id, "x_writes": 0,
+    }, ensure_ascii=False, indent=2))
+    return 0 if ok else 1
+
+
+def cmd_import_engagement_results(source: str) -> int:
+    load_env(require=False)
+    ensure_dirs()
+    from engagement_queue import import_engagement_results  # noqa: E402
+    print(json.dumps(import_engagement_results(Path(source)),
+                     ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_engagement_performance() -> int:
+    load_env(require=False)
+    ensure_dirs()
+    from engagement_queue import engagement_performance  # noqa: E402
+    print(json.dumps(engagement_performance(), ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_verify_xai_ledger() -> int:
+    load_env(require=False)
+    ensure_dirs()
+    from audit_tools import verify_xai_ledger  # noqa: E402
+    result = verify_xai_ledger()
+    print("xAI ledger verification")
+    print("------------------------")
+    labels = {
+        "request_id_uniqueness": "request_id uniqueness",
+        "ticks_conversion": "ticks conversion",
+        "duplicate_aggregation": "duplicate aggregation",
+        "cache_billing": "cache billing",
+        "monthly_boundary": "monthly boundary",
+        "actual_vs_estimated": "actual vs estimated",
+        "tool_call_count": "tool call count",
+    }
+    for key, value in result["checks"].items():
+        print(f"{labels.get(key, key):28}: {'PASS' if value['pass'] else 'FAIL'}")
+    print("\nRecommendation:")
+    print(result["recommendation"])
+    return 0 if result["passed"] else 1
+
+
+def cmd_discovery_provider_status() -> int:
+    load_env(require=False)
+    ensure_dirs()
+    from audit_tools import discovery_provider_status  # noqa: E402
+    print(json.dumps(discovery_provider_status(), ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_follower_conversion_analysis() -> int:
+    load_env(require=False)
+    ensure_dirs()
+    from growth_analytics import follower_conversion_analysis  # noqa: E402
+    print(json.dumps(follower_conversion_analysis(), ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_conversion_dashboard() -> int:
+    load_env(require=False)
+    ensure_dirs()
+    from growth_analytics import conversion_dashboard  # noqa: E402
+    print(json.dumps(conversion_dashboard(), ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_digest_comparison() -> int:
+    load_env(require=False)
+    ensure_dirs()
+    from growth_analytics import digest_comparison  # noqa: E402
+    print(json.dumps(digest_comparison(), ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_build_content_pipeline(week_start: str | None = None) -> int:
+    load_env(require=False)
+    ensure_dirs()
+    from content_pipeline import build_content_pipeline  # noqa: E402
+    result = build_content_pipeline(week_start)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    print("Publish operations: 0")
+    return 0 if result.get("status") in {
+        "draft", "insufficient_data", "budget_restricted"
+    } else 1
+
+
+def cmd_generate_free_note(article_type: str | None, topic: str | None,
+                           dry_run: bool) -> int:
+    load_env(require=False)
+    ensure_dirs()
+    from free_note import generate_free_note  # noqa: E402
+    result = generate_free_note(
+        article_type=article_type, topic=topic, dry_run=dry_run)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    print("Automatic note publish operations: 0")
+    print("X write operations: 0")
+    return 0 if result.get("status") in {
+        "draft", "skipped", "update_candidate", "disabled"
+    } else 1
+
+
+def cmd_note_drafts() -> int:
+    load_env(require=False)
+    ensure_dirs()
+    from free_note import list_notes  # noqa: E402
+    print(json.dumps(list_notes(), ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_note_status(content_id: str, status: str) -> int:
+    load_env(require=False)
+    ensure_dirs()
+    from free_note import update_status  # noqa: E402
+    result = update_status(content_id, status)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    print("Automatic note publish operations: 0")
+    return 0
+
+
+def cmd_note_mark_published(content_id: str, url: str) -> int:
+    load_env(require=False)
+    ensure_dirs()
+    from free_note import mark_published  # noqa: E402
+    result = mark_published(content_id, url)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_note_discord_send(content_id: str, force: bool) -> int:
+    load_env(require=False)
+    ensure_dirs()
+    from free_note import send_note_discord  # noqa: E402
+    sent = send_note_discord(content_id, force=force)
+    print(json.dumps({
+        "content_id": content_id, "sent": sent,
+        "automatic_note_publish": False, "x_writes": 0,
+    }, ensure_ascii=False, indent=2))
+    return 0 if sent else 1
+
+
+def cmd_note_pipeline_status() -> int:
+    load_env(require=False)
+    ensure_dirs()
+    from free_note import pipeline_status  # noqa: E402
+    print(json.dumps(pipeline_status(), ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_free_note_due() -> int:
+    load_env(require=False)
+    ensure_dirs()
+    from free_note import generate_due  # noqa: E402
+    results = generate_due()
+    print(json.dumps(results, ensure_ascii=False, indent=2))
+    print("Automatic note publish operations: 0")
+    print("X write operations: 0")
+    return 0 if all(
+        row.get("status") in {"draft", "skipped", "update_candidate", "disabled"}
+        for row in results
+    ) else 1
+
+
+def cmd_profile_audit() -> int:
+    load_env(require=False)
+    if str(SRC_DIR) not in sys.path:
+        sys.path.insert(0, str(SRC_DIR))
+    from profile_audit import run  # noqa: E402
+    print(f"Profile audit: {run(ROOT_DIR)}")
+    print("Profile write operations: 0")
+    return 0
 
 def cmd_status() -> int:
     load_env(require=False)
@@ -927,7 +1849,7 @@ def cmd_status() -> int:
     print(f"OPENAI_MODEL_DEFAULT : {os.environ.get('OPENAI_MODEL_DEFAULT', '(未設定→gpt-5.4-mini)')}")
     print(f"OPENAI_MODEL_IMPORTANT: {os.environ.get('OPENAI_MODEL_IMPORTANT', '(未設定→gpt-5.6-luna)')}")
     print(f"OPENAI_MODEL_DAILY_REVIEW: {os.environ.get('OPENAI_MODEL_DAILY_REVIEW', '(未設定→important)')}")
-    print(f"OPENAI_MONTHLY_BUDGET_USD: {os.environ.get('OPENAI_MONTHLY_BUDGET_USD', '(未設定→8.0)')}")
+    print(f"OPENAI_MONTHLY_BUDGET_USD: {os.environ.get('OPENAI_MONTHLY_BUDGET_USD', '(未設定→15.0)')}")
     usage_file = state_dir / "openai_usage.json"
     try:
         with open(usage_file, "r", encoding="utf-8") as f:
@@ -936,6 +1858,26 @@ def cmd_status() -> int:
         print(f"OpenAI今月API calls   : {int(usage.get('calls', 0) or 0)}")
     except Exception:
         print("OpenAI今月使用量      : まだ記録なし")
+
+    try:
+        from audit_tools import discovery_provider_status, verify_xai_ledger  # noqa: E402
+        provider = discovery_provider_status()
+        ledger = verify_xai_ledger()
+        print(f"X_TOPIC_DISCOVERY_PROVIDER: {provider['configured_provider']}")
+        print(f"Discovery duplicate detected: "
+              f"{provider['duplicate_provider_execution_detected']}")
+        print(f"xAI ledger recommendation: {ledger['recommendation']}")
+    except Exception as exc:
+        print(f"Growth audit status unavailable: {type(exc).__name__}")
+    try:
+        from metrics_db import table_counts  # noqa: E402
+        counts = table_counts()
+        print(f"Quality eval runs     : {counts.get('quality_eval_runs', 0)}")
+        print(f"Engagement results   : {counts.get('engagement_results', 0)}")
+        print(f"Conversion events    : {counts.get('conversion_events', 0)}")
+        print(f"Content pipeline runs: {counts.get('content_pipeline_runs', 0)}")
+    except Exception:
+        pass
 
     last = None
     for h in reversed(history):
@@ -951,6 +1893,59 @@ def cmd_status() -> int:
     else:
         print("直近投稿履歴       : なし")
     return 0
+
+
+def cmd_discord_test() -> int:
+    load_env()
+    ensure_dirs()
+    from discord_notify import notify  # noqa: E402
+    sent = notify(
+        "test",
+        "🔔 Discord通知テスト",
+        "政治ニュースBot「久世ゆい」からのテスト通知です。",
+        level="info",
+        fields={"結果": "Webhook接続を確認しました"},
+        force=True,
+    )
+    if sent:
+        print("[INFO] Discord test notification sent.")
+        return 0
+    print("[ERROR] Discord test notification failed.")
+    return 1
+
+
+def cmd_discord_note_draft_test() -> int:
+    load_env()
+    ensure_dirs()
+    from discord_notify import notify_note_draft_ready  # noqa: E402
+    sent = notify_note_draft_ready({
+        "title": "note draft専用チャンネル",
+        "summary": "🔔 note draft通知の接続テストです。実際の記事は公開していません。",
+        "status": "test",
+        "source": "local_bot.py",
+    }, test=True)
+    if sent:
+        print("[INFO] Discord note draft test notification sent.")
+        return 0
+    print("[ERROR] Discord note draft test notification failed.")
+    return 1
+
+
+def cmd_discord_log(source: str, lines: int) -> int:
+    load_env()
+    ensure_dirs()
+    from discord_notify import notify_log_excerpt  # noqa: E402
+    sent, count = notify_log_excerpt(
+        source,
+        lines=lines,
+        log_dir=resolve_dir("LOG_DIR", "logs"),
+        force=True,
+    )
+    if sent:
+        print(f"[INFO] Discord log sent: source={source} lines={count}")
+        return 0
+    print(f"[ERROR] Discord log failed: source={source}")
+    return 1
 
 
 # ---------------------------------------------------------------------------
@@ -978,6 +1973,96 @@ def main() -> int:
     sub.add_parser("report", help="投稿実績（インプレッション等）を取得しknowledge/へ学習パターンを書き出す")
     sub.add_parser("weekly-report", help="週次AI分析をローカル保存（既定では無効・X投稿なし）")
     sub.add_parser("premium-report", help="手動プレミアム分析をローカル保存（既定では無効・X投稿なし）")
+    sub.add_parser("collect-metrics", help="1h/24h/72h投稿指標を未取得窓だけ収集")
+    sub.add_parser("daily-review", help="日次レビューを実行")
+    sub.add_parser("weekly-review", help="週次レビューをローカル保存")
+    sub.add_parser("preview-extensions", help="拡張投稿案をプレビュー保存（投稿なし）")
+    sub.add_parser("budget-status", help="今月のOpenAI/X/合計費用を表示")
+    sub.add_parser("cost-forecast", help="過去7日から月末費用を予測")
+    sub.add_parser("xai-roi", help="xAI由来投稿と非xAI投稿の費用対効果を比較")
+    sub.add_parser("openai-usage-breakdown", help="OpenAI使用量をtask_type別に表示")
+    sub.add_parser("db-status", help="SQLiteテーブル件数を表示")
+    sub.add_parser("engagement-queue", help="人間承認用の引用・返信候補を保存（X送信なし）")
+    sub.add_parser("engagement-brief", help="当日の手動引用・返信対応レポートを保存")
+    sub.add_parser("queue-status", help="人間承認キューの状態を表示")
+    p_queue = sub.add_parser("queue-update", help="人間承認キューの状態を更新")
+    p_queue.add_argument("--type", required=True, choices=["quote", "reply"])
+    p_queue.add_argument("--id", required=True, type=int)
+    p_queue.add_argument("--status", required=True,
+                         choices=["pending", "approved", "rejected", "expired",
+                                  "posted_manually", "result_pending", "result_collected"])
+    sub.add_parser("profile-audit", help="プロフィール透明性チェックリストを生成（変更なし）")
+    sub.add_parser("batch-collect", help="OpenAI Batch APIの完了結果を回収")
+    sub.add_parser("batch-status", help="OpenAI Batch APIジョブの状態を表示")
+    p_eval = sub.add_parser("eval-quality", help="政治投稿の意味品質Evalsを実行")
+    p_eval.add_argument("--mode", choices=["rule-only", "sample", "full"], default="rule-only")
+    p_eval.add_argument("--limit", type=int)
+    p_eval.add_argument("--confirm-full", action="store_true")
+    p_human = sub.add_parser("import-human-review", help="人間評価CSV/JSONを取り込む")
+    p_human.add_argument("--file", required=True)
+    p_conversion = sub.add_parser("import-conversions", help="外部転換イベントCSVを取り込む")
+    p_conversion.add_argument("--file", required=True)
+    p_follower = sub.add_parser("follower-status", help="フォロワー推移を表示")
+    p_follower.add_argument("--capture", action="store_true",
+                            help="Owned Readを使って現在値を保存")
+    sub.add_parser("quality-dashboard", help="直近の品質・安全・prompt版比較を表示")
+
+    sub.add_parser("discord-test", help="Discord Webhookへテスト通知を送信")
+    sub.add_parser(
+        "discord-note-draft-test",
+        help="note draft専用Discord Webhookへ接続テストを送信",
+    )
+    p_discord_log = sub.add_parser("discord-log", help="直近ログをDiscordへ安全に送信")
+    p_discord_log.add_argument(
+        "--source", choices=["bot", "supervisor", "errors", "attempts"], default="bot")
+    p_discord_log.add_argument("--lines", type=int, default=40)
+
+    p_mark = sub.add_parser("queue-mark-posted", help="Record a manually posted X ID")
+    p_mark.add_argument("--type", required=True, choices=["quote", "reply"])
+    p_mark.add_argument("--id", required=True, type=int)
+    p_mark.add_argument("--post-id", required=True)
+    p_mark.add_argument("--selected-option", default="")
+    p_mark.add_argument("--notes", default="")
+    p_engagement_import = sub.add_parser(
+        "import-engagement-results", help="Import manual engagement result CSV")
+    p_engagement_import.add_argument("--file", required=True)
+    sub.add_parser("engagement-performance", help="Report manual engagement performance")
+    sub.add_parser("verify-xai-ledger", help="Verify the canonical xAI ledger")
+    sub.add_parser("discovery-provider-status", help="Show paid discovery exclusivity")
+    sub.add_parser("follower-conversion-analysis", help="Estimate follower conversion by post")
+    sub.add_parser("conversion-dashboard", help="Report external conversion events")
+    sub.add_parser("digest-comparison", help="Compare morning and evening digests")
+    p_pipeline = sub.add_parser(
+        "build-content-pipeline", help="Build local weekly Shorts and note drafts")
+    p_pipeline.add_argument("--week-start")
+    note_types = [
+        "weekly_top5", "legislative_process", "cabinet_decision_vs_law",
+        "social_insurance_burden", "party_policy_comparison",
+        "evergreen_institutional_explainer", "weekly_deep_dive",
+    ]
+    p_free_note = sub.add_parser(
+        "generate-free-note", help="無料note記事を生成してローカル保存")
+    p_free_note.add_argument("--type", choices=note_types)
+    p_free_note.add_argument("--topic")
+    p_free_note.add_argument("--dry-run", action="store_true")
+    sub.add_parser("note-drafts", help="無料note下書き一覧を表示")
+    p_note_status = sub.add_parser(
+        "note-status", help="無料note下書きの人間承認ステータスを更新")
+    p_note_status.add_argument("--content-id", required=True)
+    p_note_status.add_argument("--status", required=True, choices=[
+        "draft", "reviewing", "approved", "revision_required", "rejected"])
+    p_note_published = sub.add_parser(
+        "note-mark-published", help="手動公開済みnoteのURLを記録")
+    p_note_published.add_argument("--content-id", required=True)
+    p_note_published.add_argument("--url", required=True)
+    p_note_discord = sub.add_parser(
+        "note-discord-send", help="保存済みnote下書きをDiscordへ送信")
+    p_note_discord.add_argument("--content-id", required=True)
+    p_note_discord.add_argument("--force", action="store_true")
+    sub.add_parser(
+        "note-pipeline-status", help="無料noteパイプラインの状態を表示")
+    sub.add_parser(
+        "free-note-due", help="期限到来済みの無料note生成枠を処理")
 
     args = parser.parse_args()
 
@@ -997,6 +2082,87 @@ def main() -> int:
         return cmd_weekly_report()
     if args.command == "premium-report":
         return cmd_premium_report()
+    if args.command == "collect-metrics":
+        return cmd_collect_metrics()
+    if args.command == "daily-review":
+        return cmd_report()
+    if args.command == "weekly-review":
+        return cmd_weekly_report()
+    if args.command == "preview-extensions":
+        return cmd_preview_extensions()
+    if args.command == "budget-status":
+        return cmd_budget_status()
+    if args.command == "cost-forecast":
+        return cmd_cost_forecast()
+    if args.command == "xai-roi":
+        return cmd_xai_roi()
+    if args.command == "openai-usage-breakdown":
+        return cmd_openai_usage_breakdown()
+    if args.command == "db-status":
+        return cmd_db_status()
+    if args.command == "engagement-queue":
+        return cmd_engagement_queue()
+    if args.command == "engagement-brief":
+        return cmd_engagement_brief()
+    if args.command == "queue-status":
+        return cmd_queue_status()
+    if args.command == "queue-update":
+        return cmd_queue_update(args.type, args.id, args.status)
+    if args.command == "queue-mark-posted":
+        return cmd_queue_mark_posted(
+            args.type, args.id, args.post_id, args.selected_option, args.notes)
+    if args.command == "import-engagement-results":
+        return cmd_import_engagement_results(args.file)
+    if args.command == "engagement-performance":
+        return cmd_engagement_performance()
+    if args.command == "verify-xai-ledger":
+        return cmd_verify_xai_ledger()
+    if args.command == "discovery-provider-status":
+        return cmd_discovery_provider_status()
+    if args.command == "profile-audit":
+        return cmd_profile_audit()
+    if args.command == "batch-collect":
+        return cmd_batch_collect()
+    if args.command == "batch-status":
+        return cmd_batch_status()
+    if args.command == "eval-quality":
+        return cmd_eval_quality(args.mode, args.limit, args.confirm_full)
+    if args.command == "import-human-review":
+        return cmd_import_human_review(args.file)
+    if args.command == "import-conversions":
+        return cmd_import_conversions(args.file)
+    if args.command == "follower-status":
+        return cmd_follower_status(args.capture)
+    if args.command == "quality-dashboard":
+        return cmd_quality_dashboard()
+    if args.command == "follower-conversion-analysis":
+        return cmd_follower_conversion_analysis()
+    if args.command == "conversion-dashboard":
+        return cmd_conversion_dashboard()
+    if args.command == "digest-comparison":
+        return cmd_digest_comparison()
+    if args.command == "build-content-pipeline":
+        return cmd_build_content_pipeline(args.week_start)
+    if args.command == "generate-free-note":
+        return cmd_generate_free_note(args.type, args.topic, args.dry_run)
+    if args.command == "note-drafts":
+        return cmd_note_drafts()
+    if args.command == "note-status":
+        return cmd_note_status(args.content_id, args.status)
+    if args.command == "note-mark-published":
+        return cmd_note_mark_published(args.content_id, args.url)
+    if args.command == "note-discord-send":
+        return cmd_note_discord_send(args.content_id, args.force)
+    if args.command == "note-pipeline-status":
+        return cmd_note_pipeline_status()
+    if args.command == "free-note-due":
+        return cmd_free_note_due()
+    if args.command == "discord-test":
+        return cmd_discord_test()
+    if args.command == "discord-note-draft-test":
+        return cmd_discord_note_draft_test()
+    if args.command == "discord-log":
+        return cmd_discord_log(args.source, args.lines)
     parser.print_help()
     return 1
 
