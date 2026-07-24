@@ -424,9 +424,9 @@ a time-window estimate.
 
 ## Discord notifications
 
-The webhook URL must be stored only in the ignored `.env` file. Startup,
-successful X posts, and fatal posting/daemon errors are enabled by default;
-ordinary skips are disabled to prevent notification noise.
+The webhook URL must be stored only in the ignored `.env` file. Discord receives
+result summaries only. Detailed models, scores, risk diagnostics, slots, stack
+traces, and raw log lines remain in the local `logs/` directory.
 
 ```dotenv
 DISCORD_NOTIFICATIONS_ENABLED=true
@@ -436,7 +436,12 @@ DISCORD_NOTIFY_POST_SUCCESS=true
 DISCORD_NOTIFY_ERROR=true
 DISCORD_NOTIFY_RUN_LOG=true
 DISCORD_NOTIFY_SKIP=false
+DISCORD_LOG_MODE=result_only
 ```
+
+通知は「投稿完了」「今回は投稿なし」「処理失敗」「ログ確認結果」に整理されます。
+投稿成功は重複通知せず、`discord-log`もログ本文ではなく、エラー・警告件数と
+正常／異常の結果だけを送ります。
 
 Send a manual connection test:
 

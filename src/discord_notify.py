@@ -292,60 +292,83 @@ def notify_post_success(post: dict[str, Any]) -> bool:
         _clean(post.get("tweet_text") or post.get("title"), 1800),
         level="success",
         fields={
-            "投稿形式": post.get("post_type"),
-            "品質スコア": post.get("effective_score"),
-            "モデル": post.get("openai_model"),
             "X投稿": tweet_url,
-            "ニュース": post.get("title"),
-            "情報源": post.get("source_name"),
-            "スロット": post.get("slot_key"),
         },
     )
 
 
 def notify_error(where: str, error: Any, **context: Any) -> bool:
+    error_line = _clean(error, 300).splitlines()[0]
     return notify(
         "error",
-        "🚨 Botでエラーが発生しました",
-        _clean(error, 1800),
+        "🚨 処理に失敗しました",
+        error_line or "詳細はローカルログを確認してください。",
         level="error",
-        fields={"発生箇所": where, **context},
+        fields={"処理": where, "結果": "失敗"},
     )
 
 
+_RESULT_REASON_LABELS = {
+    "no_news": "投稿価値のあるニュースがありませんでした",
+    "no_unattempted_slot": "今回処理する新しい投稿枠はありませんでした",
+    "already_attempted": "この投稿枠は処理済みです",
+    "already_posted": "この投稿枠は投稿済みです",
+    "post_interval": "前回投稿からの間隔が短いため見送りました",
+    "daily_limit": "本日の投稿上限に達しています",
+    "quality_gate": "品質基準を満たさなかったため見送りました",
+    "ban_risk": "安全性リスクが高いため見送りました",
+    "duplicate": "直前の内容と重複するため見送りました",
+    "topic_cooldown": "同じテーマのクールダウン中です",
+    "budget_guard": "API予算上限のため処理を見送りました",
+    "success": "投稿に成功しました",
+}
+
+
+def _result_reason(reason: Any) -> str:
+    raw = str(reason or "").strip()
+    return _RESULT_REASON_LABELS.get(raw, _clean(raw, 240)) or "投稿条件を満たしませんでした"
+
+
 def notify_run_log(record: dict[str, Any], *, exit_code: int = 0) -> bool:
+    """Send only the run outcome; detailed diagnostics remain local."""
     decision = str(record.get("decision") or "unknown")
     success = decision == "post"
     level = "success" if success else ("error" if exit_code else "warning")
     icon = "✅" if success else ("🚨" if exit_code else "⏭️")
+    title = (
+        f"{icon} 投稿完了" if success
+        else f"{icon} 処理失敗" if exit_code
+        else f"{icon} 今回は投稿なし"
+    )
+    description = (
+        _clean(record.get("title") or record.get("tweet_text"), 700)
+        if success
+        else _result_reason(record.get("reason"))
+    )
     return notify(
         "run_log",
-        f"{icon} 監視処理ログ",
-        _clean(record.get("title") or "監視枠の処理が完了しました", 1800),
+        title,
+        description,
         level=level,
         fields={
-            "判定": decision,
-            "理由": record.get("reason"),
-            "スロット": record.get("slot_key") or record.get("selected_slot"),
-            "投稿形式": record.get("post_type"),
-            "品質スコア": record.get("effective_score"),
-            "BANリスク": record.get("ban_risk"),
-            "モデル": record.get("openai_model"),
-            "終了コード": exit_code,
+            "結果": "投稿成功" if success else (
+                "失敗" if exit_code else "投稿見送り"),
         },
     )
 
 
 def notify_attempt_since(path: Path, previous_size: int, *, exit_code: int = 0) -> bool:
-    """Send the newest attempt appended after previous_size."""
+    """Send only the newest outcome; successful posts are notified elsewhere."""
     try:
         if not path.exists() or path.stat().st_size <= previous_size:
+            if exit_code == 0:
+                return False
             return notify(
                 "run_log",
-                "ℹ️ 監視処理ログ",
-                "監視処理は完了しましたが、新しい投稿判定レコードはありません。",
-                level="info" if exit_code == 0 else "error",
-                fields={"終了コード": exit_code},
+                "🚨 処理に失敗しました",
+                "詳細はローカルログを確認してください。",
+                level="error",
+                fields={"結果": "失敗"},
             )
         with path.open("rb") as handle:
             handle.seek(max(0, previous_size))
@@ -353,7 +376,11 @@ def notify_attempt_since(path: Path, previous_size: int, *, exit_code: int = 0) 
         rows = [line for line in appended.splitlines() if line.strip()]
         if not rows:
             return False
-        return notify_run_log(json.loads(rows[-1]), exit_code=exit_code)
+        record = json.loads(rows[-1])
+        if str(record.get("decision") or "") == "post" and exit_code == 0:
+            # post.py already emits the concise post-success notification.
+            return False
+        return notify_run_log(record, exit_code=exit_code)
     except (OSError, UnicodeError, json.JSONDecodeError):
         return False
 
@@ -373,7 +400,7 @@ def notify_log_excerpt(
     log_dir: Path | None = None,
     force: bool = False,
 ) -> tuple[bool, int]:
-    """Send a sanitized tail from one whitelisted log file."""
+    """Inspect a local log and send counts/result only, never raw log lines."""
     filename = _LOG_FILES.get(str(source).lower())
     if not filename:
         return False, 0
@@ -384,24 +411,37 @@ def notify_log_excerpt(
     except OSError:
         return False, 0
     selected = raw_lines[-max(1, min(int(lines), 200)):]
-    content = sanitize("\n".join(selected))
-    if not content:
-        content = "(ログは空です)"
-
-    # Discord embed descriptions are limited to 4096 characters.
-    chunks = []
-    while content and len(chunks) < 5:
-        chunks.append(content[:3500])
-        content = content[3500:]
-    sent = True
-    for index, chunk in enumerate(chunks, start=1):
-        safe_chunk = chunk.replace("```", "'''")
-        sent = notify(
-            "log",
-            f"📄 {filename}（{index}/{len(chunks)}）",
-            f"```text\n{safe_chunk}\n```",
-            level="info",
-            fields={"取得行数": len(selected)},
-            force=force,
-        ) and sent
+    error_count = sum(
+        "[ERROR]" in line or '"level":"error"' in line.lower()
+        for line in selected
+    )
+    warning_count = sum(
+        "[WARN]" in line or '"level":"warning"' in line.lower()
+        for line in selected
+    )
+    if error_count:
+        result = "エラーが見つかりました。詳細はローカルログを確認してください。"
+        level = "error"
+        icon = "🚨"
+    elif warning_count:
+        result = "警告があります。Botは処理を継続しています。"
+        level = "warning"
+        icon = "⚠️"
+    else:
+        result = "異常は見つかりませんでした。"
+        level = "success"
+        icon = "✅"
+    sent = notify(
+        "log",
+        f"{icon} ログ確認結果",
+        result,
+        level=level,
+        fields={
+            "対象": filename,
+            "確認行数": len(selected),
+            "エラー": error_count,
+            "警告": warning_count,
+        },
+        force=force,
+    )
     return sent, len(selected)

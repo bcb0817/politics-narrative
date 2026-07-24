@@ -2012,7 +2012,8 @@ def main() -> int:
         "discord-note-draft-test",
         help="note draft専用Discord Webhookへ接続テストを送信",
     )
-    p_discord_log = sub.add_parser("discord-log", help="直近ログをDiscordへ安全に送信")
+    p_discord_log = sub.add_parser(
+        "discord-log", help="直近ログを集計し、結果だけをDiscordへ送信")
     p_discord_log.add_argument(
         "--source", choices=["bot", "supervisor", "errors", "attempts"], default="bot")
     p_discord_log.add_argument("--lines", type=int, default=40)

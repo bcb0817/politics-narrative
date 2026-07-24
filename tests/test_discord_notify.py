@@ -1,5 +1,7 @@
+import json
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -43,8 +45,9 @@ class DiscordNotifyTests(unittest.TestCase):
         self.assertTrue(sent)
         payload = post.call_args.kwargs["json"]
         self.assertEqual(payload["allowed_mentions"], {"parse": []})
-        self.assertIn("https://x.com/i/web/status/123",
-                      payload["embeds"][0]["fields"][2]["value"])
+        fields = payload["embeds"][0]["fields"]
+        self.assertEqual([field["name"] for field in fields], ["X投稿"])
+        self.assertIn("https://x.com/i/web/status/123", fields[0]["value"])
 
     def test_http_error_is_non_fatal(self):
         env = {
@@ -113,6 +116,95 @@ class DiscordNotifyTests(unittest.TestCase):
         }, clear=False), patch("discord_notify.requests.post") as post:
             self.assertFalse(discord_notify.notify_note_draft_ready({"title": "draft"}))
             post.assert_not_called()
+
+    def test_run_result_contains_only_outcome(self):
+        env = {
+            "DISCORD_NOTIFICATIONS_ENABLED": "true",
+            "DISCORD_NOTIFY_RUN_LOG": "true",
+            "DISCORD_WEBHOOK_URL": "https://discord.invalid/webhook",
+        }
+        record = {
+            "decision": "skip",
+            "reason": "no_news",
+            "openai_model": "internal-model",
+            "effective_score": 1.2,
+            "ban_risk": 3,
+            "slot_key": "internal-slot",
+        }
+        with patch.dict(os.environ, env, clear=False), patch(
+            "discord_notify.requests.post", return_value=FakeResponse()
+        ) as post:
+            self.assertTrue(discord_notify.notify_run_log(record))
+        embed = post.call_args.kwargs["json"]["embeds"][0]
+        rendered = json.dumps(embed, ensure_ascii=False)
+        self.assertIn("今回は投稿なし", rendered)
+        self.assertIn("投稿価値のあるニュース", rendered)
+        self.assertNotIn("internal-model", rendered)
+        self.assertNotIn("internal-slot", rendered)
+        self.assertNotIn("BANリスク", rendered)
+        self.assertNotIn("品質スコア", rendered)
+
+    def test_no_new_attempt_does_not_notify_successful_run(self):
+        env = {
+            "DISCORD_NOTIFICATIONS_ENABLED": "true",
+            "DISCORD_NOTIFY_RUN_LOG": "true",
+            "DISCORD_WEBHOOK_URL": "https://discord.invalid/webhook",
+        }
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "attempts.jsonl"
+            path.write_text("", encoding="utf-8")
+            with patch.dict(os.environ, env, clear=False), patch(
+                "discord_notify.requests.post"
+            ) as post:
+                self.assertFalse(discord_notify.notify_attempt_since(
+                    path, 0, exit_code=0))
+            post.assert_not_called()
+
+    def test_post_attempt_does_not_duplicate_post_success_notice(self):
+        env = {
+            "DISCORD_NOTIFICATIONS_ENABLED": "true",
+            "DISCORD_NOTIFY_RUN_LOG": "true",
+            "DISCORD_WEBHOOK_URL": "https://discord.invalid/webhook",
+        }
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "attempts.jsonl"
+            path.write_text(
+                json.dumps({"decision": "post", "reason": "success"}) + "\n",
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, env, clear=False), patch(
+                "discord_notify.requests.post"
+            ) as post:
+                self.assertFalse(discord_notify.notify_attempt_since(
+                    path, 0, exit_code=0))
+            post.assert_not_called()
+
+    def test_log_command_sends_counts_not_raw_lines(self):
+        env = {
+            "DISCORD_NOTIFICATIONS_ENABLED": "true",
+            "DISCORD_WEBHOOK_URL": "https://discord.invalid/webhook",
+        }
+        with tempfile.TemporaryDirectory() as td:
+            directory = Path(td)
+            (directory / "bot.log").write_text(
+                "[INFO] private detailed diagnostic\n"
+                "[WARN] retry detail\n"
+                "[ERROR] stack trace detail\n",
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, env, clear=False), patch(
+                "discord_notify.requests.post", return_value=FakeResponse()
+            ) as post:
+                sent, count = discord_notify.notify_log_excerpt(
+                    "bot", lines=40, log_dir=directory, force=True)
+        self.assertTrue(sent)
+        self.assertEqual(count, 3)
+        rendered = json.dumps(
+            post.call_args.kwargs["json"], ensure_ascii=False)
+        self.assertIn("ログ確認結果", rendered)
+        self.assertIn("エラーが見つかりました", rendered)
+        self.assertNotIn("private detailed diagnostic", rendered)
+        self.assertNotIn("stack trace detail", rendered)
 
 
 if __name__ == "__main__":
