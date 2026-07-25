@@ -498,6 +498,22 @@ class ThreadsApiTests(unittest.TestCase):
         self.assertEqual(result["status"], "preview_saved")
         self.assertFalse(result["threads_published"])
 
+    def test_60_text_container_omits_reply_control_without_permission(self):
+        session = Mock()
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {"id": "creation-1"}
+        session.request.return_value = response
+        with patch.dict(os.environ, {
+            "THREADS_ACCESS_TOKEN": "token",
+            "THREADS_USER_ID": "user"}):
+            result = threads_api.ThreadsClient(
+                session=session, path=self.path).create_container("test")
+        self.assertEqual(result["id"], "creation-1")
+        data = session.request.call_args.kwargs["data"]
+        self.assertEqual(data["media_type"], "TEXT")
+        self.assertNotIn("reply_control", data)
+
 
 if __name__ == "__main__":
     unittest.main()
