@@ -2134,6 +2134,53 @@ def _threads_full_output(action: str, **kwargs) -> int:
     return 0
 
 
+def _crosspost_output(action: str, **kwargs) -> int:
+    """Run the preview-first video cross-post pipeline."""
+    load_env(require=False)
+    ensure_dirs()
+    import crosspost
+
+    publication_id = kwargs.get("publication_id", "")
+    actions = {
+        "status": lambda: crosspost.status(),
+        "candidates": lambda: crosspost.candidates(),
+        "generate_copy": lambda: crosspost.generate_copy(
+            publication_id, dry_run=kwargs.get("dry_run", True)),
+        "render": lambda: crosspost.render_renditions(
+            publication_id, dry_run=kwargs.get("dry_run", True)),
+        "validate": lambda: crosspost.validate(
+            publication_id, dry_run=kwargs.get("dry_run", True)),
+        "prepare": lambda: crosspost.prepare(
+            publication_id, dry_run=kwargs.get("dry_run", True)),
+        "publish": lambda: crosspost.publish(
+            publication_id, confirm=kwargs.get("confirm", False),
+            dry_run=kwargs.get("dry_run", False)),
+        "reconcile": lambda: crosspost.reconcile(publication_id),
+        "metrics": lambda: crosspost.metrics_sync(
+            publication_id, dry_run=kwargs.get("dry_run", True)),
+        "report": lambda: crosspost.report(
+            publication_id, dry_run=kwargs.get("dry_run", True)),
+        "emergency_stop": lambda: crosspost.emergency_stop(),
+        "instagram_auth_url": lambda: crosspost.instagram_auth_url(),
+        "instagram_exchange": lambda: crosspost.instagram_exchange_code(
+            kwargs.get("code", ""), dry_run=kwargs.get("dry_run", True)),
+        "instagram_token": lambda: crosspost.token_status("instagram"),
+        "instagram_profile": lambda: crosspost.instagram_profile(
+            dry_run=kwargs.get("dry_run", True)),
+        "instagram_reel_status": lambda: crosspost.instagram_reel_status(
+            kwargs.get("creation_id", ""),
+            dry_run=kwargs.get("dry_run", True)),
+        "youtube_token": lambda: crosspost.token_status("youtube"),
+    }
+    result = actions[action]()
+    print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    if isinstance(result, dict) and result.get("status") in {
+        "failed", "ambiguous",
+    }:
+        return 1
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
@@ -2407,6 +2454,49 @@ def main() -> int:
     p_profile_discovery.add_argument("--username", required=True)
     p_profile_discovery.add_argument("--dry-run", action="store_true")
 
+    sub.add_parser(
+        "crosspost-status", help="動画クロス投稿のローカル状態を表示")
+    sub.add_parser(
+        "crosspost-candidates", help="動画クロス投稿候補を表示")
+    for command, help_text in (
+        ("crosspost-generate-copy", "4媒体向け投稿文を個別生成"),
+        ("crosspost-render-renditions", "4媒体向け動画をFFmpegで生成"),
+        ("crosspost-validate", "動画・投稿文・安全条件を検証"),
+        ("crosspost-prepare", "外部送信なしで公開準備を検証"),
+        ("crosspost-reconcile", "媒体別結果を照合"),
+        ("crosspost-metrics-sync", "媒体別指標の同期計画を確認"),
+        ("crosspost-report", "クロスプラットフォーム分析を表示"),
+    ):
+        item = sub.add_parser(command, help=help_text)
+        item.add_argument("--publication-id", default="")
+        item.add_argument("--dry-run", action="store_true")
+    p_cross_publish = sub.add_parser(
+        "crosspost-publish",
+        help="多重スイッチと明示確認を満たす場合のみクロス投稿")
+    p_cross_publish.add_argument("--publication-id", default="")
+    p_cross_publish.add_argument("--dry-run", action="store_true")
+    p_cross_publish.add_argument("--confirm", action="store_true")
+    sub.add_parser(
+        "crosspost-emergency-stop", help="クロス投稿を緊急停止")
+
+    sub.add_parser(
+        "instagram-auth-url", help="Instagram Login公式OAuth URLを生成")
+    p_instagram_exchange = sub.add_parser(
+        "instagram-exchange-code", help="Instagram認証コード交換")
+    p_instagram_exchange.add_argument("--code", required=True)
+    p_instagram_exchange.add_argument("--dry-run", action="store_true")
+    sub.add_parser(
+        "instagram-token-status", help="Instagramトークン設定状態を表示")
+    p_instagram_profile = sub.add_parser(
+        "instagram-profile", help="Instagramプロアカウント状態を確認")
+    p_instagram_profile.add_argument("--dry-run", action="store_true")
+    p_instagram_reel = sub.add_parser(
+        "instagram-reel-status", help="Instagram Reelコンテナ状態を確認")
+    p_instagram_reel.add_argument("--creation-id", required=True)
+    p_instagram_reel.add_argument("--dry-run", action="store_true")
+    sub.add_parser(
+        "youtube-token-status", help="YouTubeトークン設定状態を表示")
+
     args = parser.parse_args()
 
     if args.command == "once":
@@ -2635,6 +2725,60 @@ def main() -> int:
         return _threads_full_output(
             "profile_discovery", username=args.username,
             dry_run=args.dry_run)
+    if args.command == "crosspost-status":
+        return _crosspost_output("status")
+    if args.command == "crosspost-candidates":
+        return _crosspost_output("candidates")
+    if args.command == "crosspost-generate-copy":
+        return _crosspost_output(
+            "generate_copy", publication_id=args.publication_id,
+            dry_run=args.dry_run)
+    if args.command == "crosspost-render-renditions":
+        return _crosspost_output(
+            "render", publication_id=args.publication_id,
+            dry_run=args.dry_run)
+    if args.command == "crosspost-validate":
+        return _crosspost_output(
+            "validate", publication_id=args.publication_id,
+            dry_run=args.dry_run)
+    if args.command == "crosspost-prepare":
+        return _crosspost_output(
+            "prepare", publication_id=args.publication_id,
+            dry_run=args.dry_run)
+    if args.command == "crosspost-publish":
+        return _crosspost_output(
+            "publish", publication_id=args.publication_id,
+            dry_run=args.dry_run, confirm=args.confirm)
+    if args.command == "crosspost-reconcile":
+        return _crosspost_output(
+            "reconcile", publication_id=args.publication_id,
+            dry_run=args.dry_run)
+    if args.command == "crosspost-metrics-sync":
+        return _crosspost_output(
+            "metrics", publication_id=args.publication_id,
+            dry_run=args.dry_run)
+    if args.command == "crosspost-report":
+        return _crosspost_output(
+            "report", publication_id=args.publication_id,
+            dry_run=args.dry_run)
+    if args.command == "crosspost-emergency-stop":
+        return _crosspost_output("emergency_stop")
+    if args.command == "instagram-auth-url":
+        return _crosspost_output("instagram_auth_url")
+    if args.command == "instagram-exchange-code":
+        return _crosspost_output(
+            "instagram_exchange", code=args.code, dry_run=args.dry_run)
+    if args.command == "instagram-token-status":
+        return _crosspost_output("instagram_token")
+    if args.command == "instagram-profile":
+        return _crosspost_output(
+            "instagram_profile", dry_run=args.dry_run)
+    if args.command == "instagram-reel-status":
+        return _crosspost_output(
+            "instagram_reel_status", creation_id=args.creation_id,
+            dry_run=args.dry_run)
+    if args.command == "youtube-token-status":
+        return _crosspost_output("youtube_token")
     if args.command == "threads-web":
         load_env()
         ensure_dirs()

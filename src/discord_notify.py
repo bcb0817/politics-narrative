@@ -61,7 +61,10 @@ _SECRET_PATTERNS = (
     re.compile(r"(?i)\b(Bearer\s+)[A-Za-z0-9._~+/-]{16,}=*"),
     re.compile(r"(?i)\b((?:API_KEY|API_KEY_SECRET|ACCESS_TOKEN|ACCESS_TOKEN_SECRET|"
                r"OPENAI_API_KEY|XAI_API_KEY|X_BEARER_TOKEN|DISCORD_WEBHOOK_URL|"
-               r"NOTE_DRAFT_DISCORD_WEBHOOK_URL|DISCORD_NOTE_WEBHOOK_URL)\s*[=:]\s*)"
+               r"NOTE_DRAFT_DISCORD_WEBHOOK_URL|DISCORD_NOTE_WEBHOOK_URL|"
+               r"INSTAGRAM_ACCESS_TOKEN|INSTAGRAM_APP_SECRET|YOUTUBE_ACCESS_TOKEN|"
+               r"MEDIA_PUBLICATION_ACCESS_KEY|MEDIA_PUBLICATION_SECRET_KEY|"
+               r"MEDIA_FUNNEL_TOKEN_SECRET)\s*[=:]\s*)"
                r"[^\s,;]+"),
 )
 
@@ -81,6 +84,9 @@ def sanitize(text: str) -> str:
         "DISCORD_NOTE_WEBHOOK_URL",
         "OPENAI_API_KEY", "XAI_API_KEY", "X_BEARER_TOKEN",
         "API_KEY", "API_KEY_SECRET", "ACCESS_TOKEN", "ACCESS_TOKEN_SECRET",
+        "INSTAGRAM_ACCESS_TOKEN", "INSTAGRAM_APP_SECRET",
+        "YOUTUBE_ACCESS_TOKEN", "MEDIA_PUBLICATION_ACCESS_KEY",
+        "MEDIA_PUBLICATION_SECRET_KEY", "MEDIA_FUNNEL_TOKEN_SECRET",
     ):
         secret = os.environ.get(key, "").strip()
         if len(secret) >= 8:
@@ -168,6 +174,50 @@ def notify_note_draft_ready(draft: dict[str, Any], *, test: bool = False) -> boo
         webhook_env="NOTE_DRAFT_DISCORD_WEBHOOK_URL",
         username_env="NOTE_DRAFT_DISCORD_WEBHOOK_USERNAME",
         footer="久世ゆい・note draft通知",
+    )
+
+
+def notify_crosspost_ready(result: dict[str, Any], *, dry_run: bool = False) -> bool:
+    """Notify only the cross-post preparation result; never include URLs/tokens."""
+    if dry_run:
+        return False
+    platforms = result.get("platforms") or {}
+    return notify(
+        "crosspost_ready",
+        "🎬 動画クロス投稿準備",
+        "4媒体向け素材と投稿文の準備結果です。",
+        level="info",
+        fields={
+            "publication_id": result.get("publication_id"),
+            "公開予定": result.get("target_publish_at"),
+            "品質": result.get("quality_status") or result.get("status"),
+            "YouTube": (platforms.get("youtube") or {}).get("status"),
+            "X": (platforms.get("x") or {}).get("status"),
+            "Threads": (platforms.get("threads") or {}).get("status"),
+            "Instagram": (platforms.get("instagram") or {}).get("status"),
+        },
+    )
+
+
+def notify_crosspost_result(result: dict[str, Any], *, dry_run: bool = False) -> bool:
+    """Send one result summary without signed URLs or credential material."""
+    if dry_run:
+        return False
+    platforms = result.get("platforms") or {}
+    return notify(
+        "crosspost_result",
+        "📊 動画クロス投稿結果",
+        "成功済み投稿は維持し、失敗媒体だけを照合します。",
+        level="success" if result.get("status") == "published" else "warning",
+        fields={
+            "publication_id": result.get("publication_id"),
+            "全体状態": result.get("status"),
+            "公開時間差": result.get("publication_skew_seconds"),
+            "YouTube": (platforms.get("youtube") or {}).get("status"),
+            "X": (platforms.get("x") or {}).get("status"),
+            "Threads": (platforms.get("threads") or {}).get("status"),
+            "Instagram": (platforms.get("instagram") or {}).get("status"),
+        },
     )
 
 
