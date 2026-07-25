@@ -108,12 +108,13 @@ class StartupLedgerV3Tests(unittest.TestCase):
         self.assertEqual(history["request_id"], "req-1")
         self.assertAlmostEqual(api_budget.usage_totals(self.db)["xai"], .01)
 
-    def test_12_unverified_ledger_caps_at_two(self):
+    def test_12_unverified_ledger_uses_operator_cap(self):
         with patch.dict(os.environ, {
-            "XAI_MONTHLY_BUDGET_USD": "3",
+            "XAI_MONTHLY_BUDGET_USD": "7",
+            "XAI_UNVERIFIED_EFFECTIVE_LIMIT_USD": "5",
             "XAI_COST_LEDGER_VERIFIED": "false",
         }):
-            self.assertEqual(api_budget.effective_xai_limit(), 2)
+            self.assertEqual(api_budget.effective_xai_limit(), 5)
 
     def test_13_verified_ledger_unlocks_three(self):
         with patch.dict(os.environ, {

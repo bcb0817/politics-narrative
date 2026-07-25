@@ -243,8 +243,8 @@ class NewRequirementsTests(unittest.TestCase):
         self.assertNotIn("selenium", text.lower())
         self.assertNotIn("playwright", text.lower())
 
-    def test_34_total_budget_is_thirty_five(self):
-        self.assertEqual(float(os.environ.get("TOTAL_MONTHLY_API_BUDGET_USD", "35")), 35)
+    def test_34_total_budget_is_thirty_six(self):
+        self.assertEqual(float(os.environ.get("TOTAL_MONTHLY_API_BUDGET_USD", "36")), 36)
 
     def test_35_restriction_stage_pauses_xai(self):
         with tempfile.TemporaryDirectory() as td, patch.dict(os.environ, {

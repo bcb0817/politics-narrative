@@ -17,9 +17,9 @@ JST = ZoneInfo("Asia/Tokyo")
 
 DEFAULT_BUDGETS = {
     "OPENAI_MONTHLY_BUDGET_USD": 15.0,
-    "XAI_MONTHLY_BUDGET_USD": 4.0,
+    "XAI_MONTHLY_BUDGET_USD": 5.0,
     "X_MONTHLY_BUDGET_USD": 16.0,
-    "TOTAL_MONTHLY_API_BUDGET_USD": 35.0,
+    "TOTAL_MONTHLY_API_BUDGET_USD": 36.0,
     "OPENAI_BUDGET_RESERVE_USD": 1.0,
     "XAI_BUDGET_RESERVE_USD": 0.25,
     "X_BUDGET_RESERVE_USD": 0.75,
@@ -182,9 +182,12 @@ def xai_ledger_verified() -> bool:
 
 
 def effective_xai_limit() -> float:
-    """Keep the audited safety cap until a human explicitly verifies the ledger."""
+    """Apply the configured operator cap while the xAI ledger is unverified."""
     configured = _budget_float("XAI_MONTHLY_BUDGET_USD")
-    return configured if xai_ledger_verified() else min(configured, 2.0)
+    unverified_cap = max(
+        0.0, _float("XAI_UNVERIFIED_EFFECTIVE_LIMIT_USD", 5.0))
+    return configured if xai_ledger_verified() else min(
+        configured, unverified_cap)
 
 
 def usage_totals(path: Path | None = None, now: datetime | None = None) -> dict:
@@ -349,7 +352,7 @@ def reserve(provider: str, operation: str, model_or_endpoint: str, maximum_cost:
                 "quality_eval": _float("OPENAI_QUALITY_EVAL_BUDGET_USD", .5),
                 "content_pipeline": _float("OPENAI_CONTENT_PIPELINE_BUDGET_USD", .5),
                 # This is an operation cap inside the existing OpenAI $15
-                # provider ceiling, not an addition to the $35 total.
+                # provider ceiling, not an addition to the $36 total.
                 "free_note_generation": _float(
                     "FREE_NOTE_MONTHLY_BUDGET_USD", 1.5),
                 "preview_extensions": 0.0,

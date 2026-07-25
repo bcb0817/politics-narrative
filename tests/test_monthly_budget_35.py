@@ -20,9 +20,10 @@ class MonthlyBudget35Tests(unittest.TestCase):
     def setUp(self):
         self.env = {
             "OPENAI_MONTHLY_BUDGET_USD": "15",
-            "XAI_MONTHLY_BUDGET_USD": "4",
+            "XAI_MONTHLY_BUDGET_USD": "5",
+            "XAI_UNVERIFIED_EFFECTIVE_LIMIT_USD": "5",
             "X_MONTHLY_BUDGET_USD": "16",
-            "TOTAL_MONTHLY_API_BUDGET_USD": "35",
+            "TOTAL_MONTHLY_API_BUDGET_USD": "36",
             "OPENAI_BUDGET_RESERVE_USD": "1",
             "XAI_BUDGET_RESERVE_USD": ".25",
             "X_BUDGET_RESERVE_USD": ".75",
@@ -34,9 +35,9 @@ class MonthlyBudget35Tests(unittest.TestCase):
             "XAI_COST_LEDGER_VERIFIED": "false",
         }
 
-    def test_01_provider_sum_is_35(self):
+    def test_01_provider_sum_is_36(self):
         with patch.dict(os.environ, self.env):
-            self.assertEqual(api_budget.budget_configuration()["provider_sum"], 35)
+            self.assertEqual(api_budget.budget_configuration()["provider_sum"], 36)
 
     def test_02_configuration_is_consistent(self):
         with patch.dict(os.environ, self.env):
@@ -46,23 +47,23 @@ class MonthlyBudget35Tests(unittest.TestCase):
         with patch.dict(os.environ, {**self.env, "TOTAL_MONTHLY_API_BUDGET_USD": "40"}):
             cfg = api_budget.budget_configuration()
             self.assertFalse(cfg["consistent"])
-            self.assertEqual(cfg["effective_total_limit"], 35)
+            self.assertEqual(cfg["effective_total_limit"], 36)
 
     def test_04_total_reserve_is_inside_budget(self):
         with patch.dict(os.environ, self.env):
-            self.assertEqual(api_budget.budget_configuration()["effective_spendable"], 33)
+            self.assertEqual(api_budget.budget_configuration()["effective_spendable"], 34)
 
     def test_05_jpy_budget_is_dynamic(self):
         with patch.dict(os.environ, self.env):
-            self.assertEqual(api_budget.budget_configuration()["jpy_budget_display"], 5775)
+            self.assertEqual(api_budget.budget_configuration()["jpy_budget_display"], 5940)
 
     def test_06_jpy_rate_change_updates_display(self):
         with patch.dict(os.environ, {**self.env, "BUDGET_USD_JPY_RATE": "150"}):
-            self.assertEqual(api_budget.budget_configuration()["jpy_budget_display"], 5250)
+            self.assertEqual(api_budget.budget_configuration()["jpy_budget_display"], 5400)
 
     def test_07_old_monthly_budget_jpy_is_not_source_of_truth(self):
         with patch.dict(os.environ, {**self.env, "MONTHLY_BUDGET_JPY": "5000"}):
-            self.assertEqual(api_budget.budget_configuration()["jpy_budget_display"], 5775)
+            self.assertEqual(api_budget.budget_configuration()["jpy_budget_display"], 5940)
 
     def test_08_warning_stage(self):
         with patch.dict(os.environ, self.env):
@@ -80,37 +81,37 @@ class MonthlyBudget35Tests(unittest.TestCase):
         with patch.dict(os.environ, self.env):
             self.assertEqual(api_budget.budget_stage(.849), "normal")
 
-    def test_12_unverified_xai_is_capped_at_2(self):
+    def test_12_unverified_xai_is_capped_at_5(self):
         with patch.dict(os.environ, self.env):
-            self.assertEqual(api_budget.effective_xai_limit(), 2)
+            self.assertEqual(api_budget.effective_xai_limit(), 5)
 
-    def test_13_verified_xai_uses_4(self):
+    def test_13_verified_xai_uses_5(self):
         with patch.dict(os.environ, {**self.env, "XAI_COST_LEDGER_VERIFIED": "true"}):
-            self.assertEqual(api_budget.effective_xai_limit(), 4)
+            self.assertEqual(api_budget.effective_xai_limit(), 5)
 
     def test_14_openai_allocations_sum_to_15(self):
         values = [9, 1.5, .75, 1, .75, .5, .5, 1]
         self.assertEqual(sum(values), 15)
 
-    def test_15_startup_lines_show_35(self):
+    def test_15_startup_lines_show_36(self):
         with patch.dict(os.environ, self.env):
-            self.assertIn("Total monthly budget  : $35.00", api_budget.startup_budget_lines())
+            self.assertIn("Total monthly budget  : $36.00", api_budget.startup_budget_lines())
 
-    def test_16_startup_lines_show_xai_effective_2(self):
+    def test_16_startup_lines_show_xai_effective_5(self):
         with patch.dict(os.environ, self.env):
-            self.assertIn("xAI effective budget  : $2.00", api_budget.startup_budget_lines())
+            self.assertIn("xAI effective budget  : $5.00", api_budget.startup_budget_lines())
 
     def test_17_forecast_never_exceeds_total_limit(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td, \
              patch.dict(os.environ, self.env):
             result = api_budget.forecast(Path(td) / "db.sqlite")
-            self.assertLessEqual(result["projected"]["total"], 35)
+            self.assertLessEqual(result["projected"]["total"], 36)
 
     def test_18_forecast_xai_respects_unverified_cap(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td, \
              patch.dict(os.environ, self.env):
             result = api_budget.forecast(Path(td) / "db.sqlite")
-            self.assertLessEqual(result["projected"]["xai"], 2)
+            self.assertLessEqual(result["projected"]["xai"], 5)
 
     def test_19_provider_reserve_blocks_before_15(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td, \
@@ -153,9 +154,9 @@ class MonthlyBudget35Tests(unittest.TestCase):
                 continue
             self.assertLessEqual(sum(line.startswith(key + "=") for line in lines), 1)
 
-    def test_23_budget_config_file_has_35(self):
+    def test_23_budget_config_file_has_36(self):
         with patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(api_budget.budget_configuration()["configured_total"], 35)
+            self.assertEqual(api_budget.budget_configuration()["configured_total"], 36)
 
     def test_24_local_monitoring_has_no_budget_reservation(self):
         source = (ROOT / "src" / "news.py").read_text(encoding="utf-8")

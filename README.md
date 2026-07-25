@@ -470,21 +470,22 @@ NOTE_DRAFT_DISCORD_WEBHOOK_USERNAME=久世ゆい note Bot
 - 自動起動は `PoliticsNarrativeBot` へ統一しました。
 - `production\register_task.ps1` は登録のみ行い、自動開始しません。
 - xAI費用の正本はSQLite `xai_usage_events` です。
-- `XAI_COST_LEDGER_VERIFIED=false` の間、xAI実効月額上限は2ドルです。
+- `XAI_COST_LEDGER_VERIFIED=false` の間も、xAI実効月額上限は5ドルです。
 - xAIは原則06:00・12:00・18:00、低変動日は06:00・18:00に実行します。
 - `xai-roi` と `openai-usage-breakdown` で費用対効果と用途別費用を確認できます。
 - 詳細は `AUDIT_BUDGET_STARTUP_XAI.md` を参照してください。
 # API予算 💰
 
-現行の月額API予算は、OpenAI `$15`、xAI `$4`、X API `$16`、
-合計 `$35` です。reserve `$2` は総額に追加せず、35ドル内の保留額として扱うため、
-通常の実効利用可能額は `$33` です。
+現行の月額API予算は、OpenAI `$15`、xAI `$5`、X API `$16`、
+合計 `$36` です。reserve `$2` は総額に追加せず、36ドル内の保留額として扱うため、
+通常の実効利用可能額は `$34` です。
 
 円表示は固定5,000円ではなく、`TOTAL_MONTHLY_API_BUDGET_USD` と
-`BUDGET_USD_JPY_RATE` から動的に計算します。標準レート165円では5,775円です。
+`BUDGET_USD_JPY_RATE` から動的に計算します。標準レート165円では5,940円です。
 
-xAIは `XAI_COST_LEDGER_VERIFIED=false` の間、設定が4ドルでも実効上限を
-2ドルに制限します。台帳検証が全項目PASSした場合だけ4ドルへ変更できます。
+xAIは `XAI_COST_LEDGER_VERIFIED=false` の場合も
+`XAI_UNVERIFIED_EFFECTIVE_LIMIT_USD=5.0`を適用し、実効上限を5ドルにします。
+台帳検証失敗は引き続き警告として表示し、RSS・公式情報へのフォールバックを維持します。
 
 予算ステージは85%で警告、93%で補助機能を順次縮小、100%で新規の有料API処理を
 停止します。RSS・公式情報のローカル監視と既存キャッシュは継続します。
@@ -506,5 +507,24 @@ xAIは `XAI_COST_LEDGER_VERIFIED=false` の間、設定が4ドルでも実効上
 詳しい運用手順、安全条件、CSV形式、Creators APIへの移行方針は
 [`docs/AMAZON_ASSOCIATE_NOTE_WORKFLOW.md`](docs/AMAZON_ASSOCIATE_NOTE_WORKFLOW.md)
 を参照してください。
+
+## Meta公式Threads API連携 🧵
+
+Threads連携は、公式Graph APIだけを使うプレビュー優先設計です。初期値は
+`THREADS_POST_ENABLED=false` で、Xの検証済みトピックを会話向けに再構成した
+下書きだけを保存します。返信・引用・再投稿・いいね・フォロー・プロフィール変更は
+自動化しません。
+
+- セットアップ: [`docs/THREADS_API_SETUP.md`](docs/THREADS_API_SETUP.md)
+- 運用・障害対応: [`docs/THREADS_OPERATION.md`](docs/THREADS_OPERATION.md)
+- 状態確認: `python local_bot.py threads-status`
+- 安全な確認: `python local_bot.py threads-generate --dry-run`
+- OAuth公開URL確認: `python local_bot.py threads-endpoints`
+- OAuth callback自動起動登録: `powershell -ExecutionPolicy Bypass -File production/register_threads_oauth_task.ps1`
+- OAuth callbackタスク確認: `powershell -ExecutionPolicy Bypass -File production/threads_oauth_status.ps1`
+
+OAuth callback、Deauthorize、Data DeletionはWaitressでローカル待受し、
+固定ホスト名のHTTPSリバースプロキシを通して公開します。OAuth stateは
+一回限りで、Metaの解除・削除要求はHMAC-SHA256署名を検証します。
 
 設定、承認CLI、Windowsタスク登録、ロールバックは[OPERATIONS_FREE_NOTE_DISCORD.md](OPERATIONS_FREE_NOTE_DISCORD.md)を参照してください。
