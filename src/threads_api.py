@@ -7,16 +7,18 @@ reposts, likes, follows, or publishes while THREADS_POST_ENABLED is false.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import re
+import secrets
 import sqlite3
 from contextlib import closing
 from datetime import datetime, timedelta
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 from zoneinfo import ZoneInfo
 
 import requests
@@ -131,6 +133,8 @@ def settings() -> dict:
         "app_id": os.environ.get("THREADS_APP_ID", "").strip(),
         "app_secret": os.environ.get("THREADS_APP_SECRET", "").strip(),
         "redirect_uri": os.environ.get("THREADS_REDIRECT_URI", "").strip(),
+        "public_base_url": os.environ.get(
+            "THREADS_PUBLIC_BASE_URL", "").strip().rstrip("/"),
         "access_token": os.environ.get("THREADS_ACCESS_TOKEN", "").strip(),
         "user_id": os.environ.get("THREADS_USER_ID", "").strip(),
         "username": os.environ.get("THREADS_USERNAME", "").strip(),
@@ -144,6 +148,8 @@ def settings() -> dict:
         "timeout": max(1, _int("THREADS_API_TIMEOUT_SECONDS", 30)),
         "max_retries": max(0, min(1, _int(
             "THREADS_API_MAX_RETRIES", 1))),
+        "oauth_state_ttl_seconds": max(
+            60, min(1800, _int("THREADS_OAUTH_STATE_TTL_SECONDS", 600))),
         "daily_min": max(0, _int("THREADS_DAILY_POST_MIN", 2)),
         "daily_max": max(1, min(3, _int("THREADS_DAILY_POST_MAX", 3))),
         "schedule": tuple(
@@ -422,21 +428,162 @@ class ThreadsClient:
             params={"metric": "views,likes,replies,reposts,quotes,shares"})
 
 
-def authorization_url() -> dict:
+def create_oauth_state(path: Path | None = None,
+                       now: datetime | None = None) -> str:
+    """Create a one-time OAuth state. Only its SHA-256 hash is persisted."""
+    now = now or _now()
+    state = secrets.token_urlsafe(32)
+    digest = hashlib.sha256(state.encode("utf-8")).hexdigest()
+    expires = now + timedelta(seconds=settings()["oauth_state_ttl_seconds"])
+    apply_additive_migrations(path)
+    try:
+        with closing(connect(path)) as conn:
+            conn.execute(
+                "DELETE FROM threads_oauth_states WHERE expires_at<?",
+                (now.isoformat(),))
+            conn.commit()
+    except sqlite3.Error:
+        raise RuntimeError("threads_oauth_state_store_unavailable") from None
+    inserted = write("""INSERT INTO threads_oauth_states
+      (state_hash,created_at,expires_at,used_at) VALUES (?,?,?,NULL)""", (
+        digest, now.isoformat(), expires.isoformat(),
+    ), path)
+    if not inserted:
+        raise RuntimeError("threads_oauth_state_store_unavailable")
+    return state
+
+
+def consume_oauth_state(state: str, path: Path | None = None,
+                        now: datetime | None = None) -> bool:
+    """Atomically consume an unexpired OAuth state exactly once."""
+    if not state or len(state) > 512:
+        return False
+    now = now or _now()
+    digest = hashlib.sha256(state.encode("utf-8")).hexdigest()
+    apply_additive_migrations(path)
+    try:
+        with closing(connect(path)) as conn:
+            cur = conn.execute(
+                """UPDATE threads_oauth_states SET used_at=?
+                   WHERE state_hash=? AND used_at IS NULL AND expires_at>=?""",
+                (now.isoformat(), digest, now.isoformat()))
+            conn.commit()
+            return cur.rowcount == 1
+    except sqlite3.Error:
+        return False
+
+
+def authorization_url(path: Path | None = None) -> dict:
     cfg = settings()
     if not cfg["app_id"] or not cfg["redirect_uri"]:
         raise ValueError("THREADS_APP_ID and THREADS_REDIRECT_URI are required")
+    redirect = urlsplit(cfg["redirect_uri"])
+    if (
+        redirect.scheme != "https" or not redirect.netloc
+        or redirect.fragment or redirect.username or redirect.password
+    ):
+        raise ValueError("THREADS_REDIRECT_URI must be public HTTPS")
+    if cfg["public_base_url"]:
+        expected = f"{cfg['public_base_url']}/threads/callback"
+        if not hmac.compare_digest(cfg["redirect_uri"], expected):
+            raise ValueError(
+                "THREADS_REDIRECT_URI must match THREADS_PUBLIC_BASE_URL")
+    state = create_oauth_state(path)
     query = urlencode({
         "client_id": cfg["app_id"],
         "redirect_uri": cfg["redirect_uri"],
         "scope": ",".join(cfg["scopes"]),
         "response_type": "code",
+        "state": state,
     })
     return {
         "authorization_url": f"https://threads.net/oauth/authorize?{query}",
         "redirect_uri": cfg["redirect_uri"],
         "requested_scopes": list(cfg["scopes"]),
+        "state_created": True,
     }
+
+
+def _user_digest(user_id: str) -> str:
+    secret = settings()["app_secret"]
+    if not secret:
+        raise ValueError("THREADS_APP_SECRET is required")
+    return hmac.new(
+        secret.encode("utf-8"), user_id.encode("utf-8"),
+        hashlib.sha256).hexdigest()
+
+
+def clear_user_credentials(user_id: str, *, detach_history: bool = False,
+                           path: Path | None = None) -> dict:
+    """Remove local credentials for one verified Meta user."""
+    cfg = settings()
+    configured_match = bool(
+        user_id and cfg["user_id"]
+        and hmac.compare_digest(str(user_id), str(cfg["user_id"])))
+    if configured_match:
+        _update_env({
+            "THREADS_ACCESS_TOKEN": "",
+            "THREADS_USER_ID": "",
+            "THREADS_USERNAME": "",
+            "THREADS_TOKEN_EXPIRES_AT": "",
+            "THREADS_POST_ENABLED": "false",
+        })
+    detached = 0
+    if detach_history:
+        apply_additive_migrations(path)
+        try:
+            with closing(connect(path)) as conn:
+                cur = conn.execute(
+                    """UPDATE threads_posts SET threads_user_id=NULL,
+                       updated_at=? WHERE threads_user_id=?""",
+                    (_now().isoformat(), str(user_id)))
+                detached = int(cur.rowcount)
+                conn.commit()
+        except sqlite3.Error:
+            _append_fallback("deletion_events.jsonl", {
+                "event_at": _now().isoformat(),
+                "event": "history_detach_failed",
+                "user_hash": _user_digest(str(user_id)),
+            })
+            raise RuntimeError("threads_history_detach_failed") from None
+    return {
+        "credentials_cleared": configured_match,
+        "history_links_removed": detached,
+        "threads_posting_disabled": configured_match,
+    }
+
+
+def create_deletion_receipt(user_id: str, path: Path | None = None) -> str:
+    confirmation = secrets.token_hex(16)
+    apply_additive_migrations(path)
+    inserted = write("""INSERT INTO threads_deletion_receipts
+      (confirmation_hash,user_hash,requested_at,completed_at,status)
+      VALUES (?,?,?,?,?)""", (
+        hashlib.sha256(confirmation.encode("utf-8")).hexdigest(),
+        _user_digest(user_id), _now().isoformat(), _now().isoformat(),
+        "completed",
+    ), path)
+    if not inserted:
+        raise RuntimeError("threads_deletion_receipt_unavailable")
+    return confirmation
+
+
+def deletion_status(confirmation: str,
+                    path: Path | None = None) -> dict:
+    if not confirmation or len(confirmation) > 128:
+        return {"found": False, "status": "not_found"}
+    digest = hashlib.sha256(confirmation.encode("utf-8")).hexdigest()
+    try:
+        with closing(connect(path)) as conn:
+            row = conn.execute(
+                """SELECT status,requested_at,completed_at
+                   FROM threads_deletion_receipts
+                   WHERE confirmation_hash=?""", (digest,)).fetchone()
+        if not row:
+            return {"found": False, "status": "not_found"}
+        return {"found": True, **dict(row)}
+    except sqlite3.Error:
+        return {"found": False, "status": "unavailable"}
 
 
 def exchange_code(code: str, client: ThreadsClient | None = None,

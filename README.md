@@ -519,5 +519,12 @@ Threads連携は、公式Graph APIだけを使うプレビュー優先設計で�
 - 運用・障害対応: [`docs/THREADS_OPERATION.md`](docs/THREADS_OPERATION.md)
 - 状態確認: `python local_bot.py threads-status`
 - 安全な確認: `python local_bot.py threads-generate --dry-run`
+- OAuth公開URL確認: `python local_bot.py threads-endpoints`
+- OAuth callback自動起動登録: `powershell -ExecutionPolicy Bypass -File production/register_threads_oauth_task.ps1`
+- OAuth callbackタスク確認: `powershell -ExecutionPolicy Bypass -File production/threads_oauth_status.ps1`
+
+OAuth callback、Deauthorize、Data DeletionはWaitressでローカル待受し、
+固定ホスト名のHTTPSリバースプロキシを通して公開します。OAuth stateは
+一回限りで、Metaの解除・削除要求はHMAC-SHA256署名を検証します。
 
 設定、承認CLI、Windowsタスク登録、ロールバックは[OPERATIONS_FREE_NOTE_DISCORD.md](OPERATIONS_FREE_NOTE_DISCORD.md)を参照してください。

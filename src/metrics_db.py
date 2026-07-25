@@ -170,6 +170,12 @@ CREATE TABLE IF NOT EXISTS threads_metrics (
 CREATE TABLE IF NOT EXISTS threads_token_events (
  id INTEGER PRIMARY KEY, event_at TEXT, event_type TEXT, expires_at TEXT,
  success INTEGER, error_type TEXT, metadata_json TEXT);
+CREATE TABLE IF NOT EXISTS threads_oauth_states (
+ id INTEGER PRIMARY KEY, state_hash TEXT UNIQUE, created_at TEXT,
+ expires_at TEXT, used_at TEXT);
+CREATE TABLE IF NOT EXISTS threads_deletion_receipts (
+ id INTEGER PRIMARY KEY, confirmation_hash TEXT UNIQUE, user_hash TEXT,
+ requested_at TEXT, completed_at TEXT, status TEXT);
 CREATE TABLE IF NOT EXISTS human_reviews (
  id INTEGER PRIMARY KEY, content_type TEXT, content_id TEXT, reviewed_at TEXT,
  scores_json TEXT, should_post INTEGER, notes TEXT, reviewer TEXT,
@@ -196,6 +202,8 @@ CREATE INDEX IF NOT EXISTS idx_threads_generation_created ON threads_generation_
 CREATE INDEX IF NOT EXISTS idx_threads_posts_status ON threads_posts(status,published_at);
 CREATE INDEX IF NOT EXISTS idx_threads_metrics_window ON threads_metrics(threads_post_id,measurement_window);
 CREATE INDEX IF NOT EXISTS idx_threads_token_event ON threads_token_events(event_at,event_type);
+CREATE INDEX IF NOT EXISTS idx_threads_oauth_state_expiry ON threads_oauth_states(expires_at,used_at);
+CREATE INDEX IF NOT EXISTS idx_threads_deletion_status ON threads_deletion_receipts(status,requested_at);
 CREATE INDEX IF NOT EXISTS idx_quality_eval_run ON quality_eval_runs(run_at, prompt_version);
 CREATE INDEX IF NOT EXISTS idx_human_review_content ON human_reviews(content_type, content_id);
 CREATE INDEX IF NOT EXISTS idx_note_draft_status ON note_drafts(status, generated_at);
@@ -362,7 +370,9 @@ def table_counts(path: Path | None = None) -> dict:
                          "amazon_associate_items", "amazon_link_events",
                          "amazon_link_import_quarantine",
                          "threads_generation_runs", "threads_posts",
-                         "threads_metrics", "threads_token_events"):
+                         "threads_metrics", "threads_token_events",
+                         "threads_oauth_states",
+                         "threads_deletion_receipts"):
                 out[name] = conn.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0]
     except sqlite3.Error:
         pass

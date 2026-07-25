@@ -2027,6 +2027,8 @@ def _threads_output(action: str, **kwargs) -> int:
         "collect_metrics": lambda: threads_api.collect_metrics(),
         "comparison": lambda: threads_api.platform_comparison(),
         "run": lambda: threads_api.run_scheduled(),
+        "endpoints": lambda: __import__(
+            "threads_oauth_server").endpoint_urls(),
     }
     result = actions[action]()
     print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
@@ -2202,6 +2204,10 @@ def main() -> int:
     sub.add_parser(
         "platform-comparison", help="同一コンテンツのX/Threads指標を比較")
     sub.add_parser("threads-run", help="Threadsの現在スケジュール枠を処理")
+    sub.add_parser(
+        "threads-endpoints", help="Meta管理画面へ登録する公開URLを表示")
+    sub.add_parser(
+        "threads-web", help="Threads OAuth callbackサーバーを起動")
 
     args = parser.parse_args()
 
@@ -2332,6 +2338,14 @@ def main() -> int:
         return _threads_output("comparison")
     if args.command == "threads-run":
         return _threads_output("run")
+    if args.command == "threads-endpoints":
+        return _threads_output("endpoints")
+    if args.command == "threads-web":
+        load_env()
+        ensure_dirs()
+        from threads_oauth_server import run_server
+        run_server()
+        return 0
     if args.command == "discord-test":
         return cmd_discord_test()
     if args.command == "discord-note-draft-test":

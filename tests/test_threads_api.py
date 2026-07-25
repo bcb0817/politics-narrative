@@ -55,6 +55,7 @@ class ThreadsApiTests(unittest.TestCase):
             "THREADS_APP_ID": "",
             "THREADS_APP_SECRET": "",
             "THREADS_REDIRECT_URI": "",
+            "THREADS_PUBLIC_BASE_URL": "",
             "THREADS_TOKEN_EXPIRES_AT": "",
             "OPENAI_API_KEY": "",
         }, clear=False)
@@ -201,13 +202,15 @@ class ThreadsApiTests(unittest.TestCase):
     # OAuth/token
     def test_26_auth_url_requires_configuration(self):
         with self.assertRaises(ValueError):
-            threads_api.authorization_url()
+            threads_api.authorization_url(self.path)
 
     def test_27_auth_url_has_only_requested_scopes(self):
         with patch.dict(os.environ, {
             "THREADS_APP_ID": "app",
-            "THREADS_REDIRECT_URI": "https://localhost/callback"}):
-            result = threads_api.authorization_url()
+            "THREADS_REDIRECT_URI":
+                "https://localhost/threads/callback",
+            "THREADS_PUBLIC_BASE_URL": "https://localhost"}):
+            result = threads_api.authorization_url(self.path)
         self.assertEqual(result["requested_scopes"], list(
             threads_api.INITIAL_SCOPES))
 

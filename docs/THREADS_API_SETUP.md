@@ -27,6 +27,17 @@ threads_manage_insights
 
 ## OAuth
 
+OAuth開始前に、公開HTTPSベースURLを設定します。
+
+```dotenv
+THREADS_PUBLIC_BASE_URL=https://threads-bot.example.com
+THREADS_REDIRECT_URI=https://threads-bot.example.com/threads/callback
+THREADS_CALLBACK_TRUST_PROXY=true
+```
+
+`THREADS_REDIRECT_URI`はMeta管理画面のOAuth Redirect URLと完全一致させます。
+HTTP、localhost、変動する一時トンネルURLは本番登録に使用しません。
+
 ```powershell
 .\.venv\Scripts\python.exe local_bot.py threads-auth-url
 .\.venv\Scripts\python.exe local_bot.py threads-exchange-code --code "<authorization-code>"
@@ -37,6 +48,47 @@ threads_manage_insights
 認可コード交換後、長期トークン、ユーザーID、ユーザー名、有効期限は
 Git管理対象外の `.env` に原子的に保存されます。トークンやApp Secretは
 ログ、SQLite、JSONフォールバック、GitHubへ保存しません。
+
+認証URLには暗号学的に生成した`state`が含まれます。平文stateはDBへ保存せず、
+SHA-256ハッシュ、有効期限、一回限りの使用状態だけを保存します。
+
+## 公開HTTPS callback
+
+ローカルサーバーはWaitressで`127.0.0.1:8787`にだけ待ち受けます。
+
+```powershell
+.\production\run_threads_oauth_server.ps1
+```
+
+Windowsログオン時にcallbackサーバーを自動起動する場合は、次を一度実行します。
+
+```powershell
+.\production\register_threads_oauth_task.ps1
+.\production\threads_oauth_status.ps1
+```
+
+登録直後にもタスクから起動する場合は
+`.\production\register_threads_oauth_task.ps1 -Start` を使用します。
+
+外部公開には、固定ホスト名を持つリバースプロキシまたは名前付きCloudflare
+Tunnel等が別途必要です。TLS終端側から`X-Forwarded-Proto: https`を渡す場合だけ
+`THREADS_CALLBACK_TRUST_PROXY=true`にします。プロキシのアクセスログでは
+`/threads/callback`のクエリ文字列を記録しない設定にしてください。
+
+公開URL設定後、次のコマンドでMeta登録用URLを確認できます。
+
+```powershell
+.\.venv\Scripts\python.exe local_bot.py threads-endpoints
+```
+
+公開するエンドポイントは次の3つです。
+
+- `GET /threads/callback`
+- `POST /threads/deauthorize`
+- `POST /threads/data-deletion`
+
+解除・削除要求はMetaの`signed_request`をApp SecretによるHMAC-SHA256で
+検証します。署名不正の場合はトークンや履歴を変更しません。
 
 ## Phase Aの確認
 
