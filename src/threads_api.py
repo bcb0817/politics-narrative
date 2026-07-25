@@ -402,7 +402,6 @@ class ThreadsClient:
             data={
                 "media_type": "TEXT",
                 "text": text,
-                "reply_control": cfg["reply_control"],
             },
         )
 
