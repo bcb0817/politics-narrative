@@ -191,6 +191,17 @@ def _note_webhook_settings() -> tuple[bool, str, str]:
 
 
 def _note_summary(draft: dict[str, Any]) -> str:
+    manual_required = int(draft.get("amazon_manual_required") or 0)
+    amazon_lines = [
+        f"**関連書籍候補:** {_clean(draft.get('amazon_item_count'), 10)}件",
+        f"**Amazonリンク作成待ち:** {manual_required}件",
+        f"**公式API取得済み:** {_clean(draft.get('amazon_paapi_ready'), 10)}件",
+    ]
+    if manual_required:
+        amazon_lines.extend([
+            "**🟠 Amazonリンク設定待ち**",
+            "公開前にSiteStripeでリンクを作成し、amazon-link-setコマンドで登録してください。",
+        ])
     return "\n".join([
         "📝 **無料note下書きができました**",
         f"**タイトル:** {_clean(draft.get('title'), 300)}",
@@ -199,6 +210,7 @@ def _note_summary(draft: dict[str, Any]) -> str:
         f"**読了目安:** {_clean(draft.get('reading_minutes'), 20)}分",
         f"**公開候補日:** {_clean(draft.get('target_publish_date'), 30)}",
         f"**状態:** {_clean(draft.get('status'), 40)}",
+        *amazon_lines,
         "",
         "**確認事項:** 事実と一次資料／賛否両論の公平性／タイトルの強さ／AI的な定型表現",
         f"**ローカル保存先:** {_clean(draft.get('path'), 600)}",

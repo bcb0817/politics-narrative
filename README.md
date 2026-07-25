@@ -490,13 +490,21 @@ xAIは `XAI_COST_LEDGER_VERIFIED=false` の間、設定が4ドルでも実効上
 停止します。RSS・公式情報のローカル監視と既存キャッシュは継続します。
 # 無料note原稿パイプライン 📝
 
-政治・制度解説を週1〜2本生成し、`outputs/note`へMarkdownで保存できます。記事末尾は「一次資料2リンク＋関連書籍のAmazonリンク2件」に統一し、関連書籍はISBN確認済みカタログから記事種別・タイトルとの一致度で自動選定します。同時に、記事タイトル入りの見出し画像`cover.png`を1280×670 px（1.91:1）でローカル生成します。合格原稿は専用Discordへ結果概要、見出し画像、確認用ファイルを通知しますが、noteへの公開は必ず人が行います。
+政治・制度解説を週1〜2本生成し、`outputs/note`へMarkdownで保存できます。記事末尾は「一次資料2リンク＋関連書籍候補1〜3件」に統一し、関連書籍はISBN確認済みカタログから関連性スコア7.0以上の候補を自動選定します。初期設定の`manual`モードでは架空のAmazonリンクを作らず、`AMAZON_LINK_PENDING:`プレースホルダーを置きます。人がSiteStripe等で作成したアソシエイトリンクを登録し、開示文とリンクの確認が済むまで承認を止められます。同時に、記事タイトル入りの見出し画像`cover.png`を1280×670 px（1.91:1）でローカル生成します。合格原稿は専用Discordへ結果概要、見出し画像、確認用ファイルを通知しますが、noteへの公開は必ず人が行います。
 
 ```powershell
 .\.venv\Scripts\python.exe local_bot.py generate-free-note --dry-run
 .\.venv\Scripts\python.exe local_bot.py note-drafts
 .\.venv\Scripts\python.exe local_bot.py note-pipeline-status
 .\.venv\Scripts\python.exe local_bot.py note-generate-cover --content-id note-YYYYMMDD-001
+.\.venv\Scripts\python.exe local_bot.py amazon-links-status
+.\.venv\Scripts\python.exe local_bot.py amazon-link-set --content-id note-YYYYMMDD-001 --item-id amazon-001 --url "https://www.amazon.co.jp/..."
+.\.venv\Scripts\python.exe local_bot.py import-amazon-links --file .\amazon-links.csv
+.\.venv\Scripts\python.exe local_bot.py amazon-links-disable --content-id note-YYYYMMDD-001
 ```
+
+詳しい運用手順、安全条件、CSV形式、Creators APIへの移行方針は
+[`docs/AMAZON_ASSOCIATE_NOTE_WORKFLOW.md`](docs/AMAZON_ASSOCIATE_NOTE_WORKFLOW.md)
+を参照してください。
 
 設定、承認CLI、Windowsタスク登録、ロールバックは[OPERATIONS_FREE_NOTE_DISCORD.md](OPERATIONS_FREE_NOTE_DISCORD.md)を参照してください。

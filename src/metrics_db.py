@@ -132,6 +132,21 @@ CREATE TABLE IF NOT EXISTS note_generation_runs (
  status TEXT, content_id TEXT, model TEXT, input_tokens INTEGER,
  output_tokens INTEGER, estimated_cost_usd REAL, error_type TEXT,
  metadata_json TEXT);
+CREATE TABLE IF NOT EXISTS amazon_associate_items (
+ id INTEGER PRIMARY KEY, content_id TEXT, item_id TEXT, title TEXT,
+ author_or_brand TEXT, isbn TEXT, asin TEXT, product_type TEXT,
+ relevance_score REAL, selection_reason TEXT, introduction_text TEXT,
+ tracking_id TEXT, affiliate_url TEXT, link_status TEXT, data_source TEXT,
+ fetched_at TEXT, created_at TEXT, updated_at TEXT,
+ UNIQUE(content_id,item_id));
+CREATE TABLE IF NOT EXISTS amazon_link_events (
+ id INTEGER PRIMARY KEY, content_id TEXT, item_id TEXT, event_type TEXT,
+ event_at TEXT, previous_status TEXT, new_status TEXT, url_hash TEXT,
+ metadata_json TEXT);
+CREATE TABLE IF NOT EXISTS amazon_link_import_quarantine (
+ id INTEGER PRIMARY KEY, imported_at TEXT, source_file TEXT,
+ row_number INTEGER, row_json TEXT, rejection_reason TEXT,
+ event_key TEXT UNIQUE);
 CREATE TABLE IF NOT EXISTS human_reviews (
  id INTEGER PRIMARY KEY, content_type TEXT, content_id TEXT, reviewed_at TEXT,
  scores_json TEXT, should_post INTEGER, notes TEXT, reviewer TEXT,
@@ -152,6 +167,8 @@ CREATE INDEX IF NOT EXISTS idx_engagement_results_queue ON engagement_results(qu
 CREATE INDEX IF NOT EXISTS idx_openai_batch_status ON openai_batch_jobs(status, submitted_at);
 CREATE INDEX IF NOT EXISTS idx_follower_captured ON follower_snapshots(captured_at);
 CREATE INDEX IF NOT EXISTS idx_conversion_occurred ON conversion_events(occurred_at, event_type);
+CREATE INDEX IF NOT EXISTS idx_amazon_items_content ON amazon_associate_items(content_id,link_status);
+CREATE INDEX IF NOT EXISTS idx_amazon_events_content ON amazon_link_events(content_id,event_at);
 CREATE INDEX IF NOT EXISTS idx_quality_eval_run ON quality_eval_runs(run_at, prompt_version);
 CREATE INDEX IF NOT EXISTS idx_human_review_content ON human_reviews(content_type, content_id);
 CREATE INDEX IF NOT EXISTS idx_note_draft_status ON note_drafts(status, generated_at);
@@ -314,7 +331,9 @@ def table_counts(path: Path | None = None) -> dict:
                          "quality_eval_runs", "human_reviews", "post_quality_dimensions",
                          "engagement_results", "conversion_event_quarantine",
                          "content_pipeline_runs", "budget_change_events",
-                         "note_drafts", "note_generation_runs"):
+                         "note_drafts", "note_generation_runs",
+                         "amazon_associate_items", "amazon_link_events",
+                         "amazon_link_import_quarantine"):
                 out[name] = conn.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0]
     except sqlite3.Error:
         pass

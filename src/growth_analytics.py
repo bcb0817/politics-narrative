@@ -18,6 +18,7 @@ CONVERSION_TYPES = (
     "note_click", "note_follow", "note_purchase", "youtube_click",
     "youtube_view", "youtube_subscribe", "newsletter_click",
     "newsletter_signup", "paid_purchase",
+    "amazon_link_click", "amazon_purchase", "amazon_commission",
 )
 
 
@@ -159,12 +160,18 @@ def conversion_dashboard(path: Path | None = None) -> dict:
             str(row["content_id"]): dict(row) for row in conn.execute(
                 "SELECT * FROM note_drafts")
         }
+        amazon_items = {
+            (str(row["content_id"]), str(row["item_id"])): dict(row)
+            for row in conn.execute("SELECT * FROM amazon_associate_items")
+        }
     totals = {event: 0.0 for event in CONVERSION_TYPES}
     by_campaign = defaultdict(float)
     by_content = defaultdict(float)
     by_post_type = defaultdict(float)
     by_digest = defaultdict(float)
     note_performance = {}
+    amazon_by_content = defaultdict(lambda: defaultdict(float))
+    amazon_by_item = defaultdict(lambda: defaultdict(float))
     for row in rows:
         value = float(row["value"] or 0)
         if row["event_type"] in totals:
@@ -190,9 +197,22 @@ def conversion_dashboard(path: Path | None = None) -> dict:
                 "events": defaultdict(float),
             })
             summary["events"][row["event_type"]] += value
+        if str(row["event_type"]).startswith("amazon_"):
+            try:
+                event_metadata = json.loads(row.get("metadata_json") or "{}")
+            except (TypeError, json.JSONDecodeError):
+                event_metadata = {}
+            item_id = str(event_metadata.get("item_id") or "unknown")
+            amazon_by_content[content][row["event_type"]] += value
+            amazon_by_item[f"{content}:{item_id}"][row["event_type"]] += value
     impressions = sum(int(row.get("impressions") or 0) for row in metrics.values())
     profile_clicks = sum(int(row.get("profile_clicks") or 0) for row in metrics.values())
     conversions = sum(totals.values())
+    def has_related_books(row):
+        try:
+            return bool(json.loads(row.get("related_books_json") or "[]"))
+        except (TypeError, json.JSONDecodeError):
+            return False
     return {
         "event_totals": totals,
         "by_post_type": dict(by_post_type),
@@ -203,6 +223,31 @@ def conversion_dashboard(path: Path | None = None) -> dict:
             {**row, "events": dict(row["events"])}
             for row in note_performance.values()
         ],
+        "amazon_performance": {
+            "by_content_id": {
+                key: dict(value) for key, value in amazon_by_content.items()
+            },
+            "by_item": [
+                {
+                    "content_id": key.split(":", 1)[0],
+                    "item_id": key.split(":", 1)[1],
+                    "title": (
+                        amazon_items.get(tuple(key.split(":", 1)), {})
+                        .get("title")
+                    ),
+                    "events": dict(value),
+                }
+                for key, value in amazon_by_item.items()
+            ],
+            "articles_with_related_books": sum(
+                has_related_books(row)
+                for row in notes.values()
+            ),
+            "articles_without_related_books": sum(
+                not has_related_books(row)
+                for row in notes.values()
+            ),
+        },
         "conversions_per_1000_impressions": round(
             conversions / max(1, impressions) * 1000, 6),
         "conversion_from_profile_click_rate": round(

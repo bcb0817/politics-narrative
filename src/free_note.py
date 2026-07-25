@@ -16,7 +16,7 @@ from contextlib import closing
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 from api_budget import estimate_openai, finalize, reserve
@@ -129,62 +129,18 @@ def _registry_sources() -> list[dict]:
         return []
 
 
-def _book_catalog() -> list[dict]:
-    path = _root() / "config" / "free_note_related_books.json"
-    try:
-        rows = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return []
-    books = []
-    for row in rows if isinstance(rows, list) else []:
-        isbn = re.sub(r"\D", "", str(row.get("isbn13") or ""))
-        if len(isbn) != 13:
-            continue
-        book = dict(row)
-        book["isbn13"] = isbn
-        book["amazon_url"] = (
-            "https://www.amazon.co.jp/s?"
-            f"i=stripbooks&k={quote_plus(isbn)}"
-        )
-        book["link_type"] = "amazon_isbn_search"
-        books.append(book)
-    return books
-
-
 def extract_related_books(selection: dict, limit: int = 2) -> list[dict]:
-    """Select related books by article type and topic, without web scraping."""
-    article_type = str(selection.get("article_type") or "")
-    topic = unicodedata.normalize(
-        "NFKC", str(selection.get("topic") or "")
-    ).lower()
-    scored = []
-    for index, book in enumerate(_book_catalog()):
-        types = book.get("article_types") or []
-        keywords = [
-            unicodedata.normalize("NFKC", str(value)).lower()
-            for value in book.get("keywords") or []
-        ]
-        type_score = 4 if article_type in types else 0
-        keyword_score = sum(3 for keyword in keywords if keyword in topic)
-        general_score = 1 if article_type.startswith("weekly") else 0
-        scored.append((
-            type_score + keyword_score + general_score,
-            -index,
-            book,
-        ))
-    selected = [
-        dict(row[2]) for row in sorted(scored, reverse=True)
-        if row[0] > 0
-    ][:limit]
-    if len(selected) < limit:
-        selected_isbns = {row["isbn13"] for row in selected}
-        for book in _book_catalog():
-            if book["isbn13"] in selected_isbns:
-                continue
-            selected.append(dict(book))
-            if len(selected) >= limit:
-                break
-    return selected[:limit]
+    """Compatibility view of locally selected, verified book candidates."""
+    from amazon_associate import manual_candidates
+    return [
+        {
+            "title": row["title"],
+            "author": row["author_or_brand"],
+            "isbn13": row["isbn"],
+            "relevance_score": row["relevance_score"],
+        }
+        for row in manual_candidates(selection)[:limit]
+    ]
 
 
 def _candidate_rows(path: Path | None = None, days: int = 7) -> list[dict]:
@@ -425,7 +381,7 @@ def _three_line_summary(selection: dict) -> list[str]:
 
 def _local_article(selection: dict, primary: list[dict],
                    secondary: list[dict],
-                   related_books: list[dict] | None = None) -> tuple[str, str]:
+                   amazon_items: list[dict] | None = None) -> tuple[str, str]:
     title = selection["topic"]
     summary = "\n".join(f"- {line}" for line in _three_line_summary(selection))
     candidates = selection.get("candidates", [])
@@ -447,15 +403,6 @@ def _local_article(selection: dict, primary: list[dict],
         )
     primary_links = "\n".join(
         f"- [{row['name']}]({row['url']})" for row in primary)
-    related_books = (
-        related_books
-        if related_books is not None
-        else extract_related_books(selection)
-    )
-    book_links = "\n".join(
-        f"- [{row['title']}（{row['author']}）]({row['amazon_url']})"
-        for row in related_books[:2]
-    )
     article = f"""# {title}
 
 {summary}
@@ -509,13 +456,16 @@ def _local_article(selection: dict, primary: list[dict],
 ### 一次資料（2件）
 
 {primary_links}
-
-### 関連書籍（Amazon・2件）
-
-{book_links}
-
-※Amazonの商品情報・在庫・価格は変動します。リンクはISBNによる商品検索です。
 """
+    if amazon_items is None:
+        from amazon_associate import manual_candidates
+        amazon_items = manual_candidates(selection)
+    from amazon_associate import append_or_replace_section, associate_settings
+    article = append_or_replace_section(
+        article,
+        amazon_items,
+        bool(amazon_items) and associate_settings()["disclosure_enabled"],
+    )
     minimum = _int("FREE_NOTE_MIN_CHARS", 1800)
     if len(article) < minimum:
         article += (
@@ -549,7 +499,7 @@ def _local_article(selection: dict, primary: list[dict],
 
 
 def _sources_markdown(primary: list[dict], secondary: list[dict],
-                      related_books: list[dict] | None = None) -> str:
+                      amazon_items: list[dict] | None = None) -> str:
     def section(title: str, rows: list[dict]) -> str:
         blocks = [f"# {title}", ""]
         if not rows:
@@ -565,14 +515,18 @@ def _sources_markdown(primary: list[dict], secondary: list[dict],
                 "",
             ])
         return "\n".join(blocks)
-    books = ["# 関連書籍（Amazon）", ""]
-    for row in (related_books or [])[:2]:
+    books = ["# 関連商品候補", ""]
+    for index, row in enumerate(amazon_items or [], 1):
         books.extend([
-            f"## {row.get('title', '関連書籍')}",
-            f"- 著者: {row.get('author', '')}",
-            f"- ISBN-13: {row.get('isbn13', '')}",
-            f"- Amazon: {row.get('amazon_url', '')}",
-            "- 選定方法: 記事種別・記事タイトルとの一致度による自動選定",
+            f"## 候補{index}",
+            f"- 書名：{row.get('title', '')}",
+            f"- 著者：{row.get('author_or_brand', '')}",
+            f"- ISBN：{row.get('isbn', '')}",
+            f"- ASIN：{row.get('asin', '')}",
+            f"- 記事との関連性：{row.get('selection_reason', '')}",
+            f"- 関連性スコア：{row.get('relevance_score', 0)}",
+            f"- 情報確認元：{row.get('information_source', '')}",
+            f"- リンク状態：{row.get('link_status', '')}",
             "",
         ])
     return (
@@ -594,8 +548,6 @@ REVIEW_MARKDOWN = """# 公開前チェック
 - [ ] 数字と単位は正しい
 - [ ] 一次資料と本文が一致している
 - [ ] 一次資料リンクが正確に2件ある
-- [ ] 関連書籍のAmazonリンクが正確に2件ある
-- [ ] 関連書籍が記事テーマと一致している
 - [ ] 未確認情報を断定していない
 
 ## 編集品質
@@ -616,6 +568,27 @@ REVIEW_MARKDOWN = """# 公開前チェック
 - [ ] 他人の記事・投稿の長文転載がない
 - [ ] 著作権上問題のある引用がない
 
+## 関連書籍・Amazonリンク
+
+- [ ] 書名と著者が正しい
+- [ ] ISBNまたはASINが正しい
+- [ ] 記事内容との関連性がある
+- [ ] 紹介文が過度な広告表現になっていない
+- [ ] AmazonリンクをSiteStripeまたは正式な方法で作成した
+- [ ] トラッキングIDが正しい
+- [ ] アフィリエイトであることを明示した
+- [ ] リンク切れがない
+- [ ] 公開前に実際のリンク先を開いて確認した
+
+## Amazonアソシエイト確認
+
+- [ ] アフィリエイトリンクであることを記事内に明示した
+- [ ] Amazonアソシエイト参加者として必要な表示を確認した
+- [ ] Amazonの商標やロゴを無断利用していない
+- [ ] 価格・在庫・レビューを非公式取得していない
+- [ ] リンク先が正しい商品である
+- [ ] 紹介文と記事内容に十分な関連性がある
+
 ## 公開作業
 
 - [ ] 見出し画像が1280×670pxで正しく表示される
@@ -629,7 +602,7 @@ REVIEW_MARKDOWN = """# 公開前チェック
 
 def quality_check(article: str, title: str, primary: list[dict],
                   secondary: list[dict],
-                  related_books: list[dict] | None = None) -> dict:
+                  amazon_items: list[dict] | None = None) -> dict:
     reasons = []
     warnings = []
     length = len(article)
@@ -653,32 +626,67 @@ def quality_check(article: str, title: str, primary: list[dict],
         reasons.append("missing_required_section")
     if "## 賛成側の最も強い主張" not in article or "## 反対側の最も強い主張" not in article:
         warnings.append("unbalanced_arguments")
+    amazon_items_were_supplied = amazon_items is not None
     known_urls = {row.get("url") for row in primary + secondary}
-    if related_books is not None:
-        known_urls.update(row.get("amazon_url") for row in related_books)
+    if amazon_items_were_supplied:
+        known_urls.update(
+            row.get("affiliate_url") for row in amazon_items
+            if row.get("affiliate_url")
+        )
     article_urls = re.findall(r"https?://[^\s)>\]]+", article)
     primary_urls = [str(row.get("url") or "") for row in primary]
     amazon_urls = [
         url for url in article_urls
-        if (urlparse(url).hostname or "").lower() == "www.amazon.co.jp"
+        if (urlparse(url).hostname or "").lower() in {
+            "www.amazon.co.jp", "amazon.co.jp",
+        }
     ]
-    if related_books is None:
+    if not amazon_items_were_supplied:
         known_urls.update(amazon_urls)
-    if len(amazon_urls) != 2:
-        reasons.append("related_book_count_not_two")
+        pending_item_ids = re.findall(
+            r"AMAZON_LINK_PENDING:(amazon-\d{3})", article)
+        amazon_items = [
+            {"item_id": item_id, "link_status": "manual_required"}
+            for item_id in pending_item_ids
+        ] + [
+            {
+                "item_id": f"inferred-ready-{index:03d}",
+                "link_status": "ready",
+                "affiliate_url": url,
+            }
+            for index, url in enumerate(amazon_urls, 1)
+        ]
+    items = amazon_items or []
+    if len(items) > 3:
+        reasons.append("too_many_amazon_items")
+    pending_tokens = re.findall(
+        r"AMAZON_LINK_PENDING:amazon-\d{3}", article)
+    expected_pending = sum(
+        row.get("link_status") == "manual_required" for row in items)
+    expected_ready = sum(
+        row.get("link_status") in {"ready", "published"} for row in items)
+    if len(pending_tokens) != expected_pending:
+        reasons.append("amazon_placeholder_count_mismatch")
+    if len(amazon_urls) != expected_ready:
+        reasons.append("amazon_ready_link_count_mismatch")
     if (
         len([url for url in article_urls if url in primary_urls]) != 2
         or any(url not in article_urls for url in primary_urls)
     ):
         reasons.append("primary_link_count_not_two")
-    if len(article_urls) != 4:
-        reasons.append("reference_link_count_not_four")
-    if any(
-        (urlparse(url).hostname or "").lower() != "www.amazon.co.jp"
-        or "/s?" not in url
-        for url in amazon_urls
-    ):
+    if len(article_urls) != 2 + expected_ready:
+        reasons.append("reference_link_count_mismatch")
+    from amazon_associate import validate_amazon_url
+    if any(not validate_amazon_url(url) for url in amazon_urls):
         reasons.append("invalid_amazon_book_url")
+    if items:
+        from amazon_associate import DISCLOSURE, PROHIBITED_PROMOTIONAL_PHRASES
+        if DISCLOSURE not in article:
+            reasons.append("amazon_disclosure_missing")
+        if any(phrase in article for phrase in PROHIBITED_PROMOTIONAL_PHRASES):
+            reasons.append("prohibited_promotional_phrase")
+    elif "## 関連書籍" in article:
+        reasons.append("empty_amazon_section")
     if any(url not in known_urls for url in article_urls):
         reasons.append("unknown_or_fabricated_url")
     source_text = " ".join(
@@ -817,7 +825,7 @@ def _record_run(run: dict, path: Path | None = None) -> None:
 
 
 def _openai_article(selection: dict, primary: list[dict], secondary: list[dict],
-                    related_books: list[dict],
+                    amazon_items: list[dict],
                     path: Path | None = None, client_factory=None) -> dict:
     models = [
         os.environ.get(
@@ -857,11 +865,18 @@ def _openai_article(selection: dict, primary: list[dict], secondary: list[dict],
         "maximum_characters": _int("FREE_NOTE_MAX_CHARS", 3200),
         "primary_sources": primary,
         "secondary_sources": secondary,
-        "related_books": related_books,
+        "amazon_candidates": [
+            {
+                "title": row.get("title"),
+                "author": row.get("author_or_brand"),
+                "isbn": row.get("isbn"),
+                "selection_reason": row.get("selection_reason"),
+            }
+            for row in amazon_items
+        ],
         "required_reference_structure": {
             "primary_source_links": 2,
-            "amazon_related_book_links": 2,
-            "use_exact_supplied_urls": True,
+            "amazon_section_generated_separately": True,
         },
     }
     try:
@@ -881,8 +896,9 @@ def _openai_article(selection: dict, primary: list[dict], secondary: list[dict],
                 "opinion, present the strongest fair arguments on both sides, and never expose "
                 "internal labels, model names, JSON keys or prompts. Begin with exactly the "
                 "supplied required_title_heading, then the three-line summary. In the final "
-                "reference section, include exactly two supplied primary source links and exactly "
-                "two supplied Amazon book links. Copy all URLs exactly. Return Markdown only."
+                "reference section, include exactly two supplied primary source links. Do not "
+                "write an Amazon section or invent product URLs; that section is appended by "
+                "trusted local code. Return Markdown only."
             ),
             input=json.dumps(prompt, ensure_ascii=False),
             max_output_tokens=max_output,
@@ -935,7 +951,15 @@ def generate_free_note(article_type: str | None = None, topic: str | None = None
         }, path)
         return result
     primary, secondary = _sources(selection)
-    related_books = extract_related_books(selection)
+    from amazon_associate import (
+        DISCLOSURE,
+        append_or_replace_section,
+        associate_settings,
+        build_items,
+        save_items,
+    )
+    amazon_items, amazon_effective_mode, amazon_fallback_reason = build_items(
+        selection)
     if len(primary) < _int("FREE_NOTE_MIN_PRIMARY_SOURCES", 2):
         result = {
             "status": "skipped", "reason": "insufficient_primary_sources",
@@ -959,14 +983,14 @@ def generate_free_note(article_type: str | None = None, topic: str | None = None
     for attempt in range(attempts):
         if dry_run:
             title, article = _local_article(
-                selection, primary, secondary, related_books)
+                selection, primary, secondary, amazon_items)
             generation = {
                 "model": "local-dry-run", "input_tokens": 0, "output_tokens": 0,
                 "estimated_cost_usd": 0.0,
             }
         else:
             generation = _openai_article(
-                selection, primary, secondary, related_books,
+                selection, primary, secondary, amazon_items,
                 path, client_factory)
             article = generation.get("article", "")
             if not article:
@@ -978,8 +1002,14 @@ def generate_free_note(article_type: str | None = None, topic: str | None = None
                 if first_line.startswith("# ") and not first_line.startswith("## ")
                 else selection["topic"]
             )
+            article = append_or_replace_section(
+                article,
+                amazon_items,
+                bool(amazon_items)
+                and associate_settings()["disclosure_enabled"],
+            )
         quality = quality_check(
-            article, title, primary, secondary, related_books)
+            article, title, primary, secondary, amazon_items)
         if quality["passed"]:
             break
 
@@ -1032,7 +1062,24 @@ def generate_free_note(article_type: str | None = None, topic: str | None = None
         ],
         "source_x_post_ids": [],
         "primary_sources": primary, "secondary_sources": secondary,
-        "related_books": related_books,
+        "related_books": [
+            {
+                "title": row.get("title"),
+                "author": row.get("author_or_brand"),
+                "isbn13": row.get("isbn"),
+                "relevance_score": row.get("relevance_score"),
+            }
+            for row in amazon_items
+        ],
+        "amazon_associate_enabled": bool(amazon_items),
+        "amazon_associate_mode": amazon_effective_mode,
+        "amazon_configured_mode": associate_settings()["mode"],
+        "amazon_fallback_reason": amazon_fallback_reason,
+        "amazon_disclosure_included": bool(
+            amazon_items and DISCLOSURE in article),
+        "amazon_items": amazon_items,
+        "amazon_recommendation_extra_api_calls": 0,
+        "amazon_recommendation_estimated_cost_usd": 0.0,
         "discord_notification_status": "pending" if passed else "not_eligible",
         "discord_message_id": None, "note_url": None, "published_at": None,
         "input_tokens": generation.get("input_tokens", 0),
@@ -1058,12 +1105,13 @@ def generate_free_note(article_type: str | None = None, topic: str | None = None
     ))
     _atomic_text(
         folder / "sources.md",
-        _sources_markdown(primary, secondary, related_books),
+        _sources_markdown(primary, secondary, amazon_items),
     )
     _atomic_text(folder / "review.md", REVIEW_MARKDOWN)
     _atomic_json(folder / "metadata.json", metadata)
     if not _save_db(metadata, path):
         _save_fallback_state(metadata)
+    save_items(content_id, amazon_items, path)
 
     discord_sent = False
     if passed and not dry_run and _bool("DISCORD_NOTE_ENABLED", "false"):
@@ -1090,6 +1138,12 @@ def generate_free_note(article_type: str | None = None, topic: str | None = None
         "path": str(folder), "discord_sent": discord_sent,
         "cover_status": metadata.get("cover_status"),
         "cover_path": metadata.get("cover_path"),
+        "amazon_item_count": len(amazon_items),
+        "amazon_manual_required": sum(
+            item.get("link_status") == "manual_required"
+            for item in amazon_items
+        ),
+        "amazon_associate_mode": amazon_effective_mode,
         "published": False, "x_writes": 0,
         "estimated_cost_usd": metadata["estimated_cost_usd"],
     }
@@ -1165,6 +1219,14 @@ def update_status(content_id: str, status: str, *, note_url: str | None = None,
     ):
         raise ValueError("published status requires an https://note.com/ URL")
     folder, metadata = load_note(content_id)
+    if status in {"approved", "published"}:
+        from amazon_associate import approval_blockers
+        blockers = approval_blockers(folder, metadata)
+        if blockers:
+            raise ValueError(
+                "Amazon approval requirements not met: "
+                + ",".join(blockers)
+            )
     now = datetime.now(JST)
     destination = _destination_for(status, metadata)
     if destination and folder.resolve() != destination.resolve():
@@ -1185,6 +1247,8 @@ def update_status(content_id: str, status: str, *, note_url: str | None = None,
         metadata["note_url"] = note_url
         metadata["published_at"] = now.isoformat()
         metadata["published"] = True
+        from amazon_associate import mark_items_published
+        mark_items_published(content_id, metadata, path)
     _atomic_json(folder / "metadata.json", metadata)
     if not _save_db(metadata, path):
         _save_fallback_state(metadata)
@@ -1213,6 +1277,16 @@ def send_note_discord(content_id: str, *, force: bool = False,
             "target_publish_date": metadata.get("target_publish_date"),
             "status": metadata.get("status"),
             "path": str(folder),
+            "amazon_item_count": len(metadata.get("amazon_items") or []),
+            "amazon_manual_required": sum(
+                item.get("link_status") == "manual_required"
+                for item in metadata.get("amazon_items") or []
+            ),
+            "amazon_paapi_ready": sum(
+                item.get("data_source") == "paapi"
+                and item.get("link_status") == "ready"
+                for item in metadata.get("amazon_items") or []
+            ),
         },
         [
             folder / "cover.png",

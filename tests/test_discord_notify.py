@@ -117,6 +117,23 @@ class DiscordNotifyTests(unittest.TestCase):
             self.assertFalse(discord_notify.notify_note_draft_ready({"title": "draft"}))
             post.assert_not_called()
 
+    def test_note_draft_reports_only_amazon_result_counts(self):
+        rendered = discord_notify._note_summary({
+            "title": "下書き",
+            "status": "draft",
+            "amazon_item_count": 3,
+            "amazon_manual_required": 2,
+            "amazon_paapi_ready": 1,
+            "affiliate_url":
+                "https://www.amazon.co.jp/dp/example?tag=secret-22",
+            "tracking_id": "secret-22",
+        })
+        self.assertIn("関連書籍候補:** 3件", rendered)
+        self.assertIn("Amazonリンク作成待ち:** 2件", rendered)
+        self.assertIn("公式API取得済み:** 1件", rendered)
+        self.assertNotIn("https://", rendered)
+        self.assertNotIn("secret-22", rendered)
+
     def test_run_result_contains_only_outcome(self):
         env = {
             "DISCORD_NOTIFICATIONS_ENABLED": "true",

@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "src"), str(ROOT)]
 
 import discord_notify  # noqa: E402
+import amazon_associate  # noqa: E402
 import free_note  # noqa: E402
 import metrics_db  # noqa: E402
 
@@ -47,6 +48,12 @@ class FreeNoteTests(unittest.TestCase):
             "DISCORD_NOTE_ENABLED": "false",
             "NOTE_DRAFT_DISCORD_ENABLED": "false",
             "FREE_NOTE_COVER_ENABLED": "false",
+            "AMAZON_ASSOCIATE_ENABLED": "true",
+            "AMAZON_ASSOCIATE_MODE": "manual",
+            "AMAZON_PAAPI_ENABLED": "false",
+            "AMAZON_RELATED_ITEMS_MAX": "3",
+            "AMAZON_REQUIRE_LINKS_BEFORE_APPROVAL": "false",
+            "AMAZON_REQUIRE_DISCLOSURE_BEFORE_APPROVAL": "false",
         }, clear=False)
         self.env_patch.start()
         self.db = self.base / "data" / "metrics.db"
@@ -90,28 +97,29 @@ class FreeNoteTests(unittest.TestCase):
         _, primary, _, _, _ = self.article()
         self.assertEqual(len(primary), 2)
 
-    def test_related_books_are_two_amazon_isbn_links(self):
+    def test_related_books_are_ranked_manual_candidates(self):
         selected = self.selection()
-        books = free_note.extract_related_books(selected)
-        self.assertEqual(len(books), 2)
+        books = amazon_associate.manual_candidates(selected)
+        self.assertGreaterEqual(len(books), 1)
+        self.assertLessEqual(len(books), 3)
         self.assertTrue(all(
-            row["amazon_url"].startswith(
-                "https://www.amazon.co.jp/s?i=stripbooks&k="
-            )
+            len(row["isbn"]) == 13
+            and row["relevance_score"] >= 7.0
+            and row["link_status"] == "manual_required"
             for row in books
         ))
+        self.assertTrue(all(not row.get("amazon_url") for row in books))
 
-    def test_article_has_exactly_two_primary_and_two_amazon_links(self):
+    def test_article_has_two_primary_links_and_manual_placeholders(self):
         selected, primary, secondary, _, article = self.article()
         article_urls = __import__("re").findall(
             r"https?://[^\s)>\]]+", article)
         primary_urls = {row["url"] for row in primary}
-        amazon_urls = {
-            url for url in article_urls if "www.amazon.co.jp/" in url
-        }
-        self.assertEqual(len(article_urls), 4)
-        self.assertEqual(set(article_urls) - amazon_urls, primary_urls)
-        self.assertEqual(len(amazon_urls), 2)
+        self.assertEqual(len(article_urls), 2)
+        self.assertEqual(set(article_urls), primary_urls)
+        self.assertGreaterEqual(article.count("AMAZON_LINK_PENDING:"), 1)
+        self.assertLessEqual(article.count("AMAZON_LINK_PENDING:"), 3)
+        self.assertIn("Amazonアソシエイト", article)
 
     def test_04_local_article_meets_minimum_length(self):
         *_, article = self.article()
@@ -162,13 +170,15 @@ class FreeNoteTests(unittest.TestCase):
         self.assertFalse(free_note.quality_check(
             article, title, primary, secondary)["passed"])
 
-    def test_missing_amazon_book_link_fails_quality(self):
+    def test_missing_amazon_placeholder_fails_quality(self):
         selected, primary, secondary, title, article = self.article()
-        books = free_note.extract_related_books(selected)
-        article = article.replace(books[0]["amazon_url"], "", 1)
+        books = amazon_associate.manual_candidates(selected)
+        article = article.replace(
+            f"AMAZON_LINK_PENDING:{books[0]['item_id']}", "", 1)
         checked = free_note.quality_check(
             article, title, primary, secondary, books)
-        self.assertIn("related_book_count_not_two", checked["reasons"])
+        self.assertIn(
+            "amazon_placeholder_count_mismatch", checked["reasons"])
 
     def test_12_schedule_has_two_slots(self):
         self.assertEqual(len(free_note.schedule_slots(
@@ -540,7 +550,10 @@ class FreeNoteTests(unittest.TestCase):
             "primary_topic_key", "included_topic_keys",
             "source_news_candidate_ids", "source_x_post_ids",
             "primary_sources", "secondary_sources",
-            "related_books",
+            "related_books", "amazon_associate_enabled",
+            "amazon_associate_mode", "amazon_configured_mode",
+            "amazon_fallback_reason", "amazon_disclosure_included",
+            "amazon_items",
             "discord_notification_status", "discord_message_id", "note_url",
             "published_at", "estimated_cost_usd",
             "cover_path", "cover_status", "cover_width", "cover_height",
@@ -552,8 +565,11 @@ class FreeNoteTests(unittest.TestCase):
         text = Path(result["path"], "sources.md").read_text(encoding="utf-8")
         for label in ("発行主体", "公開日", "URL", "記事中で使った事実", "確認日時"):
             self.assertIn(label, text)
-        self.assertIn("# 関連書籍（Amazon）", text)
-        self.assertEqual(text.count("- Amazon: https://www.amazon.co.jp/"), 2)
+        self.assertIn("# 関連商品候補", text)
+        self.assertGreaterEqual(
+            text.count("- リンク状態：manual_required"), 1)
+        self.assertLessEqual(
+            text.count("- リンク状態：manual_required"), 3)
 
     def test_77_review_file_has_required_sections(self):
         result = self.generate()
@@ -576,7 +592,8 @@ class FreeNoteTests(unittest.TestCase):
         from growth_tracking import CONVERSION_TYPES
         required = {
             "note_view", "note_like", "note_follow", "note_comment",
-            "note_purchase", "newsletter_signup",
+            "note_purchase", "newsletter_signup", "amazon_link_click",
+            "amazon_purchase", "amazon_commission",
         }
         self.assertTrue(required.issubset(CONVERSION_TYPES))
 

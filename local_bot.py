@@ -1782,6 +1782,50 @@ def cmd_note_generate_cover(content_id: str) -> int:
     return 0
 
 
+def cmd_amazon_link_set(content_id: str, url: str,
+                        item_id: str | None, isbn: str | None) -> int:
+    load_env(require=False)
+    ensure_dirs()
+    from amazon_associate import set_manual_link  # noqa: E402
+    result = set_manual_link(
+        content_id, url, item_id=item_id, isbn=isbn)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    print("Amazon purchase operations: 0")
+    print("Automatic note publish operations: 0")
+    return 0
+
+
+def cmd_amazon_links_status(content_id: str | None) -> int:
+    load_env(require=False)
+    ensure_dirs()
+    from amazon_associate import links_status  # noqa: E402
+    print(json.dumps(
+        links_status(content_id), ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_import_amazon_links(file_path: str) -> int:
+    load_env(require=False)
+    ensure_dirs()
+    from amazon_associate import import_links  # noqa: E402
+    result = import_links(Path(file_path).resolve())
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    print("Amazon purchase operations: 0")
+    print("Automatic note publish operations: 0")
+    return 0 if result.get("failed", 0) == 0 else 1
+
+
+def cmd_amazon_links_disable(content_id: str) -> int:
+    load_env(require=False)
+    ensure_dirs()
+    from amazon_associate import disable_for_note  # noqa: E402
+    result = disable_for_note(content_id)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    print("Amazon purchase operations: 0")
+    print("Automatic note publish operations: 0")
+    return 0
+
+
 def cmd_note_pipeline_status() -> int:
     load_env(require=False)
     ensure_dirs()
@@ -2076,6 +2120,26 @@ def main() -> int:
         help="保存済みnote下書きの1280x670見出し画像を生成",
     )
     p_note_cover.add_argument("--content-id", required=True)
+    p_amazon_link = sub.add_parser(
+        "amazon-link-set",
+        help="手動作成したAmazonアソシエイトリンクをnote下書きへ登録",
+    )
+    p_amazon_link.add_argument("--content-id", required=True)
+    target_group = p_amazon_link.add_mutually_exclusive_group(required=True)
+    target_group.add_argument("--item-id")
+    target_group.add_argument("--isbn")
+    p_amazon_link.add_argument("--url", required=True)
+    p_amazon_status = sub.add_parser(
+        "amazon-links-status", help="note下書きのAmazonリンク状態を表示")
+    p_amazon_status.add_argument("--content-id")
+    p_amazon_import = sub.add_parser(
+        "import-amazon-links", help="AmazonアソシエイトリンクCSVを一括登録")
+    p_amazon_import.add_argument("--file", required=True)
+    p_amazon_disable = sub.add_parser(
+        "amazon-links-disable",
+        help="指定noteから関連書籍欄とアソシエイト設定を削除",
+    )
+    p_amazon_disable.add_argument("--content-id", required=True)
     sub.add_parser(
         "note-pipeline-status", help="無料noteパイプラインの状態を表示")
     sub.add_parser(
@@ -2172,6 +2236,15 @@ def main() -> int:
         return cmd_note_discord_send(args.content_id, args.force)
     if args.command == "note-generate-cover":
         return cmd_note_generate_cover(args.content_id)
+    if args.command == "amazon-link-set":
+        return cmd_amazon_link_set(
+            args.content_id, args.url, args.item_id, args.isbn)
+    if args.command == "amazon-links-status":
+        return cmd_amazon_links_status(args.content_id)
+    if args.command == "import-amazon-links":
+        return cmd_import_amazon_links(args.file)
+    if args.command == "amazon-links-disable":
+        return cmd_amazon_links_disable(args.content_id)
     if args.command == "note-pipeline-status":
         return cmd_note_pipeline_status()
     if args.command == "free-note-due":

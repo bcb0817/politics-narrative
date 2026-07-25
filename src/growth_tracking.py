@@ -20,6 +20,7 @@ CONVERSION_TYPES = {
     "note_view", "note_like", "note_comment",
     "youtube_click", "youtube_view", "youtube_subscribe",
     "newsletter_click", "newsletter_signup", "paid_purchase",
+    "amazon_link_click", "amazon_purchase", "amazon_commission",
 }
 
 
@@ -100,7 +101,7 @@ def import_conversions(source: Path, path: Path | None = None) -> dict:
             event_type = str(row.get("event_type", "")).strip()
             canonical = "|".join(str(row.get(key, "")).strip() for key in (
                 "occurred_at", "source", "campaign", "content_id",
-                "event_type", "value"))
+                "event_type", "value", "item_id"))
             event_key = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
             if event_type not in CONVERSION_TYPES:
                 rejected += 1
@@ -118,6 +119,8 @@ def import_conversions(source: Path, path: Path | None = None) -> dict:
                 metadata_obj = json.loads(metadata) if metadata else {}
             except json.JSONDecodeError:
                 metadata_obj = {"raw": metadata}
+            if row.get("item_id"):
+                metadata_obj["item_id"] = str(row["item_id"]).strip()
             try:
                 with closing(connect(path)) as conn:
                     exists = conn.execute(

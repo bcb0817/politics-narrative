@@ -122,3 +122,12 @@ Start-ScheduledTask -TaskName "PoliticsNarrativeBot"
 ```text
 D:\SNS Bot\politics-narrative-backup-20260725-044215
 ```
+# Amazonアソシエイト付き無料note運用 📚
+
+無料noteのAmazon関連書籍は初期値`manual`で処理します。ドラフト生成後は
+`amazon-links-status`で待ち件数を確認し、正規に作成したリンクを
+`amazon-link-set`で登録してください。リンク未登録または開示文不足の原稿は
+承認ゲートで停止します。noteへの公開は引き続き手動です。
+
+詳細は[`docs/AMAZON_ASSOCIATE_NOTE_WORKFLOW.md`](docs/AMAZON_ASSOCIATE_NOTE_WORKFLOW.md)
+を参照してください。
