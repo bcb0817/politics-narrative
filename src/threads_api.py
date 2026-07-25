@@ -13,6 +13,8 @@ import os
 import re
 import secrets
 import sqlite3
+import time
+import uuid
 from contextlib import closing
 from datetime import datetime, timedelta
 from difflib import SequenceMatcher
@@ -41,6 +43,21 @@ POST_STATES = {
 INITIAL_SCOPES = (
     "threads_basic", "threads_content_publish", "threads_manage_insights",
 )
+KNOWN_SCOPES = (
+    "threads_basic", "threads_content_publish", "threads_manage_insights",
+    "threads_read_replies", "threads_manage_replies",
+    "threads_keyword_search", "threads_manage_mentions", "threads_delete",
+    "threads_location_tagging", "threads_profile_discovery",
+)
+SCOPE_PROFILES = {
+    "basic": INITIAL_SCOPES,
+    "full-analysis": (
+        "threads_basic", "threads_content_publish", "threads_manage_insights",
+        "threads_read_replies", "threads_manage_replies",
+        "threads_keyword_search", "threads_manage_mentions", "threads_delete",
+        "threads_location_tagging", "threads_profile_discovery",
+    ),
+}
 INTERNAL_TERMS = (
     "post_type", "hook_type", "decision_reason", "quality_score",
     "safety_score", "similarity_to_x", "prompt_version", "system_prompt",
@@ -54,6 +71,7 @@ ATTACK_TERMS = (
     "売国奴", "非国民", "消えろ", "死ね", "無能な人間", "犯罪者だ",
 )
 WINDOW_HOURS = {"1h": 1, "24h": 24, "72h": 72}
+_CIRCUIT = {"failures": 0, "opened_at": None}
 
 
 def _root() -> Path:
@@ -117,11 +135,12 @@ def settings() -> dict:
         if value.strip()
     )
     allowed_scopes = tuple(
-        scope for scope in scopes if scope in INITIAL_SCOPES)
+        scope for scope in scopes if scope in KNOWN_SCOPES)
     reply_control = os.environ.get(
         "THREADS_REPLY_CONTROL", "everyone").strip()
     if reply_control not in {
         "everyone", "accounts_you_follow", "mentioned_only",
+        "parent_post_author_only", "followers_only",
     }:
         reply_control = "everyone"
     platform_limit = min(
@@ -146,8 +165,16 @@ def settings() -> dict:
         "api_version": os.environ.get(
             "THREADS_API_VERSION", "v1.0").strip("/"),
         "timeout": max(1, _int("THREADS_API_TIMEOUT_SECONDS", 30)),
-        "max_retries": max(0, min(1, _int(
-            "THREADS_API_MAX_RETRIES", 1))),
+        "max_retries": max(0, min(5, _int(
+            "THREADS_API_MAX_RETRIES", 2))),
+        "retry_base_seconds": max(
+            0.0, _float("THREADS_API_RETRY_BASE_SECONDS", 2.0)),
+        "circuit_breaker_enabled": _bool(
+            "THREADS_API_CIRCUIT_BREAKER_ENABLED", "true"),
+        "circuit_breaker_failures": max(
+            1, _int("THREADS_API_CIRCUIT_BREAKER_FAILURES", 5)),
+        "circuit_breaker_cooldown_minutes": max(
+            1, _int("THREADS_API_CIRCUIT_BREAKER_COOLDOWN_MINUTES", 30)),
         "oauth_state_ttl_seconds": max(
             60, min(1800, _int("THREADS_OAUTH_STATE_TTL_SECONDS", 600))),
         "daily_min": max(0, _int("THREADS_DAILY_POST_MIN", 2)),
@@ -296,53 +323,193 @@ def _record_threads_call(endpoint: str, success: bool,
         })
 
 
+def _hash_payload(payload: Any) -> str:
+    serialized = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _error_class(status: int, payload: dict | None = None) -> str:
+    message = json.dumps(payload or {}, ensure_ascii=False).lower()
+    if status == 429:
+        return "rate_limited"
+    if status in {401} or any(
+        value in message for value in ("expired", "invalid oauth", "token")
+    ):
+        return "token_invalid"
+    if status in {403} or any(
+        value in message for value in ("permission", "scope", "not authorized")
+    ):
+        return "permission_denied"
+    if 400 <= status < 500:
+        return "client_error"
+    if status >= 500:
+        return "server_error"
+    return ""
+
+
 class ThreadsClient:
     def __init__(self, session=None, path: Path | None = None):
         self.session = session or requests.Session()
         self.path = path
 
+    def _record_call(self, *, request_id: str, method: str, endpoint: str,
+                     status_code: int, success: bool, duration_ms: int,
+                     retry_count: int, error_class: str,
+                     payload: dict | None = None) -> None:
+        _record_threads_call(
+            endpoint, success, error_class, self.path)
+        try:
+            from metrics_db import apply_threads_full_migrations
+            apply_threads_full_migrations(self.path)
+            now = _now().isoformat()
+            write("""INSERT INTO threads_api_calls
+              (request_id,called_at,method,endpoint,status_code,success,
+               duration_ms,retry_count,error_class,permission_error,
+               token_error,rate_limited,created_at,updated_at,source,
+               api_version,raw_response_hash)
+              VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                request_id, now, method.upper(), endpoint, status_code,
+                int(success), duration_ms, retry_count, error_class,
+                int(error_class == "permission_denied"),
+                int(error_class == "token_invalid"),
+                int(error_class == "rate_limited"), now, now,
+                "meta_official_api", settings()["api_version"],
+                _hash_payload(payload or {}),
+            ), self.path)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _circuit_open(cfg: dict) -> bool:
+        if not cfg["circuit_breaker_enabled"] or not _CIRCUIT["opened_at"]:
+            return False
+        opened = _CIRCUIT["opened_at"]
+        elapsed = (_now() - opened).total_seconds()
+        if elapsed >= cfg["circuit_breaker_cooldown_minutes"] * 60:
+            _CIRCUIT.update({"failures": 0, "opened_at": None})
+            return False
+        return True
+
     def _request(self, method: str, path: str, *, token: str = "",
-                 params: dict | None = None, data: dict | None = None) -> dict:
+                 params: dict | None = None, data: dict | None = None,
+                 json_body: dict | None = None) -> dict:
         cfg = settings()
         params = dict(params or {})
         data = dict(data or {})
+        headers = {
+            "Accept": "application/json",
+            "X-Client-Request-ID": str(uuid.uuid4()),
+        }
         if token:
-            if method.upper() == "GET":
-                params["access_token"] = token
-            else:
-                data["access_token"] = token
+            headers["Authorization"] = f"Bearer {token}"
         url = f"{cfg['base_url']}/{path.lstrip('/')}"
+        if self._circuit_open(cfg):
+            raise RuntimeError("threads_api_circuit_open")
         attempts = 1 + (
             cfg["max_retries"] if method.upper() == "GET" else 0)
+        request_id = headers["X-Client-Request-ID"]
         for attempt in range(attempts):
+            started = time.monotonic()
+            status = 0
+            payload: dict = {}
             try:
                 response = self.session.request(
                     method, url, params=params or None, data=data or None,
-                    timeout=cfg["timeout"],
+                    json=json_body, headers=headers, timeout=cfg["timeout"],
                 )
+                raw_status = getattr(response, "status_code", 200)
+                status = raw_status if isinstance(raw_status, int) else 200
+                try:
+                    candidate = response.json()
+                    payload = candidate if isinstance(candidate, dict) else {}
+                except (ValueError, TypeError):
+                    payload = {
+                        "_non_json_response": True,
+                        "_content_hash": hashlib.sha256(
+                            bytes(getattr(response, "content", b""))
+                        ).hexdigest(),
+                    }
                 response.raise_for_status()
-                payload = response.json()
-                if not isinstance(payload, dict):
+                if payload.get("_non_json_response"):
                     raise RuntimeError("threads_api_invalid_response")
-                _record_threads_call(path, True, path=self.path)
+                _CIRCUIT.update({"failures": 0, "opened_at": None})
+                self._record_call(
+                    request_id=request_id, method=method, endpoint=path,
+                    status_code=status, success=True,
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                    retry_count=attempt, error_class="", payload=payload)
                 return payload
             except Exception as exc:
+                response = getattr(exc, "response", None)
+                if response is not None:
+                    raw_status = getattr(response, "status_code", status)
+                    status = raw_status if isinstance(raw_status, int) else status
+                classification = _error_class(status, payload)
                 retryable = (
                     method.upper() == "GET"
                     and attempt + 1 < attempts
                     and (
                         isinstance(exc, (
                             requests.Timeout, requests.ConnectionError))
-                        or getattr(
-                            getattr(exc, "response", None),
-                            "status_code", 0) >= 500
+                        or status == 429 or status >= 500
                     )
                 )
-                _record_threads_call(
-                    path, False, type(exc).__name__, self.path)
+                error_name = classification or type(exc).__name__
+                self._record_call(
+                    request_id=request_id, method=method, endpoint=path,
+                    status_code=status, success=False,
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                    retry_count=attempt, error_class=error_name,
+                    payload=payload)
                 if not retryable:
+                    _CIRCUIT["failures"] += 1
+                    if (
+                        cfg["circuit_breaker_enabled"]
+                        and _CIRCUIT["failures"]
+                        >= cfg["circuit_breaker_failures"]
+                    ):
+                        _CIRCUIT["opened_at"] = _now()
                     raise
+                retry_after = 0.0
+                if response is not None:
+                    try:
+                        retry_after = float(
+                            response.headers.get("Retry-After", 0) or 0)
+                    except (TypeError, ValueError):
+                        retry_after = 0.0
+                delay = retry_after or (
+                    cfg["retry_base_seconds"] * (2 ** attempt))
+                if delay > 0:
+                    time.sleep(min(delay, 60.0))
         raise RuntimeError("threads_api_request_failed")
+
+    def paginate(self, path: str, *, token: str = "",
+                 params: dict | None = None, max_pages: int = 20) -> list[dict]:
+        """Follow official cursor paging while never trusting a next URL."""
+        output: list[dict] = []
+        current = dict(params or {})
+        seen: set[str] = set()
+        for _ in range(max(1, min(100, max_pages))):
+            payload = self._request("GET", path, token=token, params=current)
+            rows = payload.get("data") or []
+            if not isinstance(rows, list):
+                raise RuntimeError("threads_api_invalid_data_schema")
+            output.extend(row for row in rows if isinstance(row, dict))
+            after = str(
+                ((payload.get("paging") or {}).get("cursors") or {})
+                .get("after") or "")
+            if not after or after in seen:
+                break
+            seen.add(after)
+            current["after"] = after
+            current.pop("before", None)
+        return output
+
+    @staticmethod
+    def _resource(path: str) -> str:
+        version = settings()["api_version"]
+        return f"{version}/{path.lstrip('/')}" if version else path.lstrip("/")
 
     def exchange_code(self, code: str) -> dict:
         cfg = settings()
@@ -388,43 +555,188 @@ class ThreadsClient:
 
     def profile(self, token: str | None = None) -> dict:
         return self._request(
-            "GET", f"{settings()['api_version']}/me",
+            "GET", self._resource("me"),
             token=token or settings()["access_token"],
-            params={"fields": "id,username,name"},
+            params={"fields": (
+                "id,username,name,is_verified,threads_profile_picture_url,"
+                "threads_biography,recently_searched_keywords,"
+                "is_eligible_for_geo_gating"
+            )},
         )
 
-    def create_container(self, text: str) -> dict:
+    def create_container(self, text: str, **options) -> dict:
         cfg = settings()
         user = cfg["user_id"] or "me"
+        payload = {"media_type": "TEXT", "text": text}
+        payload.update({
+            key: value for key, value in options.items()
+            if value is not None
+        })
         return self._request(
-            "POST", f"{cfg['api_version']}/{user}/threads",
+            "POST", self._resource(f"{user}/threads"),
             token=cfg["access_token"],
-            data={
-                "media_type": "TEXT",
-                "text": text,
-            },
+            data=payload,
         )
 
     def publish_container(self, creation_id: str) -> dict:
         cfg = settings()
         user = cfg["user_id"] or "me"
         return self._request(
-            "POST", f"{cfg['api_version']}/{user}/threads_publish",
+            "POST", self._resource(f"{user}/threads_publish"),
             token=cfg["access_token"], data={"creation_id": creation_id})
 
     def container_status(self, creation_id: str) -> dict:
         cfg = settings()
         return self._request(
-            "GET", f"{cfg['api_version']}/{creation_id}",
+            "GET", self._resource(creation_id),
             token=cfg["access_token"],
             params={"fields": "id,status,error_message"})
 
     def insights(self, post_id: str) -> dict:
         cfg = settings()
         return self._request(
-            "GET", f"{cfg['api_version']}/{post_id}/insights",
+            "GET", self._resource(f"{post_id}/insights"),
             token=cfg["access_token"],
             params={"metric": "views,likes,replies,reposts,quotes,shares"})
+
+    def account_insights(self, *, metrics: str, breakdown: str = "") -> dict:
+        params = {"metric": metrics}
+        if breakdown:
+            params["breakdown"] = breakdown
+        return self._request(
+            "GET", self._resource("me/threads_insights"),
+            token=settings()["access_token"], params=params)
+
+    def publishing_limit(self) -> dict:
+        granted = set(settings()["scopes"])
+        fields = [
+            "quota_usage", "config", "reply_quota_usage", "reply_config",
+        ]
+        if "threads_delete" in granted:
+            fields.extend(["delete_quota_usage", "delete_config"])
+        if "threads_location_tagging" in granted:
+            fields.extend([
+                "location_search_quota_usage", "location_search_config"])
+        return self._request(
+            "GET", "me/threads_publishing_limit",
+            token=settings()["access_token"],
+            params={"fields": ",".join(fields)})
+
+    def debug_token(self) -> dict:
+        cfg = settings()
+        return self._request(
+            "GET", "debug_token", token=cfg["access_token"],
+            params={"input_token": cfg["access_token"]})
+
+    def own_posts(self, **params) -> list[dict]:
+        defaults = {
+            "fields": (
+                "id,media_product_type,media_type,media_url,gif_url,permalink,"
+                "owner,username,text,timestamp,shortcode,thumbnail_url,children,"
+                "is_quote_post,quoted_post,reposted_post,has_replies,alt_text,"
+                "link_attachment_url,poll_attachment,location_id,topic_tag,"
+                "is_verified,profile_picture_url"),
+            "limit": 50,
+        }
+        defaults.update({k: v for k, v in params.items() if v is not None})
+        return self.paginate(
+            self._resource("me/threads"), token=settings()["access_token"],
+            params=defaults)
+
+    def replies(self, post_id: str, **params) -> list[dict]:
+        defaults = {
+            "fields": (
+                "id,text,timestamp,media_type,media_url,gif_url,permalink,"
+                "username,is_reply,is_reply_owned_by_me,root_post,replied_to,"
+                "hide_status,reply_audience,reply_approval_status"),
+            "reverse": "false",
+        }
+        defaults.update({k: v for k, v in params.items() if v is not None})
+        return self.paginate(
+            self._resource(f"{post_id}/conversation"),
+            token=settings()["access_token"], params=defaults)
+
+    def own_replies(self, **params) -> list[dict]:
+        defaults = {"fields": (
+            "id,text,timestamp,media_type,permalink,username,is_reply,"
+            "is_reply_owned_by_me,root_post,replied_to,hide_status,"
+            "reply_audience,reply_approval_status"), "limit": 50}
+        defaults.update({k: v for k, v in params.items() if v is not None})
+        return self.paginate(
+            self._resource("me/replies"), token=settings()["access_token"],
+            params=defaults)
+
+    def mentions(self, **params) -> list[dict]:
+        defaults = {"fields": (
+            "id,media_type,permalink,username,text,timestamp,shortcode,"
+            "is_quote_post,has_replies,topic_tag,is_verified"), "limit": 50}
+        defaults.update({k: v for k, v in params.items() if v is not None})
+        return self.paginate(
+            self._resource("me/mentions"), token=settings()["access_token"],
+            params=defaults)
+
+    def keyword_search(self, query: str, *, search_type: str = "RECENT",
+                       search_mode: str = "KEYWORD", limit: int = 50,
+                       since: str = "", until: str = "") -> list[dict]:
+        params = {
+            "q": query, "search_type": search_type,
+            "search_mode": search_mode, "limit": limit,
+            "fields": (
+                "id,media_type,media_url,link_attachment_url,permalink,"
+                "username,text,timestamp,shortcode,is_quote_post,has_replies,"
+                "topic_tag,is_verified,"
+                "profile_picture_url"),
+        }
+        if since:
+            params["since"] = since
+        if until:
+            params["until"] = until
+        return self.paginate(
+            self._resource("keyword_search"),
+            token=settings()["access_token"], params=params)
+
+    def repost(self, post_id: str) -> dict:
+        return self._request(
+            "POST", self._resource(f"{post_id}/repost"),
+            token=settings()["access_token"])
+
+    def delete(self, post_id: str) -> dict:
+        return self._request(
+            "DELETE", self._resource(post_id),
+            token=settings()["access_token"])
+
+    def manage_reply(self, reply_id: str, hide: bool) -> dict:
+        return self._request(
+            "POST", self._resource(f"{reply_id}/manage_reply"),
+            token=settings()["access_token"],
+            data={"hide": str(bool(hide)).lower()})
+
+    def location(self, location_id: str) -> dict:
+        return self._request(
+            "GET", self._resource(location_id),
+            token=settings()["access_token"],
+            params={"fields": (
+                "id,address,city,country,name,latitude,longitude,postal_code"
+            )})
+
+    def public_profile(self, username: str) -> dict:
+        return self._request(
+            "GET", self._resource("profile_lookup"),
+            token=settings()["access_token"], params={"username": username})
+
+    def public_profile_posts(self, username: str,
+                             **params) -> list[dict]:
+        defaults = {
+            "username": username,
+            "fields": (
+                "id,media_type,permalink,username,text,timestamp,shortcode,"
+                "is_quote_post,has_replies,topic_tag,is_verified"),
+            "limit": 50,
+        }
+        defaults.update({k: v for k, v in params.items() if v is not None})
+        return self.paginate(
+            self._resource("profile_posts"),
+            token=settings()["access_token"], params=defaults)
 
 
 def create_oauth_state(path: Path | None = None,
@@ -472,8 +784,11 @@ def consume_oauth_state(state: str, path: Path | None = None,
         return False
 
 
-def authorization_url(path: Path | None = None) -> dict:
+def authorization_url(path: Path | None = None,
+                      scope_profile: str = "basic") -> dict:
     cfg = settings()
+    if scope_profile not in SCOPE_PROFILES:
+        raise ValueError("unsupported Threads OAuth scope profile")
     if not cfg["app_id"] or not cfg["redirect_uri"]:
         raise ValueError("THREADS_APP_ID and THREADS_REDIRECT_URI are required")
     redirect = urlsplit(cfg["redirect_uri"])
@@ -491,14 +806,15 @@ def authorization_url(path: Path | None = None) -> dict:
     query = urlencode({
         "client_id": cfg["app_id"],
         "redirect_uri": cfg["redirect_uri"],
-        "scope": ",".join(cfg["scopes"]),
+        "scope": ",".join(SCOPE_PROFILES[scope_profile]),
         "response_type": "code",
         "state": state,
     })
     return {
         "authorization_url": f"https://threads.net/oauth/authorize?{query}",
         "redirect_uri": cfg["redirect_uri"],
-        "requested_scopes": list(cfg["scopes"]),
+        "requested_scopes": list(SCOPE_PROFILES[scope_profile]),
+        "scope_profile": scope_profile,
         "state_created": True,
     }
 

@@ -210,6 +210,142 @@ CREATE INDEX IF NOT EXISTS idx_note_draft_status ON note_drafts(status, generate
 CREATE INDEX IF NOT EXISTS idx_note_generation_run ON note_generation_runs(run_at, status);
 """
 
+THREADS_FULL_SCHEMA = """
+CREATE TABLE IF NOT EXISTS threads_profiles (
+ id INTEGER PRIMARY KEY, threads_user_id TEXT UNIQUE, username TEXT, name TEXT,
+ is_verified INTEGER, profile_picture_url TEXT, biography TEXT,
+ recently_searched_keywords_json TEXT, is_eligible_for_geo_gating INTEGER,
+ synced_at TEXT, created_at TEXT, updated_at TEXT, source TEXT,
+ api_version TEXT, raw_response_hash TEXT);
+CREATE TABLE IF NOT EXISTS threads_post_children (
+ id INTEGER PRIMARY KEY, parent_post_id TEXT, child_post_id TEXT,
+ position INTEGER, media_type TEXT, media_url TEXT, alt_text TEXT,
+ created_at TEXT, updated_at TEXT, source TEXT, api_version TEXT,
+ raw_response_hash TEXT, UNIQUE(parent_post_id,child_post_id));
+CREATE TABLE IF NOT EXISTS threads_post_insights (
+ id INTEGER PRIMARY KEY, threads_post_id TEXT, measurement_window TEXT,
+ measured_at TEXT, views INTEGER, likes INTEGER, replies INTEGER,
+ reposts INTEGER, quotes INTEGER, shares INTEGER, engagement_rate REAL,
+ views_per_hour REAL, created_at TEXT, updated_at TEXT, source TEXT,
+ api_version TEXT, raw_response_hash TEXT,
+ UNIQUE(threads_post_id,measurement_window,measured_at));
+CREATE TABLE IF NOT EXISTS threads_account_insights (
+ id INTEGER PRIMARY KEY, threads_user_id TEXT, metric_name TEXT, period TEXT,
+ measured_at TEXT, value REAL, end_time TEXT, created_at TEXT, updated_at TEXT,
+ source TEXT, api_version TEXT, raw_response_hash TEXT,
+ UNIQUE(threads_user_id,metric_name,period,measured_at,end_time));
+CREATE TABLE IF NOT EXISTS threads_follower_demographics (
+ id INTEGER PRIMARY KEY, threads_user_id TEXT, breakdown TEXT, dimension_value TEXT,
+ measured_at TEXT, value REAL, created_at TEXT, updated_at TEXT, source TEXT,
+ api_version TEXT, raw_response_hash TEXT,
+ UNIQUE(threads_user_id,breakdown,dimension_value,measured_at));
+CREATE TABLE IF NOT EXISTS threads_replies (
+ id INTEGER PRIMARY KEY, reply_id TEXT UNIQUE, root_post_id TEXT,
+ parent_reply_id TEXT, username_hash TEXT, text TEXT, timestamp TEXT,
+ media_type TEXT, permalink TEXT, is_owned_by_me INTEGER, hide_status TEXT,
+ reply_audience TEXT, reply_approval_status TEXT, synced_at TEXT,
+ created_at TEXT, updated_at TEXT, source TEXT, api_version TEXT,
+ raw_response_hash TEXT);
+CREATE TABLE IF NOT EXISTS threads_mentions (
+ id INTEGER PRIMARY KEY, mention_id TEXT UNIQUE, username_hash TEXT, text TEXT,
+ timestamp TEXT, media_type TEXT, permalink TEXT, synced_at TEXT,
+ created_at TEXT, updated_at TEXT, source TEXT, api_version TEXT,
+ raw_response_hash TEXT);
+CREATE TABLE IF NOT EXISTS threads_search_queries (
+ id INTEGER PRIMARY KEY, query_hash TEXT, query_text TEXT, search_type TEXT,
+ search_mode TEXT, since_at TEXT, until_at TEXT, result_count INTEGER,
+ status TEXT, fetched_at TEXT, cache_expires_at TEXT, created_at TEXT,
+ updated_at TEXT, source TEXT, api_version TEXT, raw_response_hash TEXT);
+CREATE TABLE IF NOT EXISTS threads_search_results (
+ id INTEGER PRIMARY KEY, threads_post_id TEXT UNIQUE, username_hash TEXT,
+ text TEXT, timestamp TEXT, permalink TEXT, media_type TEXT, topic_tag TEXT,
+ is_verified INTEGER, has_replies INTEGER, is_quote_post INTEGER,
+ has_link INTEGER, media_url TEXT, first_seen_at TEXT, last_seen_at TEXT, created_at TEXT,
+ updated_at TEXT, source TEXT, api_version TEXT, raw_response_hash TEXT);
+CREATE TABLE IF NOT EXISTS threads_search_result_matches (
+ id INTEGER PRIMARY KEY, query_id INTEGER, result_id INTEGER, rank INTEGER,
+ created_at TEXT, updated_at TEXT, source TEXT, api_version TEXT,
+ raw_response_hash TEXT, UNIQUE(query_id,result_id));
+CREATE TABLE IF NOT EXISTS threads_trend_snapshots (
+ id INTEGER PRIMARY KEY, snapshot_at TEXT, lookback_hours INTEGER,
+ status TEXT, summary_json TEXT, created_at TEXT, updated_at TEXT,
+ source TEXT, api_version TEXT, raw_response_hash TEXT);
+CREATE TABLE IF NOT EXISTS threads_trend_entities (
+ id INTEGER PRIMARY KEY, snapshot_id INTEGER, entity_key TEXT, post_count INTEGER,
+ unique_authors INTEGER, velocity REAL, similarity_rate REAL,
+ cross_source_count INTEGER, trend_score REAL, coordinated_activity_signal TEXT,
+ trend_detected INTEGER, fact_status TEXT, official_source_count INTEGER,
+ news_source_count INTEGER, contradiction_found INTEGER,
+ eligible_for_post INTEGER, verification_reason TEXT,
+ created_at TEXT, updated_at TEXT, source TEXT, api_version TEXT,
+ raw_response_hash TEXT, UNIQUE(snapshot_id,entity_key));
+CREATE TABLE IF NOT EXISTS threads_reply_analyses (
+ id INTEGER PRIMARY KEY, reply_id TEXT UNIQUE, intent TEXT, stance TEXT,
+ sentiment TEXT, toxicity_score REAL, misunderstanding_score REAL,
+ spam_score REAL, confidence REAL, review_required INTEGER,
+ analysis_method TEXT, created_at TEXT, updated_at TEXT, source TEXT,
+ api_version TEXT, raw_response_hash TEXT);
+CREATE TABLE IF NOT EXISTS threads_action_drafts (
+ id INTEGER PRIMARY KEY, action_type TEXT, target_id TEXT, payload_json TEXT,
+ status TEXT, safety_json TEXT, approved_at TEXT, expires_at TEXT,
+ idempotency_key TEXT UNIQUE, created_at TEXT, updated_at TEXT,
+ source TEXT, api_version TEXT, raw_response_hash TEXT);
+CREATE TABLE IF NOT EXISTS threads_action_events (
+ id INTEGER PRIMARY KEY, draft_id INTEGER, action_type TEXT, target_id TEXT,
+ status TEXT, reason TEXT, result_id TEXT, ambiguous INTEGER DEFAULT 0,
+ event_at TEXT, created_at TEXT, updated_at TEXT, source TEXT,
+ api_version TEXT, raw_response_hash TEXT);
+CREATE TABLE IF NOT EXISTS threads_api_calls (
+ id INTEGER PRIMARY KEY, request_id TEXT, called_at TEXT, method TEXT,
+ endpoint TEXT, status_code INTEGER, success INTEGER, duration_ms INTEGER,
+ retry_count INTEGER, error_class TEXT, permission_error INTEGER,
+ token_error INTEGER, rate_limited INTEGER, created_at TEXT, updated_at TEXT,
+ source TEXT, api_version TEXT, raw_response_hash TEXT);
+CREATE TABLE IF NOT EXISTS threads_api_quotas (
+ id INTEGER PRIMARY KEY, measured_at TEXT, quota_type TEXT, usage INTEGER,
+ quota_total INTEGER, quota_duration INTEGER, utilization REAL,
+ reset_at TEXT, warning_level TEXT, created_at TEXT, updated_at TEXT,
+ source TEXT, api_version TEXT, raw_response_hash TEXT,
+ UNIQUE(measured_at,quota_type));
+CREATE TABLE IF NOT EXISTS threads_containers (
+ id INTEGER PRIMARY KEY, container_id TEXT UNIQUE, media_type TEXT,
+ status TEXT, error_message TEXT, payload_hash TEXT, result_post_id TEXT,
+ last_checked_at TEXT, created_at TEXT, updated_at TEXT, source TEXT,
+ api_version TEXT, raw_response_hash TEXT);
+CREATE TABLE IF NOT EXISTS threads_locations (
+ id INTEGER PRIMARY KEY, location_id TEXT UNIQUE, name TEXT, address TEXT,
+ city TEXT, country TEXT, latitude REAL, longitude REAL, postal_code TEXT,
+ fetched_at TEXT, created_at TEXT, updated_at TEXT, source TEXT,
+ api_version TEXT, raw_response_hash TEXT);
+CREATE TABLE IF NOT EXISTS threads_poll_snapshots (
+ id INTEGER PRIMARY KEY, threads_post_id TEXT, measured_at TEXT,
+ options_json TEXT, expiration_timestamp TEXT, created_at TEXT,
+ updated_at TEXT, source TEXT, api_version TEXT, raw_response_hash TEXT,
+ UNIQUE(threads_post_id,measured_at));
+CREATE TABLE IF NOT EXISTS threads_sync_cursors (
+ id INTEGER PRIMARY KEY, sync_type TEXT UNIQUE, after_cursor TEXT,
+ last_item_timestamp TEXT, last_success_at TEXT, last_error_at TEXT,
+ error_class TEXT, created_at TEXT, updated_at TEXT, source TEXT,
+ api_version TEXT, raw_response_hash TEXT);
+CREATE TABLE IF NOT EXISTS threads_daily_reports (
+ id INTEGER PRIMARY KEY, report_date TEXT UNIQUE, generated_at TEXT,
+ report_json TEXT, discord_status TEXT, created_at TEXT, updated_at TEXT,
+ source TEXT, api_version TEXT, raw_response_hash TEXT);
+CREATE TABLE IF NOT EXISTS threads_weekly_reports (
+ id INTEGER PRIMARY KEY, week_start TEXT, week_end TEXT, generated_at TEXT,
+ report_json TEXT, discord_status TEXT, created_at TEXT, updated_at TEXT,
+ source TEXT, api_version TEXT, raw_response_hash TEXT,
+ UNIQUE(week_start,week_end));
+CREATE INDEX IF NOT EXISTS idx_threads_api_calls_called
+ ON threads_api_calls(called_at,endpoint);
+CREATE INDEX IF NOT EXISTS idx_threads_reply_root
+ ON threads_replies(root_post_id,timestamp);
+CREATE INDEX IF NOT EXISTS idx_threads_search_seen
+ ON threads_search_results(first_seen_at,last_seen_at);
+CREATE INDEX IF NOT EXISTS idx_threads_action_status
+ ON threads_action_drafts(action_type,status,created_at);
+"""
+
 
 def db_path(state_dir: Path | None = None) -> Path:
     if state_dir is None:
@@ -246,6 +382,22 @@ def init_db(path: Path | None = None) -> bool:
         return True
     except sqlite3.Error as exc:
         print(f"SQLite unavailable; continuing with JSON ({type(exc).__name__})")
+        return False
+
+
+def apply_threads_full_migrations(path: Path | None = None) -> bool:
+    """Create the additive Threads analytics schema without replacing data."""
+    if not init_db(path):
+        return False
+    try:
+        with closing(connect(path)) as conn:
+            conn.executescript(THREADS_FULL_SCHEMA)
+            conn.commit()
+        return True
+    except sqlite3.Error as exc:
+        print(
+            "Threads SQLite migration skipped; continuing "
+            f"({type(exc).__name__})")
         return False
 
 
@@ -321,9 +473,12 @@ def insert_generated(news_id: int | None, post: dict, path: Path | None = None) 
     return generated_id
 
 
-def insert_published(generated_id: int | None, row: dict, path: Path | None = None) -> int | None:
+def insert_published(generated_id: int | None, row: dict,
+                     path: Path | None = None, *,
+                     apply_migrations: bool = True) -> int | None:
     discovered = list(dict.fromkeys(row.get("discovered_via") or []))
-    apply_additive_migrations(path)
+    if apply_migrations:
+        apply_additive_migrations(path)
     return write("""INSERT OR IGNORE INTO published_posts
       (generated_post_id,tweet_id,text,posted_at,topic_key,post_type,hook_type,critique_axis,
        model,prompt_version,is_breaking,discovered_via_json,xai_topic_match,xai_attention_score,
@@ -355,7 +510,7 @@ def upsert_metric(row: dict, path: Path | None = None) -> int | None:
 
 
 def table_counts(path: Path | None = None) -> dict:
-    init_db(path)
+    apply_threads_full_migrations(path)
     out = {}
     try:
         with closing(connect(path)) as conn:
@@ -372,7 +527,20 @@ def table_counts(path: Path | None = None) -> dict:
                          "threads_generation_runs", "threads_posts",
                          "threads_metrics", "threads_token_events",
                          "threads_oauth_states",
-                         "threads_deletion_receipts"):
+                         "threads_deletion_receipts",
+                         "threads_profiles", "threads_post_children",
+                         "threads_post_insights", "threads_account_insights",
+                         "threads_follower_demographics", "threads_replies",
+                         "threads_mentions", "threads_search_queries",
+                         "threads_search_results",
+                         "threads_search_result_matches",
+                         "threads_trend_snapshots", "threads_trend_entities",
+                         "threads_reply_analyses", "threads_action_drafts",
+                         "threads_action_events", "threads_api_calls",
+                         "threads_api_quotas", "threads_containers",
+                         "threads_locations", "threads_poll_snapshots",
+                         "threads_sync_cursors", "threads_daily_reports",
+                         "threads_weekly_reports"):
                 out[name] = conn.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0]
     except sqlite3.Error:
         pass
@@ -602,11 +770,22 @@ def migrate_json_state(state_dir: Path, path: Path | None = None) -> dict:
         history = json.loads((state_dir / "posted_urls.json").read_text(encoding="utf-8"))
     except Exception:
         history = []
+    try:
+        with closing(connect(path)) as conn:
+            published_before = int(conn.execute(
+                "SELECT COUNT(*) FROM published_posts").fetchone()[0])
+    except sqlite3.Error:
+        published_before = 0
     for row in history if isinstance(history, list) else []:
-        before = table_counts(path).get("published_posts", 0)
-        insert_published(None, row, path)
-        after = table_counts(path).get("published_posts", 0)
-        migrated["published_posts"] += max(0, after - before)
+        insert_published(None, row, path, apply_migrations=False)
+    try:
+        with closing(connect(path)) as conn:
+            published_after = int(conn.execute(
+                "SELECT COUNT(*) FROM published_posts").fetchone()[0])
+        migrated["published_posts"] = max(
+            0, published_after - published_before)
+    except sqlite3.Error:
+        pass
     version = os.environ.get("PROMPT_VERSION", "x-growth-quality-v2")
     value = write("""INSERT OR IGNORE INTO prompt_versions
       (version,created_at,system_prompt_hash,description,is_active) VALUES (?,?,?,?,1)""",

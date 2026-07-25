@@ -2012,7 +2012,8 @@ def _threads_output(action: str, **kwargs) -> int:
     import threads_api
 
     actions = {
-        "auth_url": lambda: threads_api.authorization_url(),
+        "auth_url": lambda: threads_api.authorization_url(
+            scope_profile=kwargs.get("scope_profile", "basic")),
         "exchange_code": lambda: threads_api.exchange_code(kwargs["code"]),
         "token_status": lambda: threads_api.token_status(),
         "refresh_token": lambda: threads_api.refresh_token(
@@ -2034,6 +2035,100 @@ def _threads_output(action: str, **kwargs) -> int:
     print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
     if isinstance(result, dict) and result.get("reason") in {
         "threads_api_failed", "refresh_failed",
+    }:
+        return 1
+    return 0
+
+
+def _threads_full_output(action: str, **kwargs) -> int:
+    """Run read-first Threads analytics or an explicitly approved action."""
+    load_env()
+    ensure_dirs()
+    import threads_full_api as api
+
+    actions = {
+        "permissions": lambda: api.permissions(probe=True),
+        "profile_sync": lambda: api.profile_sync(
+            dry_run=kwargs.get("dry_run", False)),
+        "sync_posts": lambda: api.sync_posts(
+            dry_run=kwargs.get("dry_run", False),
+            since=kwargs.get("since", ""), until=kwargs.get("until", "")),
+        "sync_replies": lambda: api.sync_replies(
+            dry_run=kwargs.get("dry_run", False)),
+        "sync_mentions": lambda: api.sync_mentions(
+            dry_run=kwargs.get("dry_run", False)),
+        "post_insights": lambda: api.collect_post_insights(
+            dry_run=kwargs.get("dry_run", False)),
+        "account_insights": lambda: api.collect_account_insights(
+            dry_run=kwargs.get("dry_run", False)),
+        "search": lambda: api.search(
+            kwargs["query"], search_type=kwargs.get("search_type", ""),
+            search_mode=kwargs.get("search_mode", "KEYWORD"),
+            since=kwargs.get("since", ""), until=kwargs.get("until", ""),
+            hours=kwargs.get("hours", 0),
+            dry_run=kwargs.get("dry_run", False)),
+        "trends": lambda: api.trends(
+            hours=kwargs.get("hours", 24),
+            dry_run=kwargs.get("dry_run", False)),
+        "quota": lambda: api.quota_status(
+            dry_run=kwargs.get("dry_run", False)),
+        "container": lambda: api.container_status(kwargs["container_id"]),
+        "daily_report": lambda: api.daily_report(
+            dry_run=kwargs.get("dry_run", False)),
+        "weekly_report": lambda: api.weekly_report(
+            dry_run=kwargs.get("dry_run", False)),
+        "comparison": lambda: api.x_comparison(kwargs.get("days", 30)),
+        "reply_draft": lambda: api.reply_draft(
+            kwargs["target_id"], kwargs.get("text", "")),
+        "reply_publish": lambda: api.apply_action(
+            kwargs["draft_id"], confirm=kwargs.get("confirm", False)),
+        "quote_draft": lambda: api.quote_draft(
+            kwargs["target_id"], kwargs.get("text", "")),
+        "quote_publish": lambda: api.apply_action(
+            kwargs["draft_id"], confirm=kwargs.get("confirm", False)),
+        "moderation_draft": lambda: api.moderation_draft(
+            kwargs["target_id"], kwargs["moderation_action"]),
+        "moderation_apply": lambda: api.apply_action(
+            kwargs["draft_id"], confirm=kwargs.get("confirm", False)),
+        "retention": lambda: api.data_retention_run(),
+        "user_delete": lambda: api.user_data_delete(
+            kwargs["user_id"], confirm=kwargs.get("confirm", False)),
+        "full_sync": lambda: api.full_sync(
+            dry_run=kwargs.get("dry_run", False)),
+        "location": lambda: api.location_get(kwargs["location_id"]),
+        "profile_discovery": lambda: api.profile_discovery(
+            kwargs["username"], dry_run=kwargs.get("dry_run", False)),
+    }
+    if action == "direct_action":
+        draft = api.direct_action_draft(
+            kwargs["action_type"], kwargs["target_id"],
+            reason=kwargs.get("reason", ""))
+        if not kwargs.get("confirm") or draft.get("status") != "draft":
+            result = {
+                **draft,
+                "reason": (
+                    draft.get("reason") or "confirm_required"),
+                "external_writes": 0,
+            }
+        else:
+            result = api.apply_action(
+                int(draft["draft_id"]), confirm=True)
+    elif action in {"format_preview", "format_validate"}:
+        spec_path = Path(kwargs["spec_file"]).resolve()
+        if ROOT_DIR not in spec_path.parents:
+            raise ValueError("Threads format spec must be inside repository")
+        spec = json.loads(spec_path.read_text(encoding="utf-8"))
+        result = (
+            api.format_preview(spec) if action == "format_preview"
+            else api.validate_format(spec))
+    elif action == "format_publish":
+        result = api.apply_action(
+            kwargs["draft_id"], confirm=kwargs.get("confirm", False))
+    else:
+        result = actions[action]()
+    print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    if isinstance(result, dict) and result.get("status") in {
+        "failed", "rejected", "ambiguous",
     }:
         return 1
     return 0
@@ -2181,7 +2276,11 @@ def main() -> int:
     sub.add_parser(
         "free-note-due", help="期限到来済みの無料note生成枠を処理")
 
-    sub.add_parser("threads-auth-url", help="Meta公式OAuth認可URLを表示")
+    p_threads_auth = sub.add_parser(
+        "threads-auth-url", help="Meta公式OAuth認可URLを表示")
+    p_threads_auth.add_argument(
+        "--scope-profile", choices=["basic", "full-analysis"],
+        default="basic")
     p_threads_exchange = sub.add_parser(
         "threads-exchange-code", help="OAuthコードを長期トークンへ交換")
     p_threads_exchange.add_argument("--code", required=True)
@@ -2208,6 +2307,105 @@ def main() -> int:
         "threads-endpoints", help="Meta管理画面へ登録する公開URLを表示")
     sub.add_parser(
         "threads-web", help="Threads OAuth callbackサーバーを起動")
+    sub.add_parser(
+        "threads-permissions", help="現在権限と不足権限を安全に表示")
+    for command, help_text in (
+        ("threads-profile-sync", "自分のThreadsプロフィールを同期"),
+        ("threads-sync-posts", "自分のThreads投稿を増分同期"),
+        ("threads-sync-replies", "返信ツリーと自分の返信を同期"),
+        ("threads-sync-mentions", "自分へのメンションを同期"),
+        ("threads-collect-post-insights", "投稿別Insightsを収集"),
+        ("threads-collect-account-insights", "アカウントInsightsを収集"),
+        ("threads-trends", "収集済み標本内の相対トレンドを集計"),
+        ("threads-daily-report", "Threads日次レポートをローカル生成"),
+        ("threads-weekly-report", "Threads週次レポートをローカル生成"),
+        ("threads-full-sync", "取得・分析のみのThreads一括同期"),
+    ):
+        item = sub.add_parser(command, help=help_text)
+        item.add_argument("--dry-run", action="store_true")
+        if command == "threads-sync-posts":
+            item.add_argument("--since", default="")
+            item.add_argument("--until", default="")
+        if command == "threads-trends":
+            item.add_argument("--hours", type=int, default=24)
+    p_threads_search = sub.add_parser(
+        "threads-search", help="公式APIでキーワードまたはトピックタグ検索")
+    p_threads_search.add_argument("--query", required=True)
+    p_threads_search.add_argument(
+        "--search-type", choices=["TOP", "RECENT"], default="RECENT")
+    p_threads_search.add_argument(
+        "--search-mode", choices=["KEYWORD", "TAG"], default="KEYWORD")
+    p_threads_search.add_argument("--since", default="")
+    p_threads_search.add_argument("--until", default="")
+    p_threads_search.add_argument("--hours", type=int, default=0)
+    p_threads_search.add_argument("--dry-run", action="store_true")
+    p_threads_quota = sub.add_parser(
+        "threads-quota-status", help="Threads公式公開枠を取得")
+    p_threads_quota.add_argument("--dry-run", action="store_true")
+    p_threads_container = sub.add_parser(
+        "threads-container-status", help="投稿コンテナ状態を取得")
+    p_threads_container.add_argument("--container-id", required=True)
+    p_threads_compare = sub.add_parser(
+        "threads-x-comparison", help="XとThreadsの同一コンテンツ比較")
+    p_threads_compare.add_argument("--days", type=int, default=30)
+    p_reply_draft = sub.add_parser(
+        "threads-reply-draft", help="人間承認用の返信案を保存")
+    p_reply_draft.add_argument("--reply-to-id", required=True)
+    p_reply_draft.add_argument("--text", default="")
+    p_reply_publish = sub.add_parser(
+        "threads-reply-publish", help="承認済み返信案を明示投稿")
+    p_reply_publish.add_argument("--draft-id", type=int, required=True)
+    p_reply_publish.add_argument("--confirm", action="store_true")
+    p_quote_draft = sub.add_parser(
+        "threads-quote-draft", help="人間承認用の引用投稿案を保存")
+    p_quote_draft.add_argument("--post-id", required=True)
+    p_quote_draft.add_argument("--text", default="")
+    p_quote_publish = sub.add_parser(
+        "threads-quote-publish", help="承認済み引用投稿案を明示投稿")
+    p_quote_publish.add_argument("--draft-id", type=int, required=True)
+    p_quote_publish.add_argument("--confirm", action="store_true")
+    p_repost = sub.add_parser(
+        "threads-repost", help="人間確認後に公式APIでリポスト")
+    p_repost.add_argument("--post-id", required=True)
+    p_repost.add_argument("--confirm", action="store_true")
+    p_delete = sub.add_parser(
+        "threads-delete", help="人間確認後に自分の投稿を削除")
+    p_delete.add_argument("--post-id", required=True)
+    p_delete.add_argument("--reason", required=True)
+    p_delete.add_argument("--confirm", action="store_true")
+    p_moderation_draft = sub.add_parser(
+        "threads-moderation-draft", help="返信モデレーション案を保存")
+    p_moderation_draft.add_argument("--reply-id", required=True)
+    p_moderation_draft.add_argument(
+        "--action", choices=["hide", "unhide"], required=True)
+    p_moderation_apply = sub.add_parser(
+        "threads-moderation-apply", help="人間確認後に返信管理を適用")
+    p_moderation_apply.add_argument("--draft-id", type=int, required=True)
+    p_moderation_apply.add_argument("--confirm", action="store_true")
+    sub.add_parser(
+        "threads-data-retention-run", help="Threads保存期限を適用")
+    p_user_delete = sub.add_parser(
+        "threads-user-data-delete", help="指定連携ユーザーのデータを削除")
+    p_user_delete.add_argument("--user-id", required=True)
+    p_user_delete.add_argument("--confirm", action="store_true")
+    p_format_preview = sub.add_parser(
+        "threads-format-preview", help="投稿形式JSONを検証して承認案を保存")
+    p_format_preview.add_argument("--spec-file", required=True)
+    p_format_validate = sub.add_parser(
+        "threads-format-validate", help="投稿形式JSONを検証（保存なし）")
+    p_format_validate.add_argument("--spec-file", required=True)
+    p_format_publish = sub.add_parser(
+        "threads-format-publish", help="承認済み形式投稿案を明示投稿")
+    p_format_publish.add_argument("--draft-id", type=int, required=True)
+    p_format_publish.add_argument("--confirm", action="store_true")
+    p_location = sub.add_parser(
+        "threads-location-get", help="公式APIで位置情報IDを取得")
+    p_location.add_argument("--location-id", required=True)
+    p_profile_discovery = sub.add_parser(
+        "threads-profile-discovery",
+        help="公式APIで完全一致の公開プロフィールを確認")
+    p_profile_discovery.add_argument("--username", required=True)
+    p_profile_discovery.add_argument("--dry-run", action="store_true")
 
     args = parser.parse_args()
 
@@ -2314,7 +2512,8 @@ def main() -> int:
     if args.command == "free-note-due":
         return cmd_free_note_due()
     if args.command == "threads-auth-url":
-        return _threads_output("auth_url")
+        return _threads_output(
+            "auth_url", scope_profile=args.scope_profile)
     if args.command == "threads-exchange-code":
         return _threads_output("exchange_code", code=args.code)
     if args.command == "threads-token-status":
@@ -2340,6 +2539,102 @@ def main() -> int:
         return _threads_output("run")
     if args.command == "threads-endpoints":
         return _threads_output("endpoints")
+    if args.command == "threads-permissions":
+        return _threads_full_output("permissions")
+    if args.command == "threads-profile-sync":
+        return _threads_full_output(
+            "profile_sync", dry_run=args.dry_run)
+    if args.command == "threads-sync-posts":
+        return _threads_full_output(
+            "sync_posts", dry_run=args.dry_run,
+            since=args.since, until=args.until)
+    if args.command == "threads-sync-replies":
+        return _threads_full_output(
+            "sync_replies", dry_run=args.dry_run)
+    if args.command == "threads-sync-mentions":
+        return _threads_full_output(
+            "sync_mentions", dry_run=args.dry_run)
+    if args.command == "threads-collect-post-insights":
+        return _threads_full_output(
+            "post_insights", dry_run=args.dry_run)
+    if args.command == "threads-collect-account-insights":
+        return _threads_full_output(
+            "account_insights", dry_run=args.dry_run)
+    if args.command == "threads-search":
+        return _threads_full_output(
+            "search", query=args.query, search_type=args.search_type,
+            search_mode=args.search_mode, since=args.since, until=args.until,
+            hours=args.hours, dry_run=args.dry_run)
+    if args.command == "threads-trends":
+        return _threads_full_output(
+            "trends", hours=args.hours, dry_run=args.dry_run)
+    if args.command == "threads-quota-status":
+        return _threads_full_output(
+            "quota", dry_run=args.dry_run)
+    if args.command == "threads-container-status":
+        return _threads_full_output(
+            "container", container_id=args.container_id)
+    if args.command == "threads-daily-report":
+        return _threads_full_output(
+            "daily_report", dry_run=args.dry_run)
+    if args.command == "threads-weekly-report":
+        return _threads_full_output(
+            "weekly_report", dry_run=args.dry_run)
+    if args.command == "threads-x-comparison":
+        return _threads_full_output("comparison", days=args.days)
+    if args.command == "threads-reply-draft":
+        return _threads_full_output(
+            "reply_draft", target_id=args.reply_to_id, text=args.text)
+    if args.command == "threads-reply-publish":
+        return _threads_full_output(
+            "reply_publish", draft_id=args.draft_id, confirm=args.confirm)
+    if args.command == "threads-quote-draft":
+        return _threads_full_output(
+            "quote_draft", target_id=args.post_id, text=args.text)
+    if args.command == "threads-quote-publish":
+        return _threads_full_output(
+            "quote_publish", draft_id=args.draft_id, confirm=args.confirm)
+    if args.command == "threads-repost":
+        return _threads_full_output(
+            "direct_action", action_type="repost",
+            target_id=args.post_id, confirm=args.confirm)
+    if args.command == "threads-delete":
+        return _threads_full_output(
+            "direct_action", action_type="delete",
+            target_id=args.post_id, reason=args.reason, confirm=args.confirm)
+    if args.command == "threads-moderation-draft":
+        return _threads_full_output(
+            "moderation_draft", target_id=args.reply_id,
+            moderation_action=args.action)
+    if args.command == "threads-moderation-apply":
+        return _threads_full_output(
+            "moderation_apply", draft_id=args.draft_id,
+            confirm=args.confirm)
+    if args.command == "threads-data-retention-run":
+        return _threads_full_output("retention")
+    if args.command == "threads-user-data-delete":
+        return _threads_full_output(
+            "user_delete", user_id=args.user_id, confirm=args.confirm)
+    if args.command == "threads-full-sync":
+        return _threads_full_output(
+            "full_sync", dry_run=args.dry_run)
+    if args.command == "threads-format-preview":
+        return _threads_full_output(
+            "format_preview", spec_file=args.spec_file)
+    if args.command == "threads-format-validate":
+        return _threads_full_output(
+            "format_validate", spec_file=args.spec_file)
+    if args.command == "threads-format-publish":
+        return _threads_full_output(
+            "format_publish", draft_id=args.draft_id,
+            confirm=args.confirm)
+    if args.command == "threads-location-get":
+        return _threads_full_output(
+            "location", location_id=args.location_id)
+    if args.command == "threads-profile-discovery":
+        return _threads_full_output(
+            "profile_discovery", username=args.username,
+            dry_run=args.dry_run)
     if args.command == "threads-web":
         load_env()
         ensure_dirs()

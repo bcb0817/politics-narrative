@@ -114,12 +114,13 @@ class ThreadsApiTests(unittest.TestCase):
         with patch.dict(os.environ, {"THREADS_PLATFORM_LIMIT_CHARS": "999"}):
             self.assertEqual(threads_api.settings()["platform_limit"], 500)
 
-    def test_05_only_initial_scopes_are_accepted(self):
+    def test_05_only_official_known_scopes_are_accepted(self):
         with patch.dict(os.environ, {
             "THREADS_OAUTH_SCOPES":
                 "threads_basic,threads_manage_replies,threads_content_publish"}):
             self.assertEqual(threads_api.settings()["scopes"], (
-                "threads_basic", "threads_content_publish"))
+                "threads_basic", "threads_manage_replies",
+                "threads_content_publish"))
 
     def test_06_auto_reply_is_off(self):
         with patch.dict(os.environ, {"THREADS_AUTO_REPLY_ENABLED": "true"}):
