@@ -62,3 +62,5 @@ XとThreadsは指標定義が異なるため単純な勝者判定は行わず、
 - callback停止: 公開トンネルを停止後、`run_threads_oauth_server.ps1`のプロセスを停止します。
 - callback自動起動登録: `.\production\register_threads_oauth_task.ps1`
 - callbackタスク確認: `.\production\threads_oauth_status.ps1`
+- 自動投稿開始: `.\production\enable_threads_automation.ps1`
+- 自動投稿停止: `.\production\threads_stop.ps1`

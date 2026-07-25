@@ -115,3 +115,14 @@ Phase Bへの移行は、OAuth、ドラフト品質、重複防止、予算、In
 .\production\threads_stop.ps1
 .\production\threads_status.ps1
 ```
+
+本番の自動投稿開始は、OAuthトークンとプロフィールAPIを検証してから
+Windowsタスクを登録する次のスクリプトを使用します。
+
+```powershell
+.\production\enable_threads_automation.ps1
+```
+
+投稿時刻は08:30、13:00、20:30 JST、通常目標は1日2件、絶対上限は
+1日3件です。候補不足、品質不足、重複、投稿間隔、同一トピックの
+クールダウンに該当する場合は投稿しません。

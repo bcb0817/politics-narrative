@@ -1,3 +1,6 @@
+$Root = Split-Path -Parent $PSScriptRoot
+$Python = Join-Path $Root ".venv\Scripts\python.exe"
+$Bot = Join-Path $Root "local_bot.py"
 $Names = @(
     "PoliticsNarrativeThreads",
     "PoliticsNarrativeThreadsMetrics",
@@ -17,4 +20,8 @@ foreach ($Name in $Names) {
         NextRunTime = $Info.NextRunTime
         LastResult = $Info.LastTaskResult
     }
+}
+
+if (Test-Path -LiteralPath $Python) {
+    & $Python $Bot threads-status
 }
