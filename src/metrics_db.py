@@ -147,6 +147,29 @@ CREATE TABLE IF NOT EXISTS amazon_link_import_quarantine (
  id INTEGER PRIMARY KEY, imported_at TEXT, source_file TEXT,
  row_number INTEGER, row_json TEXT, rejection_reason TEXT,
  event_key TEXT UNIQUE);
+CREATE TABLE IF NOT EXISTS threads_generation_runs (
+ id INTEGER PRIMARY KEY, source_content_id TEXT, source_x_post_id TEXT,
+ topic_key TEXT, threads_post_type TEXT, text TEXT, model TEXT,
+ prompt_version TEXT, similarity_to_x REAL, quality_score REAL,
+ safety_score REAL, decision TEXT, decision_reason TEXT,
+ input_tokens INTEGER, output_tokens INTEGER, estimated_cost_usd REAL,
+ question_included INTEGER DEFAULT 0, emoji_count INTEGER DEFAULT 0,
+ created_at TEXT);
+CREATE TABLE IF NOT EXISTS threads_posts (
+ id INTEGER PRIMARY KEY, client_post_key TEXT UNIQUE,
+ generation_run_id INTEGER, creation_id TEXT, threads_post_id TEXT UNIQUE,
+ threads_user_id TEXT, topic_key TEXT, text TEXT, status TEXT,
+ scheduled_at TEXT, container_created_at TEXT, published_at TEXT,
+ reply_control TEXT, source_content_id TEXT, source_x_post_id TEXT,
+ error_type TEXT, created_at TEXT, updated_at TEXT);
+CREATE TABLE IF NOT EXISTS threads_metrics (
+ id INTEGER PRIMARY KEY, threads_post_id TEXT, measurement_window TEXT,
+ measured_at TEXT, views INTEGER, likes INTEGER, replies INTEGER,
+ reposts INTEGER, quotes INTEGER, shares INTEGER, engagement_rate REAL,
+ views_per_hour REAL, UNIQUE(threads_post_id,measurement_window));
+CREATE TABLE IF NOT EXISTS threads_token_events (
+ id INTEGER PRIMARY KEY, event_at TEXT, event_type TEXT, expires_at TEXT,
+ success INTEGER, error_type TEXT, metadata_json TEXT);
 CREATE TABLE IF NOT EXISTS human_reviews (
  id INTEGER PRIMARY KEY, content_type TEXT, content_id TEXT, reviewed_at TEXT,
  scores_json TEXT, should_post INTEGER, notes TEXT, reviewer TEXT,
@@ -169,6 +192,10 @@ CREATE INDEX IF NOT EXISTS idx_follower_captured ON follower_snapshots(captured_
 CREATE INDEX IF NOT EXISTS idx_conversion_occurred ON conversion_events(occurred_at, event_type);
 CREATE INDEX IF NOT EXISTS idx_amazon_items_content ON amazon_associate_items(content_id,link_status);
 CREATE INDEX IF NOT EXISTS idx_amazon_events_content ON amazon_link_events(content_id,event_at);
+CREATE INDEX IF NOT EXISTS idx_threads_generation_created ON threads_generation_runs(created_at,decision);
+CREATE INDEX IF NOT EXISTS idx_threads_posts_status ON threads_posts(status,published_at);
+CREATE INDEX IF NOT EXISTS idx_threads_metrics_window ON threads_metrics(threads_post_id,measurement_window);
+CREATE INDEX IF NOT EXISTS idx_threads_token_event ON threads_token_events(event_at,event_type);
 CREATE INDEX IF NOT EXISTS idx_quality_eval_run ON quality_eval_runs(run_at, prompt_version);
 CREATE INDEX IF NOT EXISTS idx_human_review_content ON human_reviews(content_type, content_id);
 CREATE INDEX IF NOT EXISTS idx_note_draft_status ON note_drafts(status, generated_at);
@@ -333,7 +360,9 @@ def table_counts(path: Path | None = None) -> dict:
                          "content_pipeline_runs", "budget_change_events",
                          "note_drafts", "note_generation_runs",
                          "amazon_associate_items", "amazon_link_events",
-                         "amazon_link_import_quarantine"):
+                         "amazon_link_import_quarantine",
+                         "threads_generation_runs", "threads_posts",
+                         "threads_metrics", "threads_token_events"):
                 out[name] = conn.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0]
     except sqlite3.Error:
         pass

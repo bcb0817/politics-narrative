@@ -1033,6 +1033,8 @@ def cmd_report() -> int:
     from usage_reports import xai_roi  # noqa: E402
     review_payload["xai_attribution_daily"] = xai_roi(days=1)
     review_payload["xai_attribution_weekly"] = xai_roi(days=7)
+    from threads_api import daily_review_summary  # noqa: E402
+    review_payload["threads"] = daily_review_summary()
     # Local aggregation is authoritative; one bounded LLM call adds trend analysis.
     # Failure is recorded but never makes the daily review fail or blocks posting.
     from report_ai import analyze_report, compact_daily_payload  # noqa: E402
@@ -2003,6 +2005,38 @@ def cmd_discord_log(source: str, lines: int) -> int:
     return 1
 
 
+def _threads_output(action: str, **kwargs) -> int:
+    """Run a Threads command and emit secret-free JSON."""
+    load_env()
+    ensure_dirs()
+    import threads_api
+
+    actions = {
+        "auth_url": lambda: threads_api.authorization_url(),
+        "exchange_code": lambda: threads_api.exchange_code(kwargs["code"]),
+        "token_status": lambda: threads_api.token_status(),
+        "refresh_token": lambda: threads_api.refresh_token(
+            force=bool(kwargs.get("force"))),
+        "profile": lambda: threads_api.profile_status(),
+        "status": lambda: threads_api.status(),
+        "generate": lambda: threads_api.generate(
+            dry_run=bool(kwargs.get("dry_run")),
+            x_post_id=kwargs.get("x_post_id")),
+        "drafts": lambda: threads_api.drafts(),
+        "publish": lambda: threads_api.publish(int(kwargs["draft_id"])),
+        "collect_metrics": lambda: threads_api.collect_metrics(),
+        "comparison": lambda: threads_api.platform_comparison(),
+        "run": lambda: threads_api.run_scheduled(),
+    }
+    result = actions[action]()
+    print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    if isinstance(result, dict) and result.get("reason") in {
+        "threads_api_failed", "refresh_failed",
+    }:
+        return 1
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
@@ -2145,6 +2179,30 @@ def main() -> int:
     sub.add_parser(
         "free-note-due", help="期限到来済みの無料note生成枠を処理")
 
+    sub.add_parser("threads-auth-url", help="Meta公式OAuth認可URLを表示")
+    p_threads_exchange = sub.add_parser(
+        "threads-exchange-code", help="OAuthコードを長期トークンへ交換")
+    p_threads_exchange.add_argument("--code", required=True)
+    sub.add_parser("threads-token-status", help="Threadsトークン状態を表示")
+    p_threads_refresh = sub.add_parser(
+        "threads-refresh-token", help="期限接近時にThreadsトークンを更新")
+    p_threads_refresh.add_argument("--force", action="store_true")
+    sub.add_parser("threads-profile", help="Threadsプロフィール接続状態を表示")
+    sub.add_parser("threads-status", help="Threads連携の稼働状態を表示")
+    p_threads_generate = sub.add_parser(
+        "threads-generate", help="Threads専用ドラフトを生成")
+    p_threads_generate.add_argument("--dry-run", action="store_true")
+    p_threads_generate.add_argument("--x-post-id")
+    sub.add_parser("threads-drafts", help="Threadsドラフト一覧を表示")
+    p_threads_publish = sub.add_parser(
+        "threads-publish", help="承認済みThreadsドラフトを明示投稿")
+    p_threads_publish.add_argument("--draft-id", type=int, required=True)
+    sub.add_parser(
+        "threads-collect-metrics", help="Threads Insightsを収集")
+    sub.add_parser(
+        "platform-comparison", help="同一コンテンツのX/Threads指標を比較")
+    sub.add_parser("threads-run", help="Threadsの現在スケジュール枠を処理")
+
     args = parser.parse_args()
 
     if args.command == "once":
@@ -2249,6 +2307,31 @@ def main() -> int:
         return cmd_note_pipeline_status()
     if args.command == "free-note-due":
         return cmd_free_note_due()
+    if args.command == "threads-auth-url":
+        return _threads_output("auth_url")
+    if args.command == "threads-exchange-code":
+        return _threads_output("exchange_code", code=args.code)
+    if args.command == "threads-token-status":
+        return _threads_output("token_status")
+    if args.command == "threads-refresh-token":
+        return _threads_output("refresh_token", force=args.force)
+    if args.command == "threads-profile":
+        return _threads_output("profile")
+    if args.command == "threads-status":
+        return _threads_output("status")
+    if args.command == "threads-generate":
+        return _threads_output(
+            "generate", dry_run=args.dry_run, x_post_id=args.x_post_id)
+    if args.command == "threads-drafts":
+        return _threads_output("drafts")
+    if args.command == "threads-publish":
+        return _threads_output("publish", draft_id=args.draft_id)
+    if args.command == "threads-collect-metrics":
+        return _threads_output("collect_metrics")
+    if args.command == "platform-comparison":
+        return _threads_output("comparison")
+    if args.command == "threads-run":
+        return _threads_output("run")
     if args.command == "discord-test":
         return cmd_discord_test()
     if args.command == "discord-note-draft-test":

@@ -44,6 +44,9 @@ def openai_usage_breakdown(path: Path | None = None,
         "eval_quality": "eval_quality",
         "shorts_generation": "shorts_generation",
         "note_generation": "note_generation",
+        "threads_generation": "threads_generation",
+        "threads_regeneration": "threads_regeneration",
+        "threads_daily_review": "threads_daily_review",
         "failed_request": "failed_request",
     }
     grouped: dict[str, dict] = {}
@@ -106,7 +109,8 @@ def openai_usage_breakdown(path: Path | None = None,
             "regeneration", "quality_review", "daily_review", "weekly_review",
             "batch_submit", "batch_collect", "engagement_queue", "eval_quality",
             "shorts_generation", "note_generation", "failed_request", "other",
-            "unknown",
+            "threads_generation", "threads_regeneration",
+            "threads_daily_review", "unknown",
         ],
     }
 
