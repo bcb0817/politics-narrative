@@ -488,18 +488,22 @@ def collect_post_insights(client: ThreadsClient | None = None, *,
     api = client or ThreadsClient(path=path)
     saved = failed = 0
     now = _now()
-    windows = [
-        value.strip() for value in os.environ.get(
-            "THREADS_POST_METRIC_WINDOWS", "1h,6h,24h,72h,7d").split(",")
-        if value.strip()
-    ]
+    windows = list(dict.fromkeys([
+        "15m", "1h", "6h",
+        *[
+            value.strip() for value in os.environ.get(
+                "THREADS_POST_METRIC_WINDOWS", "1h,6h,24h,72h,7d").split(",")
+            if value.strip()
+        ],
+        "24h", "72h",
+    ]))
     for post in posts:
         published = _parse_datetime(post.get("published_at"))
         if not published:
             continue
         age = (now - published.astimezone(JST)).total_seconds() / 3600
         due = [w for w in windows if age >= {
-            "1h": 1, "6h": 6, "24h": 24, "72h": 72, "7d": 168
+            "15m": .25, "1h": 1, "6h": 6, "24h": 24, "72h": 72, "7d": 168
         }.get(w, math.inf)]
         for window in due:
             measured = now.replace(
@@ -528,7 +532,7 @@ def collect_post_insights(client: ThreadsClient | None = None, *,
                         values.get("reposts"), values.get("quotes"),
                         values.get("shares"), engagement,
                         views / max(1, {
-                            "1h": 1, "6h": 6, "24h": 24, "72h": 72,
+                            "15m": .25, "1h": 1, "6h": 6, "24h": 24, "72h": 72,
                             "7d": 168}[window]) if views is not None else None,
                         measured, measured, "meta_official_api",
                         cfg["api_version"], _hash_payload(payload),

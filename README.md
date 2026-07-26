@@ -13,7 +13,10 @@
 **このBotはローカル運用に移行しました。** GitHub Actions では動かしません。
 ローカルPC / ローカルサーバー上で `local_bot.py daemon` として常駐させます。
 
-- 対象プラットフォームは **X のみ**（Threads対応はありません）
+- 本番配信先は **XとMeta公式Threads API** です。
+- Phase AのSocial Content Factoryは、SNSを需要発見装置として扱い、
+  topic・claim・angle単位の候補、図解、スレッド、Short、記事原料をローカル生成します。
+- 動画クロス投稿は準備機能まで実装済みで、自動公開は既定OFFです。
 - `POST_ENABLED=true` にしない限り **X への実投稿は一切行われません**
 
 > テキスト投稿への移行と、catch-up 詰まり対策（attempted_slots.json）の詳しい方針は
@@ -80,6 +83,33 @@ X_NATIVE_SEARCH_ENABLED=false
 XAI_ENABLED=true
 XAI_MODEL=grok-4.5
 XAI_SEARCH_SCHEDULE=06:00,09:00,12:00,15:00,18:00,21:00
+```
+
+## 設定の正本
+
+設定の優先順位は次のとおりです。
+
+```text
+.env
+  ↓
+src/runtime_config.py の型付き設定
+  ↓
+実行時設定
+  ↓
+local_bot.py config-audit
+  ↓
+README・運用レポート
+```
+
+`.env.example`は設定例であり、本番値ではありません。Gmailへのnoteドラフト転送は
+現行実装に含まれません。noteドラフトの外部通知先はDiscordだけです。
+
+Phase Aの候補生産を外部投稿なしで確認できます。
+
+```powershell
+.\.venv\Scripts\python.exe local_bot.py config-audit
+.\.venv\Scripts\python.exe local_bot.py growth-full-cycle --dry-run
+.\.venv\Scripts\python.exe local_bot.py growth-status
 ```
 
 xAIレーダーは`tool_choice=required`、`max_turns=1`、`parallel_tool_calls=false`で実行します。
@@ -491,7 +521,7 @@ xAIは `XAI_COST_LEDGER_VERIFIED=false` の場合も
 停止します。RSS・公式情報のローカル監視と既存キャッシュは継続します。
 # 無料note原稿パイプライン 📝
 
-政治・制度解説を週1〜2本生成し、`outputs/note`へMarkdownで保存できます。記事末尾は「一次資料2リンク＋関連書籍候補1〜3件」に統一し、関連書籍はISBN確認済みカタログから関連性スコア7.0以上の候補を自動選定します。初期設定の`manual`モードでは架空のAmazonリンクを作らず、`AMAZON_LINK_PENDING:`プレースホルダーを置きます。人がSiteStripe等で作成したアソシエイトリンクを登録し、開示文とリンクの確認が済むまで承認を止められます。同時に、記事タイトル入りの見出し画像`cover.png`を1280×670 px（1.91:1）でローカル生成します。合格原稿は専用Discordへ結果概要、見出し画像、確認用ファイルを通知しますが、noteへの公開は必ず人が行います。
+政治・制度解説を通常週2本、強い勝ちテーマがある週は最大3本まで候補生成し、`outputs/note`へMarkdownで保存できます。記事末尾は一次資料2〜5件と関連書籍候補0〜3件に対応し、関連書籍はISBN確認済みカタログから関連性スコア7.0以上の候補を選定します。初期設定の`manual`モードでは架空のAmazonリンクを作らず、`AMAZON_LINK_PENDING:`プレースホルダーを置きます。人がSiteStripe等で作成したアソシエイトリンクを登録し、開示文とリンクの確認が済むまで承認を止められます。同時に、記事タイトル入りの見出し画像`cover.png`を1280×670 px（1.91:1）でローカル生成します。合格原稿は専用Discordへ結果概要、見出し画像、確認用ファイルを通知しますが、noteへの公開は必ず人が行います。
 
 ```powershell
 .\.venv\Scripts\python.exe local_bot.py generate-free-note --dry-run

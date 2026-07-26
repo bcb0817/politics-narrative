@@ -70,7 +70,7 @@ HIGH_RISK_TERMS = (
 ATTACK_TERMS = (
     "売国奴", "非国民", "消えろ", "死ね", "無能な人間", "犯罪者だ",
 )
-WINDOW_HOURS = {"1h": 1, "24h": 24, "72h": 72}
+WINDOW_HOURS = {"15m": .25, "1h": 1, "6h": 6, "24h": 24, "72h": 72}
 _CIRCUIT = {"failures": 0, "opened_at": None}
 
 
@@ -231,11 +231,15 @@ def settings() -> dict:
         "refresh_before_days": max(
             0, _int("THREADS_TOKEN_REFRESH_BEFORE_EXPIRY_DAYS", 7)),
         "metrics_enabled": _bool("THREADS_METRICS_ENABLED", "true"),
-        "metrics_windows": tuple(
-            value.strip() for value in os.environ.get(
-                "THREADS_METRICS_WINDOWS", "1h,24h,72h").split(",")
-            if value.strip() in WINDOW_HOURS
-        ),
+        "metrics_windows": tuple(dict.fromkeys([
+            "15m", "1h", "6h",
+            *[
+                value.strip() for value in os.environ.get(
+                    "THREADS_METRICS_WINDOWS", "1h,24h,72h").split(",")
+                if value.strip() in WINDOW_HOURS
+            ],
+            "24h", "72h",
+        ])),
         "monthly_openai_budget": max(
             0.0, _float("THREADS_OPENAI_MONTHLY_BUDGET_USD", 1.0)),
         "max_cost_per_post": max(

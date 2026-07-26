@@ -475,7 +475,7 @@ class ThreadsApiTests(unittest.TestCase):
             threads_api.generate(dry_run=True, path=self.path)["reason"],
             "no_eligible_verified_source")
 
-    def test_58_three_metric_windows_are_unique(self):
+    def test_58_five_metric_windows_are_unique(self):
         now = datetime.now(threads_api.JST)
         metrics_db.write(
             """INSERT INTO threads_posts
@@ -488,7 +488,7 @@ class ThreadsApiTests(unittest.TestCase):
                 FakeThreadsClient(), self.path, now)
             second = threads_api.collect_metrics(
                 FakeThreadsClient(), self.path, now)
-        self.assertEqual(first["collected"], 3)
+        self.assertEqual(first["collected"], 5)
         self.assertEqual(second["collected"], 0)
 
     def test_59_phase_a_run_saves_preview_not_post(self):

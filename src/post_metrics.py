@@ -1,4 +1,4 @@
-"""Collect each published post once at 1h, 24h and 72h."""
+"""Collect each published post at Phase A growth evaluation windows."""
 
 from __future__ import annotations
 
@@ -13,7 +13,13 @@ from api_budget import estimate_x, finalize, reserve
 from metrics_db import connect, db_path, init_db, upsert_metric
 
 JST = ZoneInfo("Asia/Tokyo")
-WINDOWS = {"1h": timedelta(hours=1), "24h": timedelta(hours=24), "72h": timedelta(hours=72)}
+WINDOWS = {
+    "15m": timedelta(minutes=15),
+    "1h": timedelta(hours=1),
+    "6h": timedelta(hours=6),
+    "24h": timedelta(hours=24),
+    "72h": timedelta(hours=72),
+}
 
 
 def due_measurements(history: list[dict], now: datetime, path: Path | None = None) -> list[tuple[dict, str]]:

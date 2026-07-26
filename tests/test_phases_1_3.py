@@ -145,7 +145,7 @@ class Phase3Tests(unittest.TestCase):
             path = Path(td) / "db.sqlite"; now = datetime.now(JST)
             rows = [{"tweet_id": "1", "posted_at_jst": (now - timedelta(hours=80)).isoformat()}]
             result = post_metrics.collect(rows, now, FakeMetricClient, path)
-            self.assertEqual(result["collected"], 3)
+            self.assertEqual(result["collected"], 5)
 
     def test_22_same_window_is_not_collected_twice(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
@@ -159,7 +159,7 @@ class Phase3Tests(unittest.TestCase):
         try:
             with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
                 now = datetime.now(JST); rows = [{"tweet_id": "1", "posted_at_jst": (now-timedelta(hours=2)).isoformat()}]
-                self.assertEqual(post_metrics.collect(rows, now, FakeMetricClient, Path(td)/"db.sqlite")["missing"], 1)
+                self.assertEqual(post_metrics.collect(rows, now, FakeMetricClient, Path(td)/"db.sqlite")["missing"], 2)
         finally: FakeMetricClient.missing = False
 
     def test_24_top_and_bottom_three(self):

@@ -280,10 +280,10 @@ class ThreadsFullApiTests(unittest.TestCase):
                 "SELECT engagement_rate FROM threads_post_insights").fetchone()
         self.assertIsNone(row[0])
 
-    def test_77_post_insights_save_five_windows(self):
+    def test_77_post_insights_save_required_and_optional_windows(self):
         self.add_post()
         result = full.collect_post_insights(self.client, path=self.path)
-        self.assertEqual(result["saved"], 5)
+        self.assertEqual(result["saved"], 6)
 
     def test_78_account_insights_save(self):
         result = full.collect_account_insights(self.client, path=self.path)

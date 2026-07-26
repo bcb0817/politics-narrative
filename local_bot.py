@@ -2181,6 +2181,59 @@ def _crosspost_output(action: str, **kwargs) -> int:
     return 0
 
 
+def _growth_output(action: str, **kwargs) -> int:
+    """Run the local-only Phase A social content factory."""
+    load_env(require=False)
+    ensure_dirs()
+    import social_content_factory as factory
+    from runtime_config import audit as config_audit
+
+    actions = {
+        "config_audit": lambda: config_audit(),
+        "packet": lambda: factory.generate_packet(
+            topic_key=kwargs.get("topic_key"),
+            content_id=kwargs.get("content_id"),
+        ),
+        "inventory_status": lambda: factory.inventory_status(),
+        "inventory_build": lambda: factory.build_inventory(
+            dry_run=kwargs.get("dry_run", True)),
+        "variants": lambda: factory.generate_variants(
+            dry_run=kwargs.get("dry_run", True)),
+        "hypotheses": lambda: factory.hypotheses(
+            dry_run=kwargs.get("dry_run", True)),
+        "growth_status": lambda: factory.growth_status(),
+        "daily_report": lambda: factory.daily_report(
+            dry_run=kwargs.get("dry_run", True)),
+        "weekly_report": lambda: factory.weekly_report(
+            dry_run=kwargs.get("dry_run", True)),
+        "shorts": lambda: factory.promote_short_candidates(
+            dry_run=kwargs.get("dry_run", True)),
+        "articles": lambda: factory.promote_article_candidates(
+            dry_run=kwargs.get("dry_run", True)),
+        "visuals": lambda: factory.visual_candidates(
+            dry_run=kwargs.get("dry_run", True)),
+        "threads": lambda: factory.thread_candidates(
+            dry_run=kwargs.get("dry_run", True)),
+        "replies": lambda: factory.reply_candidate_list(
+            dry_run=kwargs.get("dry_run", True)),
+        "quotes": lambda: factory.quote_candidate_list(
+            dry_run=kwargs.get("dry_run", True)),
+        "source_health": lambda: factory.source_health(),
+        "budget": lambda: factory.budget_simulation(
+            x_posts=kwargs.get("x_posts", 14),
+            threads_posts=kwargs.get("threads_posts", 6),
+            visuals=kwargs.get("visuals", 2),
+            short_candidates=kwargs.get("short_candidates", 5),
+            days=kwargs.get("days", 30),
+        ),
+        "full_cycle": lambda: factory.full_cycle(
+            dry_run=kwargs.get("dry_run", True)),
+    }
+    result = actions[action]()
+    print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
@@ -2322,6 +2375,40 @@ def main() -> int:
         "note-pipeline-status", help="無料noteパイプラインの状態を表示")
     sub.add_parser(
         "free-note-due", help="期限到来済みの無料note生成枠を処理")
+
+    sub.add_parser(
+        "config-audit", help=".env・typed config・runtime・文書の不整合を監査")
+    p_packet = sub.add_parser(
+        "content-packet-generate", help="確認済みテーマからコンテンツパケットを生成")
+    p_packet.add_argument("--topic-key")
+    p_packet.add_argument("--content-id")
+    sub.add_parser(
+        "content-inventory-status", help="コンテンツ在庫の状態と件数を表示")
+    for command, help_text in (
+        ("content-inventory-build", "確認済みニュースとEvergreenから在庫を構築"),
+        ("content-variants-generate", "X・Threads向け複数角度候補を生成"),
+        ("content-hypotheses", "検証可能なコンテンツ仮説を生成"),
+        ("growth-daily-report", "成長KPIの日次レポートを保存"),
+        ("growth-weekly-report", "成長KPIの週次レポートを保存"),
+        ("short-candidates", "Short動画昇格候補を生成"),
+        ("article-candidates", "X記事・note・長尺の昇格候補を生成"),
+        ("visual-candidates", "自動図解候補を生成"),
+        ("thread-candidates", "3〜5投稿のXスレッド候補を生成"),
+        ("reply-candidates", "低リスク返信の人間承認候補を生成"),
+        ("quote-candidates", "公式一次資料の引用候補を生成"),
+        ("growth-full-cycle", "外部投稿なしでPhase A全工程を実行"),
+    ):
+        item = sub.add_parser(command, help=help_text)
+        item.add_argument("--dry-run", action="store_true")
+    sub.add_parser("growth-status", help="需要発見・在庫・昇格エンジンの状態を表示")
+    sub.add_parser("source-health", help="公式情報源レジストリの状態を表示")
+    p_growth_budget = sub.add_parser(
+        "growth-budget-simulation", help="新しい候補生産量のAPI費用を試算")
+    p_growth_budget.add_argument("--x-posts", type=int, default=14)
+    p_growth_budget.add_argument("--threads-posts", type=int, default=6)
+    p_growth_budget.add_argument("--visuals", type=int, default=2)
+    p_growth_budget.add_argument("--short-candidates", type=int, default=5)
+    p_growth_budget.add_argument("--days", type=int, default=30)
 
     p_threads_auth = sub.add_parser(
         "threads-auth-url", help="Meta公式OAuth認可URLを表示")
@@ -2601,6 +2688,46 @@ def main() -> int:
         return cmd_note_pipeline_status()
     if args.command == "free-note-due":
         return cmd_free_note_due()
+    if args.command == "config-audit":
+        return _growth_output("config_audit")
+    if args.command == "content-packet-generate":
+        return _growth_output(
+            "packet", topic_key=args.topic_key, content_id=args.content_id)
+    if args.command == "content-inventory-status":
+        return _growth_output("inventory_status")
+    if args.command == "content-inventory-build":
+        return _growth_output("inventory_build", dry_run=args.dry_run)
+    if args.command == "content-variants-generate":
+        return _growth_output("variants", dry_run=args.dry_run)
+    if args.command == "content-hypotheses":
+        return _growth_output("hypotheses", dry_run=args.dry_run)
+    if args.command == "growth-status":
+        return _growth_output("growth_status")
+    if args.command == "growth-daily-report":
+        return _growth_output("daily_report", dry_run=args.dry_run)
+    if args.command == "growth-weekly-report":
+        return _growth_output("weekly_report", dry_run=args.dry_run)
+    if args.command == "short-candidates":
+        return _growth_output("shorts", dry_run=args.dry_run)
+    if args.command == "article-candidates":
+        return _growth_output("articles", dry_run=args.dry_run)
+    if args.command == "visual-candidates":
+        return _growth_output("visuals", dry_run=args.dry_run)
+    if args.command == "thread-candidates":
+        return _growth_output("threads", dry_run=args.dry_run)
+    if args.command == "reply-candidates":
+        return _growth_output("replies", dry_run=args.dry_run)
+    if args.command == "quote-candidates":
+        return _growth_output("quotes", dry_run=args.dry_run)
+    if args.command == "source-health":
+        return _growth_output("source_health")
+    if args.command == "growth-budget-simulation":
+        return _growth_output(
+            "budget", x_posts=args.x_posts, threads_posts=args.threads_posts,
+            visuals=args.visuals, short_candidates=args.short_candidates,
+            days=args.days)
+    if args.command == "growth-full-cycle":
+        return _growth_output("full_cycle", dry_run=args.dry_run)
     if args.command == "threads-auth-url":
         return _threads_output(
             "auth_url", scope_profile=args.scope_profile)
