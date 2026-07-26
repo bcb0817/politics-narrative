@@ -1,6 +1,6 @@
 # 動画クロス投稿 Phase A 実装報告
 
-1. **バックアップ先**：`D:\SNS Bot\politics-narrative-backup-crosspost-20260726-042844`
+1. **バックアップ先**：`D:\SNS Bot\politics-narrative\backups\politics-narrative-backup-crosspost-20260726-042844`
 2. **既存実装調査**：X/Threadsテキスト投稿は存在。YouTubeアップロード、Instagram Reels、動画レンディションは未実装だった。
 3. **変更ファイル**：`.env.example`、`local_bot.py`、`src/discord_notify.py`。
 4. **新規ファイル**：`src/crosspost.py`、`src/media_publication.py`、テスト、設定、ドキュメント、PowerShellスクリプト。

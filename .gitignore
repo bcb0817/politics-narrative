@@ -17,6 +17,7 @@ bot.log
 
 # Local backup copies
 *.backup-*
+backups/
 
 # Runtime performance learning (may contain operational metrics/topics)
 knowledge/viral_patterns/winning_patterns.md

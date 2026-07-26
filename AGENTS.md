@@ -19,3 +19,10 @@ change in this repository:
 Do not publish when tests fail, GitHub authentication is unavailable, secrets
 are detected, or the intended change scope is ambiguous. Report the blocker
 instead. Never commit `.env` or other live credentials.
+
+## Local backups
+
+Create repository backups only under `backups/` inside this repository. Use
+`production/create_backup.ps1` and exclude `backups/` itself so backups never
+recursively contain earlier backups. Never create new
+`D:\SNS Bot\politics-narrative-backup*` sibling directories.

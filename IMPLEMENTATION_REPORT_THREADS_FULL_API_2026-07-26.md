@@ -1,7 +1,7 @@
 # Threads API差分改修 実装報告書（2026-07-26）
 
 1. **バックアップ**
-   `D:\SNS Bot\politics-narrative-backup-20260726-031804` に、変更前のリポジトリ・`.git`・ローカル設定を含む完全バックアップを作成した。
+   `D:\SNS Bot\politics-narrative\backups\politics-narrative-backup-20260726-031804` に、変更前のリポジトリ・`.git`・ローカル設定を含む完全バックアップを作成した。
 
 2. **公式仕様の確認元**
    Meta公式Threads API Postman workspaceを基準に、プロフィール、投稿一覧、返信、メンション、インサイト、検索、公開、削除、再投稿、モデレーション、利用上限、OAuthを確認した。
@@ -145,4 +145,4 @@
     承認後に既存の本番起動手順を使用する。今回の改修では政治BotおよびThreads関連タスクを停止状態のまま維持する。
 
 49. **ロールバック**
-    コードはGitコミットを戻すか、完全バックアップ `D:\SNS Bot\politics-narrative-backup-20260726-031804` から復元できる。実データ復元前には対象パスを再確認する。
+    コードはGitコミットを戻すか、完全バックアップ `D:\SNS Bot\politics-narrative\backups\politics-narrative-backup-20260726-031804` から復元できる。実データ復元前には対象パスを再確認する。

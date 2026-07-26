@@ -120,7 +120,7 @@ Start-ScheduledTask -TaskName "PoliticsNarrativeBot"
 バックアップ：
 
 ```text
-D:\SNS Bot\politics-narrative-backup-20260725-044215
+D:\SNS Bot\politics-narrative\backups\politics-narrative-backup-20260725-044215
 ```
 # Amazonアソシエイト付き無料note運用 📚
 
