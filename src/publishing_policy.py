@@ -12,10 +12,12 @@ import os
 import unicodedata
 from datetime import datetime, timedelta
 from difflib import SequenceMatcher
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 
 JST = ZoneInfo("Asia/Tokyo")
+ROOT_DIR = Path(__file__).resolve().parent.parent
 
 POST_TYPES = (
     "breaking_news",
@@ -252,7 +254,24 @@ def choose_post_style(news: dict, history: list[dict], now_jst: datetime) -> tup
     if steelman_count < 3 and (exploration or news.get("has_counter_claims")):
         candidates.append("steelman_counterargument")
     total = max(1, len(last24))
-    selected = min(candidates, key=lambda style: last24.count(style) / total - targets.get(style, .15))
+    try:
+        from review_strategy import load_active_strategy
+        active_strategy = load_active_strategy(ROOT_DIR, now=now_jst)
+    except Exception:
+        active_strategy = {}
+    priorities = active_strategy.get("post_type_priority") or []
+    priority_bonus = {
+        value: max(0.02, 0.10 - index * 0.02)
+        for index, value in enumerate(priorities)
+    }
+    selected = min(
+        candidates,
+        key=lambda style: (
+            last24.count(style) / total
+            - targets.get(style, .15)
+            - priority_bonus.get(style, 0.0)
+        ),
+    )
     if len(recent) >= 2 and recent[-1] == recent[-2] == selected:
         selected = next(style for style in candidates if style != selected)
     return selected, exploration
@@ -300,6 +319,26 @@ def classify_hook_type(news: dict, history: list[dict]) -> str:
         preferred = "question"
     else:
         preferred = "conclusion_first"
+    try:
+        from review_strategy import load_active_strategy
+        priorities = load_active_strategy(ROOT_DIR).get(
+            "hook_type_priority") or []
+    except Exception:
+        priorities = []
+    compatible = {
+        "number": bool(re.search(r"\d", text)),
+        "contrast": any(
+            term in text for term in (
+                "一方", "対し", "改正前", "改正後", "vs", "ＶＳ")),
+        "fact_reversal": any(
+            term in text for term in (
+                "実は", "誤解", "事実", "公式", "発表")),
+        "issue_redefinition": True,
+        "question": True,
+        "conclusion_first": True,
+    }
+    preferred = next(
+        (value for value in priorities if compatible.get(value)), preferred)
     recent = [row.get("hook_type") for row in history if row.get("hook_type")][-2:]
     if len(recent) == 2 and recent[0] == recent[1] == preferred:
         return next(hook for hook in HOOK_TYPES if hook != preferred and hook not in recent)

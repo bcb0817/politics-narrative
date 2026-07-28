@@ -1232,7 +1232,20 @@ def _load_performance_patterns(topic_key: str = "", max_chars: int = 900) -> str
         if selected:
             sections.append(f"【{label}】\n" + "\n".join(selected))
     out = "\n\n".join(sections).strip()
-    return out[:max_chars]
+    ai_guidance = ""
+    try:
+        from review_strategy import (
+            load_active_strategy, render_prompt_guidance,
+        )
+        ai_guidance = render_prompt_guidance(
+            load_active_strategy(ROOT_DIR))
+    except Exception:
+        pass
+    if not ai_guidance:
+        return out[:max_chars]
+    ai_guidance = ai_guidance[:min(500, max_chars)]
+    remaining = max(0, max_chars - len(ai_guidance) - 2)
+    return (out[:remaining].rstrip() + "\n\n" + ai_guidance).strip()
 
 
 _DEFAULT_IMPORTANT_KEYWORDS = [
@@ -1634,6 +1647,10 @@ def generate_candidates(news_item: dict, regeneration_attempt: int = 0, retries_
         c["estimated_cost_usd"] = actual_cost
         c["prompt_version"] = os.environ.get("PROMPT_VERSION", "x-growth-quality-v2")
         c["is_exploration"] = bool(news_item.get("is_exploration"))
+        c["review_strategy_experiment"] = str(
+            news_item.get("review_strategy_experiment") or "")
+        c["review_strategy_active"] = bool(
+            news_item.get("review_strategy_active"))
         c["social_anger_connected"] = bool(
             social_review.get("production_publish_connected"))
         c["social_anger_phase"] = social_review.get("phase", "B")
@@ -2092,6 +2109,16 @@ def main():
             enriched, history, now_jst)
         enriched["hook_type"] = classify_hook_type(enriched, history)
         enriched["critique_axis"] = classify_critique_axis(enriched)
+        try:
+            from review_strategy import load_active_strategy
+            active_review_strategy = load_active_strategy(
+                ROOT_DIR, now=now_jst)
+        except Exception:
+            active_review_strategy = {}
+        enriched["review_strategy_active"] = bool(
+            active_review_strategy)
+        enriched["review_strategy_experiment"] = str(
+            active_review_strategy.get("experiment_name") or "")
         genre_hits = {
             genre: sum(keyword in f"{enriched.get('title','')} {enriched.get('summary','')}" for keyword in keywords)
             for genre, keywords in GENRE_KEYWORDS.items()
@@ -2349,6 +2376,10 @@ def main():
         "openai_model": best.get("openai_model", ""),
         "prompt_version": best.get("prompt_version", "x-growth-quality-v2"),
         "is_exploration": bool(best.get("is_exploration")),
+        "review_strategy_active": bool(
+            best.get("review_strategy_active")),
+        "review_strategy_experiment": best.get(
+            "review_strategy_experiment", ""),
         "social_anger_connected": bool(best.get("social_anger_connected")),
         "social_anger_phase": best.get("social_anger_phase", ""),
         "social_anger_effective_score": best.get(

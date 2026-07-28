@@ -45,6 +45,20 @@ class FakeResponse:
     output_text = json.dumps({
         "summary": "ok", "strengths": [], "weaknesses": [],
         "recommendations": [], "timing_findings": [],
+        "operational_findings": [],
+        "impression_strategy": {
+            "summary": "test", "evidence": [],
+            "next_day_policy": {
+                "post_type_priority": ["issue_diagram"],
+                "hook_type_priority": ["conclusion_first"],
+                "preferred_hours_jst": [12],
+                "target_text_min": 120, "target_text_max": 220,
+                "body_structure":
+                    "fact_impact_accountability_improvement",
+                "cta_style": "specific_accountability_question",
+                "experiment_name": "test",
+            },
+        },
     })
     usage = SimpleNamespace(
         input_tokens=100,

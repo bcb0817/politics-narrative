@@ -401,20 +401,30 @@ OpenAI予算は投稿生成 `$5`、分類 `$0.5`、日次レビュー `$1.5`、�
 テーマ履歴は `data/recent_topics.json`、最新レビューは
 `data/daily_review_latest.json`、日別レビューは `data/daily_reviews/YYYY-MM-DD.json` に保存します。
 
-毎日04:45のレビューは、上位・成長上位・下位・品質エラーに加え、投稿時のX注目度、
+毎日04:40のレビューは、上位・成長上位・下位・品質エラーに加え、投稿時のX注目度、
 投稿タイプ・フック・批判軸・時間別の成績、構文の反復傾向を集計し、
 `knowledge/viral_patterns/` の `winning_patterns.md`、`losing_patterns.md`、
 `avoid_patterns.md` を更新します。次回生成では成功形式を最大3件、失敗・禁止ルールを
 最大5件だけ読み込み、プロンプトコストを制限します。
 
+さらにChatGPT（OpenAI Responses API）が、24時間の投稿指標と匿名化した運用ログ集計を
+解析し、インプレッション最大化の翌日方針を構造化JSONで返します。根拠Tweet ID、
+計測指標、信頼度がある提案だけを48時間有効にし、投稿型・フック・文字数・文章構造へ
+自動反映します。安全基準、事実確認、政治的評価原則、投稿上限、API予算は変更できません。
+
+```powershell
+.\.venv\Scripts\python.exe local_bot.py review-strategy-status
+```
+
 ## OpenAI Batch API
 
-日次レビューと週次レビューは、既定でOpenAI Batch API（`/v1/responses`、完了枠`24h`）へ
-非同期送信します。速報・通常投稿の生成は遅延を避けるため同期Responses APIのままです。
+日次レビューは翌日の投稿へ即時反映するため同期Responses APIを使用します。
+週次レビューなど遅延可能な処理は、OpenAI Batch API（`/v1/responses`、完了枠`24h`）へ
+非同期送信できます。速報・通常投稿の生成も同期Responses APIのままです。
 
 ```dotenv
 OPENAI_BATCH_ENABLED=true
-OPENAI_BATCH_TASKS=daily_review,weekly_report
+OPENAI_BATCH_TASKS=weekly_report,quality_eval
 ```
 
 デーモンは起動時と毎時処理後に完了結果を回収します。手動操作も可能です。

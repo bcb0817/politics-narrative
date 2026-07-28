@@ -836,6 +836,10 @@ def cmd_report() -> int:
             "critique_axis": h.get("critique_axis", ""),
             "model": h.get("openai_model", ""),
             "prompt_version": h.get("prompt_version", "v1"),
+            "review_strategy_active": bool(
+                h.get("review_strategy_active")),
+            "review_strategy_experiment": h.get(
+                "review_strategy_experiment", ""),
             "posted_at": h.get("posted_at_jst", ""),
             "posted_hour_jst": posted_dt.hour,
             "text_length": len(h.get("tweet_text", "") or ""),
@@ -1020,6 +1024,8 @@ def cmd_report() -> int:
             "critique_axis": performance_breakdown("critique_axis"),
             "posted_hour_jst": performance_breakdown("posted_hour_jst"),
             "prompt_version": performance_breakdown("prompt_version"),
+            "review_strategy_experiment": performance_breakdown(
+                "review_strategy_experiment"),
         },
         "repeated_structures": repeated_structures,
         "all_posts": rows,
@@ -1035,6 +1041,18 @@ def cmd_report() -> int:
     review_payload["xai_attribution_weekly"] = xai_roi(days=7)
     from threads_api import daily_review_summary  # noqa: E402
     review_payload["threads"] = daily_review_summary()
+    from review_strategy import (  # noqa: E402
+        activate_strategy,
+        strategy_status,
+        summarize_operational_logs,
+    )
+    review_payload["operational_log_summary"] = summarize_operational_logs(
+        dirs["log"], start_jst, now_jst)
+    current_strategy = strategy_status(ROOT_DIR)
+    review_payload["current_active_strategy"] = {
+        "active": current_strategy.get("active", False),
+        "strategy": current_strategy.get("strategy", {}),
+    }
     # Local aggregation is authoritative; one bounded LLM call adds trend analysis.
     # Failure is recorded but never makes the daily review fail or blocks posting.
     from report_ai import analyze_report, compact_daily_payload  # noqa: E402
@@ -1054,8 +1072,25 @@ def cmd_report() -> int:
     review_payload["llm_usage"] = llm_result.get("usage_event", {})
     review_payload["llm_pending"] = bool(llm_result.get("pending"))
     review_payload["llm_batch_job"] = llm_result.get("batch_job", {})
+    review_payload["chatgpt_strategy_activation"] = activate_strategy(
+        review_payload["llm_analysis"],
+        review_payload,
+        root_dir=ROOT_DIR,
+        now=now_jst,
+    )
     if review_payload["llm_error"]:
         log(f"[WARN] report: LLM analysis unavailable; local review retained ({review_payload['llm_error']})")
+    strategy_activation = review_payload["chatgpt_strategy_activation"]
+    if strategy_activation.get("activated"):
+        log(
+            "[INFO] report: ChatGPT impression strategy activated "
+            f"until {strategy_activation.get('expires_at', '')}"
+        )
+    else:
+        log(
+            "[INFO] report: ChatGPT impression strategy not activated "
+            f"({strategy_activation.get('reason', '')})"
+        )
     latest_file = dirs["state"] / "daily_review_latest.json"
     payload_text = json.dumps(review_payload, ensure_ascii=False, indent=2)
     atomic_write_text(dated_file, payload_text)
@@ -1067,6 +1102,18 @@ def cmd_report() -> int:
         report_lines.append(review_payload["llm_analysis"].get("summary", ""))
         report_lines.extend(["", "## Recommendations", ""])
         report_lines.extend(f"- {item}" for item in review_payload["llm_analysis"].get("recommendations", []))
+        strategy = review_payload["llm_analysis"].get(
+            "impression_strategy") or {}
+        report_lines.extend(["", "## Impression Strategy", ""])
+        report_lines.append(str(strategy.get("summary") or ""))
+        policy = strategy.get("next_day_policy") or {}
+        report_lines.extend([
+            "",
+            f"- Post types: {', '.join(policy.get('post_type_priority', []))}",
+            f"- Hooks: {', '.join(policy.get('hook_type_priority', []))}",
+            f"- Hours JST: {', '.join(str(v) for v in policy.get('preferred_hours_jst', []))}",
+            f"- Activation: {review_payload['chatgpt_strategy_activation'].get('reason', '')}",
+        ])
     (reports_dir / f"{review_date}.md").write_text("\n".join(report_lines).strip() + "\n", encoding="utf-8")
     from metrics_db import (apply_additive_migrations, db_path as metrics_db_path,
                             write as db_write)  # noqa: E402
@@ -1178,6 +1225,10 @@ def cmd_report() -> int:
         "reviewed_count": len(rows),
         "top3_tweet_ids": [r["tweet_id"] for r in top3],
         "latest_file": str(latest_file),
+        "chatgpt_strategy_activated": bool(
+            review_payload["chatgpt_strategy_activation"].get("activated")),
+        "chatgpt_strategy_reason": review_payload[
+            "chatgpt_strategy_activation"].get("reason", ""),
     })
     atomic_write_text(state_file, json.dumps(state, ensure_ascii=False, indent=2))
 
@@ -2295,6 +2346,17 @@ def _social_anger_output(action: str, **kwargs) -> int:
     return 0
 
 
+def cmd_review_strategy_status() -> int:
+    """Show the currently active validated ChatGPT review strategy."""
+    load_env(require=False)
+    if str(SRC_DIR) not in sys.path:
+        sys.path.insert(0, str(SRC_DIR))
+    from review_strategy import strategy_status  # noqa: E402
+    print(json.dumps(
+        strategy_status(ROOT_DIR), ensure_ascii=False, indent=2))
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
@@ -2322,6 +2384,9 @@ def main() -> int:
     sub.add_parser("premium-report", help="手動プレミアム分析をローカル保存（既定では無効・X投稿なし）")
     sub.add_parser("collect-metrics", help="1h/24h/72h投稿指標を未取得窓だけ収集")
     sub.add_parser("daily-review", help="日次レビューを実行")
+    sub.add_parser(
+        "review-strategy-status",
+        help="ChatGPT日次レビューの有効方針を表示")
     sub.add_parser("weekly-review", help="週次レビューをローカル保存")
     sub.add_parser("preview-extensions", help="拡張投稿案をプレビュー保存（投稿なし）")
     sub.add_parser("budget-status", help="今月のOpenAI/X/合計費用を表示")
@@ -2711,6 +2776,8 @@ def main() -> int:
         return cmd_collect_metrics()
     if args.command == "daily-review":
         return cmd_report()
+    if args.command == "review-strategy-status":
+        return cmd_review_strategy_status()
     if args.command == "weekly-review":
         return cmd_weekly_report()
     if args.command == "preview-extensions":
