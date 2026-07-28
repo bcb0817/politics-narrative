@@ -223,6 +223,32 @@ class DiscordNotifyTests(unittest.TestCase):
         self.assertNotIn("private detailed diagnostic", rendered)
         self.assertNotIn("stack trace detail", rendered)
 
+    def test_strategy_notification_contains_result_only(self):
+        env = {
+            "DISCORD_NOTIFICATIONS_ENABLED": "true",
+            "DISCORD_WEBHOOK_URL": "https://discord.invalid/webhook",
+        }
+        with patch.dict(os.environ, env, clear=False), patch(
+            "discord_notify.requests.post", return_value=FakeResponse()
+        ) as post:
+            sent = discord_notify.notify_review_strategy_result(
+                {
+                    "activated": True,
+                    "reason": "validated_strategy_activated",
+                    "policy": {"experiment_name": "number_hook"},
+                },
+                prior_evaluation={
+                    "status": "insufficient_data",
+                    "treatment_count": 2,
+                    "control_count": 1,
+                },
+            )
+        self.assertTrue(sent)
+        rendered = json.dumps(
+            post.call_args.kwargs["json"], ensure_ascii=False)
+        self.assertIn("ChatGPT投稿方針を更新", rendered)
+        self.assertNotIn("raw prompt", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()

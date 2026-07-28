@@ -35,7 +35,7 @@ from social_anger import (
 
 
 JST = ZoneInfo("Asia/Tokyo")
-PROMPT_VERSION = "threads-public-accountability-v2"
+PROMPT_VERSION = "threads-public-accountability-v3"
 POST_TYPES = {
     "conversation_explainer", "issue_question", "steelman_comparison",
     "policy_context", "evergreen_explainer", "daily_digest",
@@ -1306,6 +1306,17 @@ def _openai_text(source: dict, client_factory=None,
         client = client_factory(
             api_key=os.environ["OPENAI_API_KEY"],
             timeout=max(10, cfg["timeout"]), max_retries=0)
+        review_guidance = ""
+        if source.get("review_strategy_variant") == "treatment":
+            try:
+                from review_strategy import (
+                    load_active_strategy,
+                    render_prompt_guidance,
+                )
+                review_guidance = render_prompt_guidance(
+                    load_active_strategy(_root()))
+            except Exception:
+                review_guidance = ""
         response = client.responses.create(
             model=cfg["model"],
             instructions=(
@@ -1325,6 +1336,7 @@ def _openai_text(source: dict, client_factory=None,
                 "x_text_to_avoid_copying": source.get("x_text"),
                 "public_accountability_context": social_anger_prompt_context(
                     source, persist=False)["prompt_context"],
+                "validated_daily_review_guidance": review_guidance,
             }, ensure_ascii=False),
             max_output_tokens=cfg["max_output_tokens"],
             text={"format": {
@@ -1360,8 +1372,10 @@ def _save_generation(record: dict, path: Path | None = None) -> int | None:
           (source_content_id,source_x_post_id,topic_key,threads_post_type,text,
            model,prompt_version,similarity_to_x,quality_score,safety_score,
            decision,decision_reason,input_tokens,output_tokens,
-           estimated_cost_usd,question_included,emoji_count,created_at)
-          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+           estimated_cost_usd,question_included,emoji_count,
+           review_strategy_id,review_strategy_experiment,
+           review_strategy_variant,created_at)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
             record.get("source_content_id"), record.get("source_x_post_id"),
             record.get("topic_key"), record.get("threads_post_type"),
             record.get("text"), record.get("model"),
@@ -1371,7 +1385,11 @@ def _save_generation(record: dict, path: Path | None = None) -> int | None:
             record.get("input_tokens", 0), record.get("output_tokens", 0),
             record.get("estimated_cost_usd", 0),
             int(bool(record.get("question_included"))),
-            int(record.get("emoji_count", 0)), record.get("created_at"),
+            int(record.get("emoji_count", 0)),
+            record.get("review_strategy_id"),
+            record.get("review_strategy_experiment"),
+            record.get("review_strategy_variant", "inactive"),
+            record.get("created_at"),
         ), path)
     except Exception:
         _append_fallback("generation_runs.jsonl", record)
@@ -1388,6 +1406,19 @@ def generate(*, dry_run: bool = False, x_post_id: str | None = None,
     source = _candidate_query(path, x_post_id)
     if not source:
         return {"status": "skipped", "reason": "no_eligible_verified_source"}
+    try:
+        from review_strategy import assignment_for, load_active_strategy
+        active_review_strategy = load_active_strategy(_root(), now=now)
+        review_variant = assignment_for(
+            source, strategy=active_review_strategy, now=now)
+    except Exception:
+        active_review_strategy = {}
+        review_variant = "inactive"
+    source["review_strategy_id"] = str(
+        active_review_strategy.get("strategy_id") or "")
+    source["review_strategy_experiment"] = str(
+        active_review_strategy.get("experiment_name") or "")
+    source["review_strategy_variant"] = review_variant
     question = (
         int(hashlib.sha256(
             str(source["tweet_id"]).encode()).hexdigest(), 16) % 10 < 4
@@ -1439,6 +1470,11 @@ def generate(*, dry_run: bool = False, x_post_id: str | None = None,
         "social_anger_phase": checked.get("social_anger_phase", "B"),
         "social_anger_effective_score": checked.get(
             "social_anger_effective_score", 0.0),
+        "review_strategy_id": source.get("review_strategy_id", ""),
+        "review_strategy_experiment": source.get(
+            "review_strategy_experiment", ""),
+        "review_strategy_variant": source.get(
+            "review_strategy_variant", "inactive"),
         "created_at": now.isoformat(),
     }
     draft_id = _save_generation(record, path)
@@ -1452,6 +1488,10 @@ def generate(*, dry_run: bool = False, x_post_id: str | None = None,
         "social_anger_phase": record["social_anger_phase"],
         "social_anger_effective_score": record[
             "social_anger_effective_score"],
+        "review_strategy_id": record["review_strategy_id"],
+        "review_strategy_experiment": record[
+            "review_strategy_experiment"],
+        "review_strategy_variant": record["review_strategy_variant"],
         "text": text,
         "character_count": len(text),
         "quality_score": record["quality_score"],
@@ -1819,8 +1859,10 @@ def daily_review_summary(path: Path | None = None) -> dict:
             rows = [dict(row) for row in conn.execute("""
               SELECT g.threads_post_type,g.question_included,g.emoji_count,
               g.similarity_to_x,g.quality_score,g.safety_score,
+              g.review_strategy_id,g.review_strategy_experiment,
+              g.review_strategy_variant,
               p.published_at,m.views,m.replies,m.reposts,m.quotes,
-              m.engagement_rate
+              m.engagement_rate,m.views_per_hour
               FROM threads_generation_runs g
               LEFT JOIN threads_posts p ON p.generation_run_id=g.id
               LEFT JOIN threads_metrics m ON m.threads_post_id=p.threads_post_id
@@ -1834,10 +1876,33 @@ def daily_review_summary(path: Path | None = None) -> dict:
         if float(row.get("safety_score") or 0) >= 9
         and float(row.get("quality_score") or 0) >= 8
     ]
+    strategy_variants = {}
+    for variant in ("treatment", "control"):
+        group = [
+            row for row in safe_rows
+            if row.get("review_strategy_variant") == variant
+            and row.get("views") is not None
+        ]
+        strategy_variants[variant] = {
+            "sample_size": len(group),
+            "average_views": round(
+                sum(float(row.get("views") or 0) for row in group)
+                / len(group), 3,
+            ) if group else None,
+            "average_views_per_hour": round(
+                sum(float(row.get("views_per_hour") or 0) for row in group)
+                / len(group), 3,
+            ) if group else None,
+            "average_engagement_rate": round(
+                sum(float(row.get("engagement_rate") or 0) for row in group)
+                / len(group), 6,
+            ) if group else None,
+        }
     return {
         "sample_size": len(rows),
         "safe_success_sample_size": len(safe_rows),
         "comparison": comparison,
+        "review_strategy_variants": strategy_variants,
         "winning_patterns_exclude_unsafe": True,
     }
 

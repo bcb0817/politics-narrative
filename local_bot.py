@@ -840,6 +840,9 @@ def cmd_report() -> int:
                 h.get("review_strategy_active")),
             "review_strategy_experiment": h.get(
                 "review_strategy_experiment", ""),
+            "review_strategy_id": h.get("review_strategy_id", ""),
+            "review_strategy_variant": h.get(
+                "review_strategy_variant", "inactive"),
             "posted_at": h.get("posted_at_jst", ""),
             "posted_hour_jst": posted_dt.hour,
             "text_length": len(h.get("tweet_text", "") or ""),
@@ -1026,6 +1029,8 @@ def cmd_report() -> int:
             "prompt_version": performance_breakdown("prompt_version"),
             "review_strategy_experiment": performance_breakdown(
                 "review_strategy_experiment"),
+            "review_strategy_variant": performance_breakdown(
+                "review_strategy_variant"),
         },
         "repeated_structures": repeated_structures,
         "all_posts": rows,
@@ -1043,15 +1048,32 @@ def cmd_report() -> int:
     review_payload["threads"] = daily_review_summary()
     from review_strategy import (  # noqa: E402
         activate_strategy,
+        deactivate_strategy,
+        evaluate_strategy_performance,
         strategy_status,
         summarize_operational_logs,
     )
     review_payload["operational_log_summary"] = summarize_operational_logs(
         dirs["log"], start_jst, now_jst)
     current_strategy = strategy_status(ROOT_DIR)
+    prior_strategy = current_strategy.get("strategy", {})
+    prior_evaluation = evaluate_strategy_performance(
+        review_payload,
+        prior_strategy,
+        root_dir=ROOT_DIR,
+        now=now_jst,
+    )
+    review_payload["prior_strategy_evaluation"] = prior_evaluation
+    if prior_evaluation.get("status") == "rollback":
+        review_payload["prior_strategy_rollback"] = deactivate_strategy(
+            ROOT_DIR,
+            reason=str(prior_evaluation.get("reason") or "automatic_rollback"),
+            now=now_jst,
+        )
     review_payload["current_active_strategy"] = {
-        "active": current_strategy.get("active", False),
-        "strategy": current_strategy.get("strategy", {}),
+        "active": bool(prior_strategy) and (
+            prior_evaluation.get("status") != "rollback"),
+        "strategy": prior_strategy,
     }
     # Local aggregation is authoritative; one bounded LLM call adds trend analysis.
     # Failure is recorded but never makes the daily review fail or blocks posting.
@@ -1091,6 +1113,16 @@ def cmd_report() -> int:
             "[INFO] report: ChatGPT impression strategy not activated "
             f"({strategy_activation.get('reason', '')})"
         )
+    try:
+        from discord_notify import notify_review_strategy_result  # noqa: E402
+        review_payload["chatgpt_strategy_discord_sent"] = (
+            notify_review_strategy_result(
+                strategy_activation,
+                prior_evaluation=prior_evaluation,
+            )
+        )
+    except Exception:
+        review_payload["chatgpt_strategy_discord_sent"] = False
     latest_file = dirs["state"] / "daily_review_latest.json"
     payload_text = json.dumps(review_payload, ensure_ascii=False, indent=2)
     atomic_write_text(dated_file, payload_text)
@@ -2357,6 +2389,27 @@ def cmd_review_strategy_status() -> int:
     return 0
 
 
+def cmd_review_strategy_disable(confirm: bool) -> int:
+    """Disable the active ChatGPT strategy while preserving its audit trail."""
+    load_env(require=False)
+    if not confirm:
+        print(json.dumps({
+            "deactivated": False,
+            "reason": "confirmation_required",
+        }, ensure_ascii=False, indent=2))
+        return 2
+    if str(SRC_DIR) not in sys.path:
+        sys.path.insert(0, str(SRC_DIR))
+    from review_strategy import deactivate_strategy  # noqa: E402
+    print(json.dumps(
+        deactivate_strategy(
+            ROOT_DIR, reason="manual_cli_disable"),
+        ensure_ascii=False,
+        indent=2,
+    ))
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
@@ -2387,6 +2440,11 @@ def main() -> int:
     sub.add_parser(
         "review-strategy-status",
         help="ChatGPT日次レビューの有効方針を表示")
+    p_strategy_disable = sub.add_parser(
+        "review-strategy-disable",
+        help="ChatGPT日次レビュー方針を監査履歴を残して停止")
+    p_strategy_disable.add_argument(
+        "--confirm", action="store_true", help="停止を実行")
     sub.add_parser("weekly-review", help="週次レビューをローカル保存")
     sub.add_parser("preview-extensions", help="拡張投稿案をプレビュー保存（投稿なし）")
     sub.add_parser("budget-status", help="今月のOpenAI/X/合計費用を表示")
@@ -2778,6 +2836,8 @@ def main() -> int:
         return cmd_report()
     if args.command == "review-strategy-status":
         return cmd_review_strategy_status()
+    if args.command == "review-strategy-disable":
+        return cmd_review_strategy_disable(args.confirm)
     if args.command == "weekly-review":
         return cmd_weekly_report()
     if args.command == "preview-extensions":

@@ -363,6 +363,43 @@ def notify_post_success(post: dict[str, Any]) -> bool:
     )
 
 
+def notify_review_strategy_result(
+    activation: dict[str, Any],
+    *,
+    prior_evaluation: dict[str, Any] | None = None,
+) -> bool:
+    """Send only the daily strategy result, never raw prompts or metrics."""
+    evaluation = prior_evaluation or {}
+    activated = bool(activation.get("activated"))
+    rolled_back = evaluation.get("status") == "rollback"
+    if rolled_back:
+        title = "⚠️ ChatGPT投稿方針を自動停止"
+        description = "対照群比較または安全性評価で悪化を検知したため、旧方針を停止しました。"
+        level = "warning"
+    elif activated:
+        title = "✅ ChatGPT投稿方針を更新"
+        description = "日次レビューの検証条件を満たした方針を本番投稿へ反映しました。"
+        level = "success"
+    else:
+        title = "ℹ️ ChatGPT投稿方針は変更なし"
+        description = "検証条件を満たさなかったため、Botは安全な既定方針で継続します。"
+        level = "info"
+    policy = activation.get("policy") or {}
+    return notify(
+        "review_strategy",
+        title,
+        description,
+        level=level,
+        fields={
+            "結果": activation.get("reason") or evaluation.get("reason"),
+            "実験": policy.get("experiment_name")
+            or evaluation.get("experiment_name"),
+            "施策群": evaluation.get("treatment_count"),
+            "対照群": evaluation.get("control_count"),
+        },
+    )
+
+
 def notify_error(where: str, error: Any, **context: Any) -> bool:
     error_line = _clean(error, 300).splitlines()[0]
     return notify(

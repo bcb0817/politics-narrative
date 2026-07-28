@@ -254,11 +254,13 @@ def choose_post_style(news: dict, history: list[dict], now_jst: datetime) -> tup
     if steelman_count < 3 and (exploration or news.get("has_counter_claims")):
         candidates.append("steelman_counterargument")
     total = max(1, len(last24))
-    try:
-        from review_strategy import load_active_strategy
-        active_strategy = load_active_strategy(ROOT_DIR, now=now_jst)
-    except Exception:
-        active_strategy = {}
+    active_strategy = {}
+    if news.get("review_strategy_variant") != "control":
+        try:
+            from review_strategy import load_active_strategy
+            active_strategy = load_active_strategy(ROOT_DIR, now=now_jst)
+        except Exception:
+            active_strategy = {}
     priorities = active_strategy.get("post_type_priority") or []
     priority_bonus = {
         value: max(0.02, 0.10 - index * 0.02)
@@ -319,12 +321,14 @@ def classify_hook_type(news: dict, history: list[dict]) -> str:
         preferred = "question"
     else:
         preferred = "conclusion_first"
-    try:
-        from review_strategy import load_active_strategy
-        priorities = load_active_strategy(ROOT_DIR).get(
-            "hook_type_priority") or []
-    except Exception:
-        priorities = []
+    priorities = []
+    if news.get("review_strategy_variant") != "control":
+        try:
+            from review_strategy import load_active_strategy
+            priorities = load_active_strategy(ROOT_DIR).get(
+                "hook_type_priority") or []
+        except Exception:
+            priorities = []
     compatible = {
         "number": bool(re.search(r"\d", text)),
         "contrast": any(

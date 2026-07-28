@@ -1203,7 +1203,12 @@ def _candidate_count_for_news(news_item: dict) -> int:
     return max(1, min(value, 5))
 
 
-def _load_performance_patterns(topic_key: str = "", max_chars: int = 900) -> str:
+def _load_performance_patterns(
+    topic_key: str = "",
+    max_chars: int = 900,
+    *,
+    use_ai_strategy: bool = True,
+) -> str:
     """Load at most 3 relevant wins and 5 recent failure/avoid rules."""
     root = ROOT_DIR / "knowledge" / "viral_patterns"
     sections = []
@@ -1233,14 +1238,15 @@ def _load_performance_patterns(topic_key: str = "", max_chars: int = 900) -> str
             sections.append(f"【{label}】\n" + "\n".join(selected))
     out = "\n\n".join(sections).strip()
     ai_guidance = ""
-    try:
-        from review_strategy import (
-            load_active_strategy, render_prompt_guidance,
-        )
-        ai_guidance = render_prompt_guidance(
-            load_active_strategy(ROOT_DIR))
-    except Exception:
-        pass
+    if use_ai_strategy:
+        try:
+            from review_strategy import (
+                load_active_strategy, render_prompt_guidance,
+            )
+            ai_guidance = render_prompt_guidance(
+                load_active_strategy(ROOT_DIR))
+        except Exception:
+            pass
     if not ai_guidance:
         return out[:max_chars]
     ai_guidance = ai_guidance[:min(500, max_chars)]
@@ -1467,7 +1473,11 @@ def generate_candidates(news_item: dict, regeneration_attempt: int = 0, retries_
         summary=news_item.get("summary", "")[:1200],
         source_name=news_item.get("source_name", ""),
     )
-    perf = _load_performance_patterns(news_item.get("topic_key", ""))
+    perf = _load_performance_patterns(
+        news_item.get("topic_key", ""),
+        use_ai_strategy=(
+            news_item.get("review_strategy_variant") != "control"),
+    )
     if perf:
         user += "\n\n実績データ（report コマンドで集計した実際のインプレッション傾向）:\n" + perf
     user += (
@@ -1651,6 +1661,12 @@ def generate_candidates(news_item: dict, regeneration_attempt: int = 0, retries_
             news_item.get("review_strategy_experiment") or "")
         c["review_strategy_active"] = bool(
             news_item.get("review_strategy_active"))
+        c["review_strategy_id"] = str(
+            news_item.get("review_strategy_id") or "")
+        c["review_strategy_variant"] = str(
+            news_item.get("review_strategy_variant") or "inactive")
+        c["review_strategy_alignment_bonus"] = float(
+            news_item.get("review_strategy_alignment_bonus", 0) or 0)
         c["social_anger_connected"] = bool(
             social_review.get("production_publish_connected"))
         c["social_anger_phase"] = social_review.get("phase", "B")
@@ -1755,6 +1771,11 @@ def effective_score(c: dict, history: list) -> float:
     if c.get("social_anger_connected"):
         social_score = float(c.get("social_anger_effective_score", 0) or 0)
         base = (base * 0.8) + (social_score * 0.2)
+    base += min(
+        0.25,
+        max(0.0, float(c.get(
+            "review_strategy_alignment_bonus", 0) or 0)),
+    )
 
     return base
 
@@ -2105,20 +2126,43 @@ def main():
         enriched["topic_key"] = normalize_topic_key(
             enriched.get("title", ""), enriched.get("keywords") or []
         )
+        try:
+            from review_strategy import (
+                alignment_bonus,
+                assignment_for,
+                load_active_strategy,
+            )
+            active_review_strategy = load_active_strategy(
+                ROOT_DIR, now=now_jst)
+            review_variant = assignment_for(
+                enriched,
+                strategy=active_review_strategy,
+                now=now_jst,
+            )
+        except Exception:
+            active_review_strategy = {}
+            review_variant = "inactive"
+        enriched["review_strategy_active"] = bool(
+            active_review_strategy)
+        enriched["review_strategy_experiment"] = str(
+            active_review_strategy.get("experiment_name") or "")
+        enriched["review_strategy_id"] = str(
+            active_review_strategy.get("strategy_id") or "")
+        enriched["review_strategy_variant"] = review_variant
         enriched["post_type"], enriched["is_exploration"] = choose_post_style(
             enriched, history, now_jst)
         enriched["hook_type"] = classify_hook_type(enriched, history)
         enriched["critique_axis"] = classify_critique_axis(enriched)
         try:
-            from review_strategy import load_active_strategy
-            active_review_strategy = load_active_strategy(
-                ROOT_DIR, now=now_jst)
+            enriched["review_strategy_alignment_bonus"] = alignment_bonus(
+                active_review_strategy,
+                variant=review_variant,
+                post_type=enriched["post_type"],
+                hook_type=enriched["hook_type"],
+                posted_hour_jst=now_jst.hour,
+            )
         except Exception:
-            active_review_strategy = {}
-        enriched["review_strategy_active"] = bool(
-            active_review_strategy)
-        enriched["review_strategy_experiment"] = str(
-            active_review_strategy.get("experiment_name") or "")
+            enriched["review_strategy_alignment_bonus"] = 0.0
         genre_hits = {
             genre: sum(keyword in f"{enriched.get('title','')} {enriched.get('summary','')}" for keyword in keywords)
             for genre, keywords in GENRE_KEYWORDS.items()
@@ -2380,6 +2424,11 @@ def main():
             best.get("review_strategy_active")),
         "review_strategy_experiment": best.get(
             "review_strategy_experiment", ""),
+        "review_strategy_id": best.get("review_strategy_id", ""),
+        "review_strategy_variant": best.get(
+            "review_strategy_variant", "inactive"),
+        "review_strategy_alignment_bonus": best.get(
+            "review_strategy_alignment_bonus", 0.0),
         "social_anger_connected": bool(best.get("social_anger_connected")),
         "social_anger_phase": best.get("social_anger_phase", ""),
         "social_anger_effective_score": best.get(

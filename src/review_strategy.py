@@ -8,6 +8,7 @@ external publishing settings.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 from collections import Counter
@@ -40,6 +41,7 @@ STRATEGY_FILE = Path("knowledge") / "viral_patterns" / "chatgpt_strategy.json"
 STRATEGY_MARKDOWN = (
     Path("knowledge") / "viral_patterns" / "chatgpt_strategy.md"
 )
+STRATEGY_HISTORY = Path("data") / "chatgpt_strategy_history.jsonl"
 
 
 def _bool(name: str, default: bool) -> bool:
@@ -55,6 +57,103 @@ def _int(name: str, default: int, minimum: int, maximum: int) -> int:
     except (TypeError, ValueError):
         value = default
     return max(minimum, min(maximum, value))
+
+
+def _float(name: str, default: float, minimum: float, maximum: float) -> float:
+    try:
+        value = float(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(maximum, value))
+
+
+def _strategy_id(generated_at: str, experiment_name: str) -> str:
+    raw = f"{generated_at}|{experiment_name}".encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:16]
+
+
+def _append_history(root_dir: Path, event: dict) -> None:
+    """Append a bounded, credential-free strategy lifecycle event."""
+    path = root_dir / STRATEGY_HISTORY
+    path.parent.mkdir(parents=True, exist_ok=True)
+    safe = {
+        key: value for key, value in event.items()
+        if key in {
+            "event", "at", "strategy_id", "experiment_name", "reason",
+            "status", "treatment_count", "control_count",
+            "treatment_impressions_per_hour",
+            "control_impressions_per_hour", "performance_ratio",
+        }
+    }
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(safe, ensure_ascii=False) + "\n")
+
+
+def strategy_history(root_dir: Path, limit: int = 20) -> list[dict]:
+    try:
+        lines = (root_dir / STRATEGY_HISTORY).read_text(
+            encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    output = []
+    for line in lines[-max(1, min(100, int(limit))):]:
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(row, dict):
+            output.append(row)
+    return output
+
+
+def assignment_for(
+    item: dict,
+    *,
+    strategy: dict | None = None,
+    root_dir: Path | None = None,
+    now: datetime | None = None,
+) -> str:
+    """Deterministically assign an eligible item to treatment or control."""
+    if strategy is None:
+        strategy = load_active_strategy(root_dir or Path.cwd(), now=now)
+    if not strategy:
+        return "inactive"
+    ratio = _float(
+        "CHATGPT_DAILY_STRATEGY_TREATMENT_RATIO",
+        float(strategy.get("treatment_ratio", 0.8) or 0.8),
+        0.5,
+        0.9,
+    )
+    identity = "|".join([
+        str(strategy.get("strategy_id") or ""),
+        str(item.get("topic_key") or ""),
+        str(item.get("title") or item.get("tweet_id") or ""),
+    ])
+    bucket = int(hashlib.sha256(identity.encode("utf-8")).hexdigest()[:8], 16)
+    return "treatment" if (bucket % 10000) < int(ratio * 10000) else "control"
+
+
+def alignment_bonus(
+    strategy: dict,
+    *,
+    variant: str,
+    post_type: str,
+    hook_type: str,
+    posted_hour_jst: int,
+) -> float:
+    """Return a small presentation-only ranking bonus capped at 0.25."""
+    if not strategy or variant != "treatment":
+        return 0.0
+    bonus = 0.0
+    post_types = strategy.get("post_type_priority") or []
+    hooks = strategy.get("hook_type_priority") or []
+    if post_type in post_types:
+        bonus += max(0.02, 0.10 - post_types.index(post_type) * 0.02)
+    if hook_type in hooks:
+        bonus += max(0.02, 0.08 - hooks.index(hook_type) * 0.015)
+    if int(posted_hour_jst) in (strategy.get("preferred_hours_jst") or []):
+        bonus += 0.07
+    return round(min(0.25, bonus), 3)
 
 
 def summarize_operational_logs(
@@ -189,6 +288,20 @@ def activate_strategy(
     if reviewed_count < minimum_samples:
         result["reason"] = "insufficient_review_samples"
         return result
+    prior_evaluation = review_payload.get("prior_strategy_evaluation") or {}
+    current = review_payload.get("current_active_strategy") or {}
+    if (
+        current.get("active")
+        and prior_evaluation.get("status") in {"insufficient_data", "keep"}
+    ):
+        result["reason"] = (
+            "existing_strategy_collecting_samples"
+            if prior_evaluation.get("status") == "insufficient_data"
+            else "existing_strategy_retained"
+        )
+        result["policy"] = current.get("strategy") or {}
+        result["expires_at"] = result["policy"].get("expires_at", "")
+        return result
     if not isinstance(analysis, dict):
         result["reason"] = "llm_analysis_unavailable"
         return result
@@ -232,10 +345,22 @@ def activate_strategy(
     target_max = max(target_min + 20, min(260, target_max))
     expires_hours = _int(
         "CHATGPT_DAILY_STRATEGY_TTL_HOURS", 48, 12, 168)
+    experiment_name = re.sub(
+        r"[^a-zA-Z0-9_-]", "_",
+        str(policy.get("experiment_name") or "daily_review_strategy"),
+    )[:60]
+    if (
+        prior_evaluation.get("status") == "rollback"
+        and prior_evaluation.get("experiment_name") == experiment_name
+    ):
+        result["reason"] = "rolled_back_experiment_not_reactivated"
+        return result
+    generated_at = now.isoformat()
     active = {
-        "version": 1,
+        "version": 2,
+        "active": True,
         "source": "openai_daily_review",
-        "generated_at": now.isoformat(),
+        "generated_at": generated_at,
         "expires_at": (now + timedelta(hours=expires_hours)).isoformat(),
         "reviewed_count": reviewed_count,
         "objective": "maximize_impressions_with_safety_and_trust_unchanged",
@@ -248,10 +373,10 @@ def activate_strategy(
         "target_text_max": target_max,
         "body_structure": body_structure,
         "cta_style": cta_style,
-        "experiment_name": re.sub(
-            r"[^a-zA-Z0-9_-]", "_",
-            str(policy.get("experiment_name") or "daily_review_strategy"),
-        )[:60],
+        "experiment_name": experiment_name,
+        "strategy_id": _strategy_id(generated_at, experiment_name),
+        "treatment_ratio": _float(
+            "CHATGPT_DAILY_STRATEGY_TREATMENT_RATIO", 0.8, 0.5, 0.9),
         "safety_locked": True,
         "posting_limits_locked": True,
         "budgets_locked": True,
@@ -265,6 +390,13 @@ def activate_strategy(
     temporary.replace(target)
     markdown = root_dir / STRATEGY_MARKDOWN
     markdown.write_text(render_prompt_guidance(active), encoding="utf-8")
+    _append_history(root_dir, {
+        "event": "activated",
+        "at": now.isoformat(),
+        "strategy_id": active["strategy_id"],
+        "experiment_name": active["experiment_name"],
+        "reason": "validated_strategy_activated",
+    })
     result.update({
         "activated": True,
         "reason": "validated_strategy_activated",
@@ -283,6 +415,8 @@ def load_active_strategy(
     try:
         data = json.loads(
             (root_dir / STRATEGY_FILE).read_text(encoding="utf-8"))
+        if data.get("active", True) is not True:
+            return {}
         expires = datetime.fromisoformat(str(data.get("expires_at") or ""))
         if expires.tzinfo is None:
             expires = expires.replace(tzinfo=JST)
@@ -290,9 +424,161 @@ def load_active_strategy(
             return {}
         if not data.get("safety_locked"):
             return {}
+        if not data.get("strategy_id"):
+            data["strategy_id"] = _strategy_id(
+                str(data.get("generated_at") or ""),
+                str(data.get("experiment_name") or "daily_review_strategy"),
+            )
+        data.setdefault(
+            "treatment_ratio",
+            _float(
+                "CHATGPT_DAILY_STRATEGY_TREATMENT_RATIO",
+                0.8,
+                0.5,
+                0.9,
+            ),
+        )
         return data
     except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError):
         return {}
+
+
+def evaluate_strategy_performance(
+    review_payload: dict,
+    strategy: dict,
+    *,
+    root_dir: Path | None = None,
+    now: datetime | None = None,
+) -> dict:
+    """Compare treatment/control outcomes and recommend keep or rollback."""
+    now = now or datetime.now(JST)
+    if not strategy:
+        return {"status": "inactive", "reason": "no_active_strategy"}
+    strategy_id = str(strategy.get("strategy_id") or "")
+    experiment = str(strategy.get("experiment_name") or "")
+    matched = [
+        row for row in review_payload.get("all_posts", [])
+        if (
+            (strategy_id and row.get("review_strategy_id") == strategy_id)
+            or (
+                not strategy_id
+                and row.get("review_strategy_experiment") == experiment
+            )
+        )
+    ]
+    treatment = [
+        row for row in matched
+        if row.get("review_strategy_variant") == "treatment"
+    ]
+    control = [
+        row for row in matched
+        if row.get("review_strategy_variant") == "control"
+    ]
+
+    def average(rows: list[dict], key: str) -> float:
+        values = []
+        for row in rows:
+            try:
+                values.append(float(row.get(key, 0) or 0))
+            except (TypeError, ValueError):
+                continue
+        return round(sum(values) / len(values), 3) if values else 0.0
+
+    def unsafe_row(row: dict) -> bool:
+        raw_safety = row.get("safety_score")
+        try:
+            safety = 10.0 if raw_safety is None else float(raw_safety)
+        except (TypeError, ValueError):
+            safety = 10.0
+        return (
+            bool(row.get("correction_required"))
+            or bool(row.get("manual_delete_required"))
+            or bool(row.get("manual_delete"))
+            or safety < 7
+        )
+
+    unsafe = any(unsafe_row(row) for row in treatment)
+    minimum = _int("CHATGPT_STRATEGY_EVAL_MIN_PER_ARM", 3, 2, 20)
+    treatment_rate = average(treatment, "impressions_per_hour")
+    control_rate = average(control, "impressions_per_hour")
+    ratio = (
+        round(treatment_rate / control_rate, 3)
+        if control_rate > 0 else None
+    )
+    result = {
+        "status": "insufficient_data",
+        "reason": "minimum_samples_not_met",
+        "strategy_id": strategy_id,
+        "experiment_name": experiment,
+        "treatment_count": len(treatment),
+        "control_count": len(control),
+        "treatment_impressions_per_hour": treatment_rate,
+        "control_impressions_per_hour": control_rate,
+        "performance_ratio": ratio,
+    }
+    if unsafe:
+        result.update({
+            "status": "rollback",
+            "reason": "treatment_safety_regression",
+        })
+    elif len(treatment) >= minimum and len(control) >= minimum:
+        threshold = _float(
+            "CHATGPT_STRATEGY_ROLLBACK_RATIO", 0.8, 0.5, 0.95)
+        if ratio is not None and ratio < threshold:
+            result.update({
+                "status": "rollback",
+                "reason": "treatment_underperformed_control",
+            })
+        else:
+            result.update({
+                "status": "keep",
+                "reason": "treatment_not_materially_worse",
+            })
+    if root_dir is not None:
+        _append_history(root_dir, {
+            "event": "evaluated",
+            "at": now.isoformat(),
+            **result,
+        })
+    return result
+
+
+def deactivate_strategy(
+    root_dir: Path,
+    *,
+    reason: str,
+    now: datetime | None = None,
+) -> dict:
+    """Disable the current strategy without deleting its audit record."""
+    now = now or datetime.now(JST)
+    target = root_dir / STRATEGY_FILE
+    try:
+        data = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"deactivated": False, "reason": "no_strategy_file"}
+    data["active"] = False
+    data["deactivated_at"] = now.isoformat()
+    data["deactivation_reason"] = str(reason)[:160]
+    temporary = target.with_suffix(".tmp")
+    temporary.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(target)
+    (root_dir / STRATEGY_MARKDOWN).write_text(
+        "# ChatGPT日次レビュー方針\n\n現在は無効です。\n",
+        encoding="utf-8",
+    )
+    _append_history(root_dir, {
+        "event": "deactivated",
+        "at": now.isoformat(),
+        "strategy_id": data.get("strategy_id", ""),
+        "experiment_name": data.get("experiment_name", ""),
+        "reason": str(reason)[:160],
+    })
+    return {
+        "deactivated": True,
+        "reason": reason,
+        "strategy_id": data.get("strategy_id", ""),
+    }
 
 
 def render_prompt_guidance(strategy: dict) -> str:
@@ -335,4 +621,5 @@ def strategy_status(root_dir: Path) -> dict:
         "active": bool(active),
         "strategy": active,
         "path": str(root_dir / STRATEGY_FILE),
+        "history": strategy_history(root_dir, 10),
     }

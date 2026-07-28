@@ -154,6 +154,8 @@ CREATE TABLE IF NOT EXISTS threads_generation_runs (
  safety_score REAL, decision TEXT, decision_reason TEXT,
  input_tokens INTEGER, output_tokens INTEGER, estimated_cost_usd REAL,
  question_included INTEGER DEFAULT 0, emoji_count INTEGER DEFAULT 0,
+ review_strategy_id TEXT, review_strategy_experiment TEXT,
+ review_strategy_variant TEXT DEFAULT 'inactive',
  created_at TEXT);
 CREATE TABLE IF NOT EXISTS threads_posts (
  id INTEGER PRIMARY KEY, client_post_key TEXT UNIQUE,
@@ -604,6 +606,11 @@ def add_column_if_missing(table: str, column: str, declaration: str,
             "cover_width": "INTEGER", "cover_height": "INTEGER",
             "related_books_json": "TEXT",
         },
+        "threads_generation_runs": {
+            "review_strategy_id": "TEXT",
+            "review_strategy_experiment": "TEXT",
+            "review_strategy_variant": "TEXT DEFAULT 'inactive'",
+        },
     }
     if declaration != allowed.get(table, {}).get(column):
         raise ValueError("unsupported migration")
@@ -675,6 +682,11 @@ def apply_additive_migrations(path: Path | None = None) -> dict:
             "cover_path": "TEXT", "cover_status": "TEXT",
             "cover_width": "INTEGER", "cover_height": "INTEGER",
             "related_books_json": "TEXT",
+        },
+        "threads_generation_runs": {
+            "review_strategy_id": "TEXT",
+            "review_strategy_experiment": "TEXT",
+            "review_strategy_variant": "TEXT DEFAULT 'inactive'",
         },
     }
     added = {

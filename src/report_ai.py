@@ -143,6 +143,9 @@ def compact_daily_payload(payload: dict) -> dict:
                 "critique_axis": row.get("critique_axis", ""),
                 "review_strategy_experiment": row.get(
                     "review_strategy_experiment", ""),
+                "review_strategy_id": row.get("review_strategy_id", ""),
+                "review_strategy_variant": row.get(
+                    "review_strategy_variant", "inactive"),
                 "impressions": row.get("impressions", 0),
                 "growth_score": row.get("growth_score", 0),
                 "posted_hour_jst": row.get("posted_hour_jst", 0),
@@ -169,6 +172,8 @@ def compact_daily_payload(payload: dict) -> dict:
             "operational_log_summary", {}),
         "current_active_strategy": payload.get(
             "current_active_strategy", {}),
+        "prior_strategy_evaluation": payload.get(
+            "prior_strategy_evaluation", {}),
     }
 
 

@@ -205,6 +205,78 @@ class ReviewStrategyTests(unittest.TestCase):
         self.assertIn("ChatGPT日次レビュー", output)
         self.assertLessEqual(len(output), 900)
 
+    def test_17_assignment_is_deterministic_and_bounded(self):
+        policy = self.activate()["policy"]
+        item = {"topic_key": "budget", "title": "予算案を公表"}
+        first = review_strategy.assignment_for(
+            item, strategy=policy, now=self.now)
+        second = review_strategy.assignment_for(
+            item, strategy=policy, now=self.now)
+        self.assertEqual(first, second)
+        self.assertIn(first, {"treatment", "control"})
+
+    def test_18_control_does_not_receive_chatgpt_guidance(self):
+        self.activate()
+        patterns = self.root / "knowledge" / "viral_patterns"
+        (patterns / "winning_patterns.md").write_text(
+            "- legacy", encoding="utf-8")
+        with patch.object(post, "ROOT_DIR", self.root):
+            output = post._load_performance_patterns(
+                use_ai_strategy=False)
+        self.assertNotIn("ChatGPT日次レビュー", output)
+        self.assertIn("legacy", output)
+
+    def test_19_underperformance_rolls_back_after_minimum_samples(self):
+        policy = self.activate()["policy"]
+        rows = []
+        for index in range(3):
+            rows.append({
+                "review_strategy_id": policy["strategy_id"],
+                "review_strategy_variant": "treatment",
+                "impressions_per_hour": 10,
+            })
+            rows.append({
+                "review_strategy_id": policy["strategy_id"],
+                "review_strategy_variant": "control",
+                "impressions_per_hour": 20,
+            })
+        result = review_strategy.evaluate_strategy_performance(
+            {"all_posts": rows}, policy, root_dir=self.root, now=self.now)
+        self.assertEqual(result["status"], "rollback")
+        self.assertEqual(
+            result["reason"], "treatment_underperformed_control")
+
+    def test_20_deactivation_preserves_history_and_disables_loading(self):
+        policy = self.activate()["policy"]
+        result = review_strategy.deactivate_strategy(
+            self.root, reason="test", now=self.now)
+        self.assertTrue(result["deactivated"])
+        self.assertEqual(
+            review_strategy.load_active_strategy(self.root, now=self.now), {})
+        history = review_strategy.strategy_history(self.root)
+        self.assertEqual(history[-1]["event"], "deactivated")
+        self.assertEqual(history[-1]["strategy_id"], policy["strategy_id"])
+
+    def test_21_alignment_bonus_only_applies_to_treatment(self):
+        policy = self.activate()["policy"]
+        treatment = review_strategy.alignment_bonus(
+            policy,
+            variant="treatment",
+            post_type="comparison_factcheck",
+            hook_type="number",
+            posted_hour_jst=6,
+        )
+        control = review_strategy.alignment_bonus(
+            policy,
+            variant="control",
+            post_type="comparison_factcheck",
+            hook_type="number",
+            posted_hour_jst=6,
+        )
+        self.assertGreater(treatment, 0)
+        self.assertLessEqual(treatment, 0.25)
+        self.assertEqual(control, 0)
+
 
 if __name__ == "__main__":
     unittest.main()
