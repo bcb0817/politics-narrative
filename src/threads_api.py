@@ -28,10 +28,14 @@ import requests
 from api_budget import finalize, reserve
 from metrics_db import apply_additive_migrations, connect, db_path, write
 from openai_usage import calculate_cost, load_pricing, usage_from_response
+from social_anger import (
+    evaluate_production_candidate as evaluate_social_anger_candidate,
+    production_prompt_context as social_anger_prompt_context,
+)
 
 
 JST = ZoneInfo("Asia/Tokyo")
-PROMPT_VERSION = "threads-conversation-v1"
+PROMPT_VERSION = "threads-public-accountability-v2"
 POST_TYPES = {
     "conversation_explainer", "issue_question", "steelman_comparison",
     "policy_context", "evergreen_explainer", "daily_digest",
@@ -1036,7 +1040,8 @@ def _candidate_query(path: Path | None = None,
     query = f"""SELECT p.tweet_id,p.text x_text,p.posted_at,p.topic_key,
       p.post_type,g.id generated_post_id,g.quality_score,g.ban_risk,
       n.id news_id,n.title,n.summary,n.source_name,n.source_url,
-      n.verified,n.final_news_score,n.source_reliability_score,
+      n.source_type,n.genre,n.metadata_json,n.verified,n.final_news_score,
+      n.source_reliability_score,
       COALESCE(q.correction_required,0) correction_required,
       COALESCE(q.manual_delete_required,0) manual_delete_required,
       COALESCE(q.personal_attack_score,0) personal_attack_score
@@ -1078,6 +1083,18 @@ def _candidate_query(path: Path | None = None,
             continue
         if float(row.get("personal_attack_score") or 0) > 2.0:
             continue
+        try:
+            metadata = json.loads(row.pop("metadata_json", "") or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            metadata = {}
+        for key in (
+            "affected_group", "decision_maker", "beneficiary", "cost_bearer",
+            "responsible_entity", "major_incident", "incident_phase",
+            "term_evidence",
+        ):
+            if key in metadata:
+                row[key] = metadata[key]
+        row["content_id"] = str(row.get("news_id") or "")
         return row
     return None
 
@@ -1091,6 +1108,14 @@ def similarity_to_x(threads_text: str, x_text: str) -> float:
 def _emoji_count(text: str) -> int:
     return len(re.findall(
         r"[\U0001F300-\U0001FAFF\u2600-\u27BF]", text))
+
+
+def _is_serious_source(source: dict) -> bool:
+    source_text = " ".join([
+        str(source.get("title") or ""),
+        str(source.get("summary") or ""),
+    ])
+    return any(term in source_text for term in HIGH_RISK_TERMS)
 
 
 def _avoid_repeated_closing(question: bool,
@@ -1120,21 +1145,46 @@ def _local_text(source: dict, question: bool = False,
         "公式情報を確認すると、決定そのものだけでなく、"
         "実施主体と継続的な負担の設計を分けて見る必要があります。"
     )
-    ending = (
-        "賛成・反対の結論より先に、どの条件なら制度が続くのかを確認したいです。"
+    try:
+        social = social_anger_prompt_context(
+            source, persist=False)["prompt_context"]
+    except Exception:
+        social = {}
+    affected = "、".join(social.get("affected_group") or []) or "影響を受ける人"
+    responsible = (
+        "、".join(social.get("responsible_entity") or [])
+        or "決定・監督する側"
     )
+    improvement = str(social.get("proposed_improvement") or (
+        "対象者、費用、実施主体、期限、見直し条件を公開する。"
+    ))
+    ending = ""
     if question:
-        ending = "この制度で、先に明確にしてほしい条件は何でしょうか？"
+        ending = str(social.get("public_question") or (
+            "実施主体は、検証結果と見直し期限をいつ公開しますか。"
+        ))
+        if ending.endswith("か。"):
+            ending = ending[:-1] + "？"
+        elif not ending.endswith(("？", "?")):
+            ending = ending.rstrip("。") + "？"
     lead = "🧵 " if emoji else ""
+    ending_block = f"\n\n{ending}" if ending else ""
     text = (
-        f"{lead}{topic}について、見出しだけでは分かりにくい点があります。\n\n"
+        f"{lead}{topic}。まず確認できる事実は次の通りです。\n\n"
         f"{detail}\n\n"
-        "方向性に理解できる部分があっても、対象者、実施主体、費用、"
-        "見直し時期が曖昧なままでは、評価を急ぐことはできません。"
-        "国会や行政には、判断材料を数字と期限で示す責任があります。\n\n"
-        f"{ending}"
+        f"影響を受けるのは{affected}。説明と検証の責任は"
+        f"{responsible}にあります。求めたい改善は、{improvement}"
+        "評価に必要なのは、実施前後で何を測り、結果が悪ければ"
+        "誰がいつ見直すかという検証手順です。"
+        f"{ending_block}"
     )
-    return text[:settings()["target_max_chars"]]
+    limit = settings()["target_max_chars"]
+    if len(text) <= limit:
+        return text
+    if ending_block:
+        body_limit = max(1, limit - len(ending_block))
+        return text[:body_limit].rstrip() + ending_block
+    return text[:limit].rstrip()
 
 
 def quality_check(text: str, source: dict, x_text: str) -> dict:
@@ -1161,9 +1211,28 @@ def quality_check(text: str, source: dict, x_text: str) -> dict:
     if _emoji_count(text) > max(
         0, _int("THREADS_EMOJI_MAX_PER_POST", 1)):
         reasons.append("too_many_emoji")
+    if (
+        _bool("THREADS_EMOJI_REQUIRED", "true")
+        and not _is_serious_source(source)
+        and _emoji_count(text) == 0
+    ):
+        reasons.append("emoji_required")
     if len(re.findall(r"#[^\s#]+", text)) > max(
         0, _int("THREADS_HASHTAG_MAX_PER_POST", 1)):
         reasons.append("too_many_hashtags")
+    try:
+        social_review = evaluate_social_anger_candidate(
+            source, text, platform="threads", persist=True)
+        reasons.extend(
+            f"social_anger:{value}"
+            for value in social_review.get("safety_violations") or []
+        )
+    except Exception:
+        social_review = {
+            "production_publish_connected": False,
+            "phase": "B",
+            "effective_score": 0,
+        }
     quality = max(0.0, 10.0 - len(set(reasons)) * 2.0)
     return {
         "passed": not reasons and quality >= 8.0,
@@ -1173,6 +1242,11 @@ def quality_check(text: str, source: dict, x_text: str) -> dict:
         "reasons": sorted(set(reasons)),
         "question_included": text.rstrip().endswith(("？", "?")),
         "emoji_count": _emoji_count(text),
+        "social_anger_connected": bool(
+            social_review.get("production_publish_connected")),
+        "social_anger_phase": social_review.get("phase", "B"),
+        "social_anger_effective_score": float(
+            social_review.get("effective_score", 0) or 0),
     }
 
 
@@ -1237,14 +1311,20 @@ def _openai_text(source: dict, client_factory=None,
             instructions=(
                 "確認済み政治ニュースからThreads専用の日本語投稿を作る。"
                 "X本文をコピーせず、要点、制度背景、論点の順で180〜450文字。"
-                "断定・個人攻撃・煽り・内部ラベルは禁止。質問は必要な場合だけ。"
-                "絵文字最大1、ハッシュタグ最大1。"
+                "確認済み事実、影響を受ける人、決定・監督責任、具体的な改善要求を"
+                "読みやすく整理する。社会の不満を扱う場合も怒りを煽らず、"
+                "事実と評価を分ける。政党・個人・属性集団への敵意、群衆行動の誘導、"
+                "意図の推測、未確認の断定は禁止。質問は必要な場合だけ。"
+                "重大事件を除き絵文字は必ず1個、重大事件は0個。"
+                "ハッシュタグ最大1。"
             ),
             input=json.dumps({
                 "title": source.get("title"),
                 "summary": source.get("summary"),
                 "topic_key": source.get("topic_key"),
                 "x_text_to_avoid_copying": source.get("x_text"),
+                "public_accountability_context": social_anger_prompt_context(
+                    source, persist=False)["prompt_context"],
             }, ensure_ascii=False),
             max_output_tokens=cfg["max_output_tokens"],
             text={"format": {
@@ -1313,10 +1393,9 @@ def generate(*, dry_run: bool = False, x_post_id: str | None = None,
             str(source["tweet_id"]).encode()).hexdigest(), 16) % 10 < 4
     )
     question = _avoid_repeated_closing(question, path)
-    emoji = (
-        int(hashlib.sha256(
-            ("emoji:" + str(source["tweet_id"])).encode()).hexdigest(), 16)
-        % 100 < round(cfg["emoji_target_ratio"] * 100)
+    emoji = bool(
+        _bool("THREADS_EMOJI_REQUIRED", "true")
+        and not _is_serious_source(source)
     )
     payload = {}
     usage = {}
@@ -1355,6 +1434,11 @@ def generate(*, dry_run: bool = False, x_post_id: str | None = None,
         "estimated_cost_usd": usage.get("estimated_cost_usd", 0.0),
         "question_included": checked["question_included"],
         "emoji_count": checked["emoji_count"],
+        "social_anger_connected": checked.get(
+            "social_anger_connected", False),
+        "social_anger_phase": checked.get("social_anger_phase", "B"),
+        "social_anger_effective_score": checked.get(
+            "social_anger_effective_score", 0.0),
         "created_at": now.isoformat(),
     }
     draft_id = _save_generation(record, path)
@@ -1364,6 +1448,10 @@ def generate(*, dry_run: bool = False, x_post_id: str | None = None,
         "source_x_post_id": record["source_x_post_id"],
         "topic_key": record["topic_key"],
         "threads_post_type": post_type,
+        "social_anger_connected": record["social_anger_connected"],
+        "social_anger_phase": record["social_anger_phase"],
+        "social_anger_effective_score": record[
+            "social_anger_effective_score"],
         "text": text,
         "character_count": len(text),
         "quality_score": record["quality_score"],

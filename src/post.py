@@ -67,6 +67,11 @@ from api_budget import (estimate_openai, estimate_x, finalize as finalize_budget
 from metrics_db import insert_generated, insert_news, insert_published, write as db_write
 from phase2 import classify_if_needed, save_extension_previews
 from discord_notify import notify_error, notify_post_success
+from social_anger import (
+    evaluate_production_candidate as evaluate_social_anger_candidate,
+    production_prompt_context as social_anger_prompt_context,
+    record_target as record_social_anger_target,
+)
 
 # ---------------------------------------------------------------------------
 # 定数
@@ -387,10 +392,12 @@ def _score_gate_allows(
     stagnation_fallback: bool,
 ) -> bool:
     """Relax only the performance score; safety checks run before this gate."""
+    fallback_floor = _env_float("LOW_QUALITY_FALLBACK_MIN_SCORE", 4.5)
     return bool(
         force_bypass
         or effective_score >= MIN_POST_SCORE
         or rescue_rule_applied
+        or (stagnation_fallback and effective_score >= fallback_floor)
     )
 
 # ---------------------------------------------------------------------------
@@ -613,6 +620,23 @@ def recent_types(history: list, n: int = 5) -> list:
     """直近 n 件の投稿タイプを返す。型の偏り抑制に使う。"""
     return [h.get("post_type") or h.get("type") for h in history[-n:]
             if h.get("post_type") or h.get("type")]
+
+
+def _classification_or_local_fallback(
+    enriched: dict,
+    classifier=None,
+) -> dict:
+    """Keep deterministic metadata when the optional classifier is unavailable."""
+    classifier = classifier or classify_if_needed
+    classified = classifier(enriched)
+    if classified is not None:
+        return classified
+    fallback = dict(enriched)
+    fallback["classification_mode"] = "local_limit_fallback"
+    fallback["classification_confidence"] = max(
+        0.65, float(fallback.get("classification_confidence") or 0)
+    )
+    return fallback
 
 
 def is_duplicate(candidate: dict, history: list) -> bool:
@@ -1142,16 +1166,41 @@ CANDIDATE_RESPONSE_SCHEMA = {
 
 
 def _get_candidate_count() -> int:
-    """1ニュースあたりの生成候補数（既定1）。1〜3にクランプ。
-    少ないほど出力トークンとコストが下がる。"""
+    """Return the normal candidate count, clamped to the supported range."""
     try:
-        v = int(os.getenv("CANDIDATES_PER_NEWS", "1"))
+        v = int(os.getenv("CANDIDATES_PER_NEWS", "3"))
     except (TypeError, ValueError):
-        v = 1
-    return max(1, min(v, 3))
+        v = 3
+    return max(1, min(v, 5))
 
 
 CANDIDATES_PER_NEWS = _get_candidate_count()
+
+
+def _candidate_count_for_news(news_item: dict) -> int:
+    """Generate five angles for important topics and three for normal topics."""
+    concept_enabled = os.environ.get(
+        "SOCIAL_ANGER_CONCEPT_ENABLED", "true").strip().lower() in {
+            "1", "true", "yes", "on",
+        }
+    if not concept_enabled:
+        return CANDIDATES_PER_NEWS
+    important = bool(
+        news_item.get("important")
+        or news_item.get("major_incident")
+        or float(news_item.get("final_news_score", 0) or 0) >= 8.0
+        or news_item.get("post_type") == "breaking_news"
+    )
+    key = (
+        "SOCIAL_ANGER_CANDIDATES_PER_IMPORTANT_TOPIC" if important
+        else "SOCIAL_ANGER_CANDIDATES_PER_NORMAL_TOPIC"
+    )
+    default = 5 if important else 3
+    try:
+        value = int(os.environ.get(key, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(1, min(value, 5))
 
 
 def _load_performance_patterns(topic_key: str = "", max_chars: int = 900) -> str:
@@ -1284,6 +1333,17 @@ _EMOJI_PATTERN = re.compile(
 )
 
 
+def _is_serious_news(news_item: dict) -> bool:
+    source_text = " ".join([
+        str(news_item.get("title", "")),
+        str(news_item.get("summary", "")),
+    ])
+    return any(term in source_text for term in (
+        "司法", "裁判", "判決", "逮捕", "死亡", "死者", "災害", "地震",
+        "戦争", "開戦", "停戦",
+    ))
+
+
 def _candidate_quality_violations(candidate: dict, news_item: dict) -> list[str]:
     """Cheap deterministic checks that block template leakage and off-topic axes."""
     text = (candidate.get("tweet_text") or "").strip()
@@ -1328,8 +1388,14 @@ def _candidate_quality_violations(candidate: dict, news_item: dict) -> list[str]
     emojis = _EMOJI_PATTERN.findall(text)
     if len(emojis) > max(0, _env_int("EMOJI_MAX_PER_POST", 1)):
         violations.append("too_many_emojis")
-    serious = any(term in source_text for term in (
-        "司法", "裁判", "判決", "逮捕", "死亡", "死者", "災害", "地震", "戦争", "開戦", "停戦"))
+    serious = _is_serious_news(news_item)
+    if (
+        not serious
+        and os.environ.get("EMOJI_REQUIRED", "true").strip().lower()
+        in {"1", "true", "yes", "on"}
+        and not emojis
+    ):
+        violations.append("emoji_required")
     if serious and emojis:
         violations.append("emoji_on_serious_news")
     if "\n\n" not in text:
@@ -1352,7 +1418,7 @@ def generate_candidates(news_item: dict, regeneration_attempt: int = 0, retries_
         log(f"[ERROR] openai SDK import failed: {e}")
         return []
 
-    n = CANDIDATES_PER_NEWS
+    n = _candidate_count_for_news(news_item)
     state = _openai_usage_state()
     router = ModelRouter(OPENAI_PRICING_FILE)
     route = router.select_model(
@@ -1396,6 +1462,20 @@ def generate_candidates(news_item: dict, regeneration_attempt: int = 0, retries_
         "importance_score・source_reliability_score・claim_risk・quality_scoreも必ず評価する。"
         "モデル名、料金、ルーティング理由など内部情報は公開本文へ書かない。"
     )
+    try:
+        social_context = social_anger_prompt_context(
+            news_item, persist=True)["prompt_context"]
+        user += (
+            "\n\n社会的負担・責任の整理（確認済みニュースだけを根拠に使う）:\n"
+            + json.dumps(social_context, ensure_ascii=False)
+            + "\n投稿では、怒りを煽るのではなく、確認済み事実→影響を受ける人"
+              "→決定・監督責任→具体的な改善要求の順で整理する。"
+              "事実と評価を明確に分け、政党・個人・属性集団への敵意、"
+              "群衆行動の誘導、意図の推測、未確認の断定は禁止する。"
+              "候補ごとに事実・負担・責任・改善の角度を変える。"
+        )
+    except Exception as exc:
+        log(f"[WARN] Social anger prompt context unavailable: {type(exc).__name__}")
 
     # One candidate normally fits well under this cap. Reasoning tokens are also
     # counted against max_output_tokens, so keep a modest configurable buffer.
@@ -1499,7 +1579,25 @@ def generate_candidates(news_item: dict, regeneration_attempt: int = 0, retries_
                 c["tweet_text"] = "\n\n".join(nonempty_lines)
         if not c["tweet_text"]:
             continue
+        if (
+            not _is_serious_news(news_item)
+            and os.environ.get("EMOJI_REQUIRED", "true").strip().lower()
+            in {"1", "true", "yes", "on"}
+            and not _EMOJI_PATTERN.search(c["tweet_text"])
+        ):
+            c["tweet_text"] = "📌 " + c["tweet_text"]
+            if lines:
+                lines[0] = "📌 " + str(lines[0])
+                c["tweet_lines"] = lines
+            c["final_text"] = c["tweet_text"]
         violations = _candidate_quality_violations(c, news_item)
+        social_review = evaluate_social_anger_candidate(
+            news_item, c["tweet_text"], platform="x", persist=True)
+        c["social_anger"] = social_review
+        severe_social_violations = social_review.get("safety_violations") or []
+        if severe_social_violations:
+            violations.extend(
+                f"social_anger:{value}" for value in severe_social_violations)
         if violations:
             rejected_violations.extend(violations)
             log(
@@ -1536,6 +1634,17 @@ def generate_candidates(news_item: dict, regeneration_attempt: int = 0, retries_
         c["estimated_cost_usd"] = actual_cost
         c["prompt_version"] = os.environ.get("PROMPT_VERSION", "x-growth-quality-v2")
         c["is_exploration"] = bool(news_item.get("is_exploration"))
+        c["social_anger_connected"] = bool(
+            social_review.get("production_publish_connected"))
+        c["social_anger_phase"] = social_review.get("phase", "B")
+        c["social_anger_effective_score"] = float(
+            social_review.get("effective_score", 0) or 0)
+        c["social_anger_axis"] = (
+            social_review.get("assessment") or {}).get("anger_axis", "")
+        c["social_anger_target_type"] = (
+            social_review.get("assessment") or {}).get(
+                "anger_target_type", "")
+        c["social_anger_roles"] = social_review.get("prompt_context") or {}
         if not (c.get("hook") or "").strip():
             first_line = next((str(x).strip() for x in lines if str(x).strip()), "")
             c["hook"] = first_line or (c.get("title") or "").strip()
@@ -1626,6 +1735,9 @@ def effective_score(c: dict, history: list) -> float:
 
     if ttype == "strong_opinion" and quote >= 7 and angle >= 7 and ban <= 4:
         base += 0.4
+    if c.get("social_anger_connected"):
+        social_score = float(c.get("social_anger_effective_score", 0) or 0)
+        base = (base * 0.8) + (social_score * 0.2)
 
     return base
 
@@ -1989,10 +2101,9 @@ def main():
         enriched["genre"] = best_genre if best_hits else "未分類"
         enriched["classification_confidence"] = 0.9 if best_hits >= 2 and ties == 1 else (0.7 if best_hits == 1 and ties == 1 else 0.4)
         if _env_bool("PHASE2_ENABLED", "true") and enriched["classification_confidence"] < 0.65:
-            classified = classify_if_needed(enriched)
-            if classified is None:
-                continue
-            enriched = classified
+            enriched = _classification_or_local_fallback(enriched)
+            if enriched.get("classification_mode") == "local_limit_fallback":
+                log("[INFO] Classifier unavailable; using deterministic local classification")
         is_breaking = enriched["post_type"] == "breaking_news"
         normal_daily_limit = _env_int("ORIGINAL_DAILY_POST_MAX", 8)
         if cost_forecast().get("restriction_level", 0) >= 7:
@@ -2238,6 +2349,13 @@ def main():
         "openai_model": best.get("openai_model", ""),
         "prompt_version": best.get("prompt_version", "x-growth-quality-v2"),
         "is_exploration": bool(best.get("is_exploration")),
+        "social_anger_connected": bool(best.get("social_anger_connected")),
+        "social_anger_phase": best.get("social_anger_phase", ""),
+        "social_anger_effective_score": best.get(
+            "social_anger_effective_score", 0.0),
+        "social_anger_axis": best.get("social_anger_axis", ""),
+        "social_anger_target_type": best.get(
+            "social_anger_target_type", ""),
         "automation_type": "automated_original",
     }
     if best.get("post_type") == "morning_evening_digest":
@@ -2264,6 +2382,24 @@ def main():
         "news_title": best.get("title", ""),
         "major_update_signature": normalize_topic_key(best.get("title", "")),
     })
+    if best.get("social_anger_connected"):
+        roles = best.get("social_anger_roles") or {}
+        responsible = roles.get("responsible_entity") or []
+        target_name = str(responsible[0]) if responsible else str(
+            best.get("social_anger_target_type") or "policy")
+        try:
+            record_social_anger_target(
+                str(best.get("topic_key") or ""),
+                str(best.get("social_anger_target_type") or "unknown"),
+                normalize_topic_key(target_name),
+                target_name,
+                published_at=now_jst,
+            )
+        except Exception as exc:
+            log(
+                "[WARN] Social anger target history write failed: "
+                f"{type(exc).__name__}"
+            )
     log("[INFO] Slot and post history recorded.")
     log_attempt({
         "decision": "post", "reason": "success",
@@ -2277,6 +2413,8 @@ def main():
         "ban_risk": ban,
         "post_format": post_format,
         "openai_model": best.get("openai_model", ""),
+        "social_anger_connected": bool(best.get("social_anger_connected")),
+        "social_anger_phase": best.get("social_anger_phase", ""),
         "low_quality_fallback": stagnation_fallback,
         "attempted_recorded": True,
         "posted_recorded": True,

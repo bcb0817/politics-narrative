@@ -2234,6 +2234,67 @@ def _growth_output(action: str, **kwargs) -> int:
     return 0
 
 
+def _current_affairs_output(action: str, **kwargs) -> int:
+    """Run the local-only current-affairs Phase A engine."""
+    load_env(require=False)
+    ensure_dirs()
+    import current_affairs
+
+    actions = {
+        "status": lambda: current_affairs.status(),
+        "list": lambda: current_affairs.categories(),
+        "classify": lambda: current_affairs.classify_items(
+            content_id=kwargs.get("content_id"),
+            dry_run=kwargs.get("dry_run", True)),
+        "mix": lambda: current_affairs.mix_config(),
+        "candidates": lambda: current_affairs.category_candidates(
+            category=kwargs.get("category"),
+            dry_run=kwargs.get("dry_run", True)),
+        "performance": lambda: current_affairs.performance(
+            category=kwargs.get("category")),
+        "exclusions": lambda: current_affairs.exclusions(),
+        "sources": lambda: current_affairs.source_health(),
+        "daily": lambda: current_affairs.daily_report(
+            dry_run=kwargs.get("dry_run", True)),
+        "weekly": lambda: current_affairs.weekly_report(
+            dry_run=kwargs.get("dry_run", True)),
+        "full_cycle": lambda: current_affairs.full_cycle(
+            dry_run=kwargs.get("dry_run", True)),
+    }
+    result = actions[action]()
+    print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    return 0
+
+
+def _social_anger_output(action: str, **kwargs) -> int:
+    """Run the local-only evidence-based social anger Phase A engine."""
+    load_env(require=False)
+    ensure_dirs()
+    import social_anger
+
+    actions = {
+        "status": lambda: social_anger.status(),
+        "assess": lambda: social_anger.assess_items(
+            content_id=kwargs.get("content_id"),
+            dry_run=kwargs.get("dry_run", True)),
+        "candidates": lambda: social_anger.candidate_cycle(
+            content_id=kwargs.get("content_id"),
+            dry_run=kwargs.get("dry_run", True)),
+        "targets": lambda: social_anger.targets_report(),
+        "risk": lambda: social_anger.risk_report(),
+        "solution_gaps": lambda: social_anger.solution_gaps(),
+        "daily": lambda: social_anger.daily_report(
+            dry_run=kwargs.get("dry_run", True)),
+        "weekly": lambda: social_anger.weekly_report(
+            dry_run=kwargs.get("dry_run", True)),
+        "full_cycle": lambda: social_anger.full_cycle(
+            dry_run=kwargs.get("dry_run", True)),
+    }
+    result = actions[action]()
+    print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
@@ -2401,6 +2462,50 @@ def main() -> int:
         item = sub.add_parser(command, help=help_text)
         item.add_argument("--dry-run", action="store_true")
     sub.add_parser("growth-status", help="需要発見・在庫・昇格エンジンの状態を表示")
+    sub.add_parser("current-affairs-status", help="Current affairs Phase A status")
+    sub.add_parser("category-list", help="List current affairs categories")
+    p_category_classify = sub.add_parser("category-classify", help="Classify local topics")
+    p_category_classify.add_argument("--content-id")
+    p_category_classify.add_argument("--dry-run", action="store_true")
+    sub.add_parser("category-mix-status", help="Show category mix safeguards")
+    p_category_candidates = sub.add_parser("category-candidates", help="Build local category candidates")
+    p_category_candidates.add_argument("--category")
+    p_category_candidates.add_argument("--dry-run", action="store_true")
+    p_category_performance = sub.add_parser("category-performance", help="Show category-relative performance")
+    p_category_performance.add_argument("--category")
+    sub.add_parser("category-exclusions", help="Show brand-fit exclusions")
+    sub.add_parser("category-source-health", help="Show category source registry")
+    for command, help_text in (
+        ("current-affairs-daily-report", "Save category daily report"),
+        ("current-affairs-weekly-report", "Save category weekly proposal"),
+        ("current-affairs-full-cycle", "Run local-only current affairs Phase A"),
+    ):
+        item = sub.add_parser(command, help=help_text)
+        item.add_argument("--dry-run", action="store_true")
+    sub.add_parser(
+        "social-anger-status",
+        help="事実と制度に基づく社会的怒りPhase Aの状態を表示")
+    p_social_anger_assess = sub.add_parser(
+        "social-anger-assess", help="負担・決定・責任と怒りの妥当性を評価")
+    p_social_anger_assess.add_argument("--content-id")
+    p_social_anger_assess.add_argument("--dry-run", action="store_true")
+    p_social_anger_candidates = sub.add_parser(
+        "social-anger-candidates", help="X・Threads向け複数角度候補を生成")
+    p_social_anger_candidates.add_argument("--content-id")
+    p_social_anger_candidates.add_argument("--dry-run", action="store_true")
+    sub.add_parser(
+        "social-anger-targets", help="批判対象の集中度を表示")
+    sub.add_parser(
+        "social-anger-risk-report", help="怒り搾取・集団攻撃・名誉毀損リスクを表示")
+    sub.add_parser(
+        "social-anger-solution-gaps", help="批判から改善策への未接続を表示")
+    for command, help_text in (
+        ("social-anger-daily-report", "社会的怒りPhase Aの日次レポートを保存"),
+        ("social-anger-weekly-report", "社会的怒りPhase Aの週次提案を保存"),
+        ("social-anger-full-cycle", "外部投稿なしで社会的怒りPhase A全工程を実行"),
+    ):
+        item = sub.add_parser(command, help=help_text)
+        item.add_argument("--dry-run", action="store_true")
     sub.add_parser("source-health", help="公式情報源レジストリの状態を表示")
     p_growth_budget = sub.add_parser(
         "growth-budget-simulation", help="新しい候補生産量のAPI費用を試算")
@@ -2728,6 +2833,48 @@ def main() -> int:
             days=args.days)
     if args.command == "growth-full-cycle":
         return _growth_output("full_cycle", dry_run=args.dry_run)
+    if args.command == "current-affairs-status":
+        return _current_affairs_output("status")
+    if args.command == "category-list":
+        return _current_affairs_output("list")
+    if args.command == "category-classify":
+        return _current_affairs_output("classify", content_id=args.content_id, dry_run=args.dry_run)
+    if args.command == "category-mix-status":
+        return _current_affairs_output("mix")
+    if args.command == "category-candidates":
+        return _current_affairs_output("candidates", category=args.category, dry_run=args.dry_run)
+    if args.command == "category-performance":
+        return _current_affairs_output("performance", category=args.category)
+    if args.command == "category-exclusions":
+        return _current_affairs_output("exclusions")
+    if args.command == "category-source-health":
+        return _current_affairs_output("sources")
+    if args.command == "current-affairs-daily-report":
+        return _current_affairs_output("daily", dry_run=args.dry_run)
+    if args.command == "current-affairs-weekly-report":
+        return _current_affairs_output("weekly", dry_run=args.dry_run)
+    if args.command == "current-affairs-full-cycle":
+        return _current_affairs_output("full_cycle", dry_run=args.dry_run)
+    if args.command == "social-anger-status":
+        return _social_anger_output("status")
+    if args.command == "social-anger-assess":
+        return _social_anger_output(
+            "assess", content_id=args.content_id, dry_run=args.dry_run)
+    if args.command == "social-anger-candidates":
+        return _social_anger_output(
+            "candidates", content_id=args.content_id, dry_run=args.dry_run)
+    if args.command == "social-anger-targets":
+        return _social_anger_output("targets")
+    if args.command == "social-anger-risk-report":
+        return _social_anger_output("risk")
+    if args.command == "social-anger-solution-gaps":
+        return _social_anger_output("solution_gaps")
+    if args.command == "social-anger-daily-report":
+        return _social_anger_output("daily", dry_run=args.dry_run)
+    if args.command == "social-anger-weekly-report":
+        return _social_anger_output("weekly", dry_run=args.dry_run)
+    if args.command == "social-anger-full-cycle":
+        return _social_anger_output("full_cycle", dry_run=args.dry_run)
     if args.command == "threads-auth-url":
         return _threads_output(
             "auth_url", scope_profile=args.scope_profile)

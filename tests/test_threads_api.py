@@ -74,6 +74,13 @@ class ThreadsApiTests(unittest.TestCase):
             "topic_key": "policy-a",
         }
 
+    def test_local_text_does_not_repeat_removed_fixed_closing(self):
+        text = threads_api._local_text(self.source(), question=True)
+        self.assertNotIn(
+            "この制度で、先に明確にしてほしい条件は何でしょうか？",
+            text,
+        )
+
     def add_x_source(self, tweet_id="x1", verified=1, hours_ago=2):
         now = datetime.now(threads_api.JST)
         news_id = metrics_db.write(
@@ -166,6 +173,13 @@ class ThreadsApiTests(unittest.TestCase):
     def test_18_question_variant_ends_with_question(self):
         self.assertTrue(threads_api._local_text(
             self.source(), question=True).endswith("？"))
+
+    def test_18b_repeated_pro_con_closing_is_removed(self):
+        forbidden = "賛成・反対の結論より先に、どの条件なら制度が続くのかを確認したいです。"
+        self.assertNotIn(forbidden, threads_api._local_text(self.source()))
+        self.assertNotIn(
+            forbidden, threads_api._local_text(self.source(), question=True)
+        )
 
     def test_19_similarity_identical_is_one(self):
         self.assertEqual(threads_api.similarity_to_x("同じ", "同じ"), 1.0)

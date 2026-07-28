@@ -148,8 +148,8 @@ class GrowthQualityV2Tests(unittest.TestCase):
                                         source_reliability=9)
         self.assertEqual(route["model"], "gpt-5.6-luna")
 
-    def test_17_luna_limit_is_two(self):
-        self.assertEqual(int(os.environ.get("DAILY_IMPORTANT_MODEL_LIMIT", "2")), 2)
+    def test_17_luna_limit_supports_normal_daily_output(self):
+        self.assertEqual(int(os.environ.get("DAILY_IMPORTANT_MODEL_LIMIT", "6")), 6)
 
     def test_18_nano_is_only_needed_for_ambiguous_items(self):
         self.assertFalse(phase2.classification_needed({"topic_key": "税制", "genre": "税制"}))

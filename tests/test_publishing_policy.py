@@ -1,6 +1,7 @@
 import os
 import sys
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -75,9 +76,12 @@ class PublishingPolicyTests(unittest.TestCase):
         failed = [{"posted_at_jst": (self.now - timedelta(hours=5)).isoformat()}]
         self.assertFalse(stagnation_fallback_active(failed, self.now, 3))
 
-    def test_low_quality_fallback_does_not_relax_score_threshold(self):
+    def test_low_quality_fallback_uses_a_bounded_floor(self):
         self.assertFalse(post._score_gate_allows(3.0, False, False, False))
         self.assertFalse(post._score_gate_allows(3.0, False, False, True))
+        with patch.dict(os.environ, {"LOW_QUALITY_FALLBACK_MIN_SCORE": "4.5"}):
+            self.assertTrue(post._score_gate_allows(5.0, False, False, True))
+            self.assertFalse(post._score_gate_allows(4.4, False, False, True))
 
     def test_topic_cooldown_within_four_hours(self):
         rows = [{

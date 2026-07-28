@@ -1,5 +1,43 @@
 # politics-narrative
 
+## Current Affairs Expansion Phase A
+
+久世ゆい Social Content Factory は、政治を中核に、経済・企業、重大事件、
+AI・テクノロジー、サイバー、社会・生活、安全保障、災害・インフラを
+「制度・お金・責任・安全」の視点で整理する時事解説AIへ拡張しました。
+
+Phase Aはカテゴリ分類、brand fit評価、候補在庫、Short・記事・長尺候補、
+カテゴリ別レポートだけをローカル生成します。既存のX/Threads投稿数、
+プロフィール、重大事案処理、note・動画公開経路は変更しません。
+SNSは需要発見だけに使い、事実確認には一次資料と信頼できる報道を使います。
+
+```powershell
+.\.venv\Scripts\python.exe local_bot.py current-affairs-status
+.\.venv\Scripts\python.exe local_bot.py category-list
+.\.venv\Scripts\python.exe local_bot.py category-classify --dry-run
+.\.venv\Scripts\python.exe local_bot.py current-affairs-full-cycle --dry-run
+```
+
+詳細は `IMPLEMENTATION_PLAN_CURRENT_AFFAIRS_EXPANSION.md`、
+`config/current_affairs_categories.json`、
+`config/current_affairs_sources.json` を参照してください。
+
+## 社会的怒りの構造化
+
+「社会の怒りを届ける」を、感情の増幅ではなく、負担・受益・意思決定・
+責任・説明不足を事実で整理する候補生成・安全評価機能として追加しています。
+Phase Bはシャドー比較、Phase Cは制度・予算・行政プロセスなど低リスク対象
+だけをX・Threads生成へ接続します。重要テーマは最大5案、通常テーマは最大3案を
+比較し、既存の安全・品質・間隔・日次上限・予算判定を通った1案だけを投稿します。
+
+```powershell
+.\.venv\Scripts\python.exe local_bot.py social-anger-status
+.\.venv\Scripts\python.exe local_bot.py social-anger-full-cycle --dry-run
+```
+
+詳細は `docs/SOCIAL_ANGER_PHASE_A.md` を参照してください。
+
+
 
 ## 現在の投稿方針
 

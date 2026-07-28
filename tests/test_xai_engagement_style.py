@@ -146,8 +146,10 @@ class NewRequirementsTests(unittest.TestCase):
         self.assertIn("emoji_on_serious_news", post._candidate_quality_violations(
             {"tweet_text": text}, {"title": "裁判の重要判決"}))
 
-    def test_15_three_hour_silence_never_lowers_quality(self):
-        self.assertFalse(post._score_gate_allows(3, False, False, True))
+    def test_15_silence_fallback_uses_bounded_quality_relaxation(self):
+        with patch.dict(os.environ, {"LOW_QUALITY_FALLBACK_MIN_SCORE": "4.5"}):
+            self.assertTrue(post._score_gate_allows(5, False, False, True))
+            self.assertFalse(post._score_gate_allows(3, False, False, True))
 
     def test_16_evergreen_daily_limit_is_one(self):
         now = datetime.now(JST).replace(hour=12, minute=0, second=0, microsecond=0)

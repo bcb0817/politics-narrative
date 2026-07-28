@@ -77,6 +77,9 @@ class Phase1Tests(unittest.TestCase):
         rows[0]["posted_at_jst"] = (self.now - timedelta(minutes=59)).isoformat()
         self.assertEqual(pre_generation_skip_reason(rows, self.now, 12, 60), "minimum_post_interval")
 
+    def test_06b_low_quality_fallback_starts_after_ninety_minutes(self):
+        self.assertEqual(float(os.environ["LOW_QUALITY_FALLBACK_HOURS"]), 1.5)
+
     def test_07_topic_cooldown(self):
         recent = [{"topic_key": "防衛予算", "last_posted_at": (self.now - timedelta(hours=2)).isoformat(), "news_title": "防衛予算を検討"}]
         self.assertEqual(topic_cooldown_skip_reason("防衛予算", "防衛予算を協議", recent, self.now, 4), "topic_cooldown")
@@ -86,6 +89,20 @@ class Phase1Tests(unittest.TestCase):
 
     def test_09_post_disabled_is_default_for_test(self):
         self.assertFalse(post.POST_ENABLED)
+
+    def test_09b_classifier_limit_keeps_local_metadata_candidate(self):
+        source = {
+            "topic_key": "税制改正",
+            "genre": "税財政",
+            "classification_confidence": 0.4,
+            "verified": True,
+        }
+        result = post._classification_or_local_fallback(
+            source, classifier=lambda _: None
+        )
+        self.assertEqual(result["topic_key"], "税制改正")
+        self.assertEqual(result["classification_mode"], "local_limit_fallback")
+        self.assertGreaterEqual(result["classification_confidence"], 0.65)
 
     def test_10_url_is_rejected(self):
         candidate = {"tweet_text": "🚨 見出し\n\n本文 https://example.com " + "説明" * 60}
