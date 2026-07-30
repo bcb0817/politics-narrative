@@ -284,6 +284,46 @@ class ThreadsFullApiTests(unittest.TestCase):
         self.add_post()
         result = full.collect_post_insights(self.client, path=self.path)
         self.assertEqual(result["saved"], 6)
+        self.assertEqual(result["api_calls"], 1)
+        self.assertEqual(
+            self.client.calls.count(("insights", "p1")), 1)
+
+    def test_77a_post_insights_complete_post_makes_no_api_call(self):
+        self.add_post()
+        first = full.collect_post_insights(self.client, path=self.path)
+        self.client.calls.clear()
+        second = full.collect_post_insights(self.client, path=self.path)
+        self.assertEqual(first["saved"], 6)
+        self.assertEqual(second, {
+            "status": "completed", "api_calls": 0, "saved": 0,
+            "skipped": 1, "failed": 0,
+        })
+        self.assertEqual(self.client.calls, [])
+
+    def test_77b_post_insights_reuses_payload_for_missing_due_windows(self):
+        self.add_post()
+        measured = datetime.now(threads_api.JST).isoformat()
+        metrics_db.write("""INSERT INTO threads_post_insights
+          (threads_post_id,measurement_window,measured_at,created_at,updated_at)
+          VALUES (?,?,?,?,?)""", ("p1", "15m", measured, measured, measured),
+                         self.path)
+        result = full.collect_post_insights(self.client, path=self.path)
+        self.assertEqual(
+            (result["api_calls"], result["saved"], result["failed"]),
+            (1, 5, 0))
+        self.assertEqual(
+            self.client.calls.count(("insights", "p1")), 1)
+
+    def test_77c_post_insights_preserves_missing_metrics_as_null(self):
+        self.add_post()
+        self.client.insights = lambda _post: {
+            "data": [{"name": "views", "values": [{"value": 100}]}]}
+        full.collect_post_insights(self.client, path=self.path)
+        with closing(metrics_db.connect(self.path)) as conn:
+            row = conn.execute(
+                """SELECT likes,replies,reposts,quotes,shares
+                   FROM threads_post_insights LIMIT 1""").fetchone()
+        self.assertEqual(tuple(row), (None, None, None, None, None))
 
     def test_78_account_insights_save(self):
         result = full.collect_account_insights(self.client, path=self.path)
@@ -316,6 +356,61 @@ class ThreadsFullApiTests(unittest.TestCase):
         full.search(
             "選挙", search_mode="TAG", client=self.client, path=self.path)
         self.assertEqual(self.client.calls[0][2]["search_mode"], "TAG")
+
+    def test_84b_search_period_is_part_of_cache_key(self):
+        full.search(
+            "政治", since="2026-07-20T00:00:00Z",
+            client=self.client, path=self.path)
+        result = full.search(
+            "政治", since="2026-07-21T00:00:00Z",
+            client=self.client, path=self.path)
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(len(self.client.calls), 2)
+
+    def test_84c_empty_result_is_not_api_failure_and_is_cached(self):
+        client = FakeFullClient()
+        client.keyword_search = Mock(return_value=[])
+        first = full.search("該当なし", client=client, path=self.path)
+        second = full.search("該当なし", client=client, path=self.path)
+        self.assertEqual(first["status"], "empty")
+        self.assertEqual(first["result_count"], 0)
+        self.assertEqual(second["status"], "cached")
+        self.assertEqual(second["cached_result_status"], "empty")
+
+    def test_84d_api_failure_is_persisted_separately(self):
+        client = FakeFullClient()
+        client.keyword_search = Mock(side_effect=RuntimeError("offline"))
+        result = full.search("障害", client=client, path=self.path)
+        self.assertEqual(result["status"], "failing")
+        self.assertIsNone(result["result_count"])
+        with closing(metrics_db.connect(self.path)) as connection:
+            row = connection.execute("""SELECT status,error_class,result_count,
+              live_or_cached FROM threads_search_queries
+              ORDER BY id DESC LIMIT 1""").fetchone()
+        self.assertEqual(row["status"], "failed")
+        self.assertEqual(row["error_class"], "RuntimeError")
+        self.assertIsNone(row["result_count"])
+        self.assertEqual(row["live_or_cached"], "live")
+
+    def test_84e_missing_token_is_distinct_from_missing_scope(self):
+        with patch.dict(os.environ, {"THREADS_ACCESS_TOKEN": ""}):
+            result = full.search("政治", client=self.client, path=self.path)
+        self.assertEqual(result["status"], "missing_credentials")
+
+    def test_84f_pagination_metadata_counts_pages(self):
+        client = threads_api.ThreadsClient(path=self.path)
+        payloads = iter([
+            {
+                "data": [{"id": "1"}],
+                "paging": {"cursors": {"after": "next-1"}},
+            },
+            {"data": [{"id": "2"}], "paging": {"cursors": {}}},
+        ])
+        client._request = Mock(side_effect=lambda *args, **kwargs: next(payloads))
+        result = client.keyword_search("政治", return_metadata=True)
+        self.assertEqual(result["page_count"], 2)
+        self.assertEqual([row["id"] for row in result["data"]], ["1", "2"])
+        self.assertFalse(result["pagination_truncated"])
 
     def test_85_trend_without_sample_is_insufficient(self):
         self.assertEqual(

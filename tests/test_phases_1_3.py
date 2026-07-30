@@ -43,12 +43,23 @@ def history_rows(now, normal=0, breaking=0):
 
 class FakeMetricClient:
     missing = False
+    last_tweet_fields = []
     def __init__(self, **kwargs): pass
     def get_tweets(self, ids, **kwargs):
-        data = [] if self.missing else [SimpleNamespace(id=value, public_metrics={
-            "impression_count": 100, "like_count": 5, "retweet_count": 2,
-            "reply_count": 1, "quote_count": 1, "bookmark_count": 1,
-            "user_profile_clicks": 3, "url_link_clicks": 0}) for value in ids]
+        type(self).last_tweet_fields = list(kwargs.get("tweet_fields") or [])
+        data = [] if self.missing else [SimpleNamespace(
+            id=value,
+            public_metrics={
+                "like_count": 5, "retweet_count": 2, "reply_count": 1,
+                "quote_count": 1, "bookmark_count": 1,
+            },
+            non_public_metrics={
+                "impression_count": 100,
+                "user_profile_clicks": 3,
+                "url_link_clicks": 0,
+            },
+            organic_metrics={},
+        ) for value in ids]
         return SimpleNamespace(data=data)
 
 
@@ -163,6 +174,8 @@ class Phase3Tests(unittest.TestCase):
             rows = [{"tweet_id": "1", "posted_at_jst": (now - timedelta(hours=80)).isoformat()}]
             result = post_metrics.collect(rows, now, FakeMetricClient, path)
             self.assertEqual(result["collected"], 5)
+            self.assertIn("non_public_metrics", FakeMetricClient.last_tweet_fields)
+            self.assertIn("organic_metrics", FakeMetricClient.last_tweet_fields)
 
     def test_22_same_window_is_not_collected_twice(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:

@@ -351,6 +351,8 @@ def reserve(provider: str, operation: str, model_or_endpoint: str, maximum_cost:
                 "weekly_report": _float("OPENAI_WEEKLY_REVIEW_BUDGET_USD", .75),
                 "quality_eval": _float("OPENAI_QUALITY_EVAL_BUDGET_USD", .5),
                 "content_pipeline": _float("OPENAI_CONTENT_PIPELINE_BUDGET_USD", .5),
+                "post_experiment_candidates": _float(
+                    "POST_EXPERIMENT_OPENAI_MONTHLY_BUDGET_USD", .5),
                 # This is an operation cap inside the existing OpenAI $15
                 # provider ceiling, not an addition to the $36 total.
                 "free_note_generation": _float(

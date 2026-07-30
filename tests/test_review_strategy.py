@@ -25,7 +25,9 @@ class ReviewStrategyTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
-        self.now = datetime(2026, 7, 28, 4, 40, tzinfo=review_strategy.JST)
+        # Keep the active-strategy TTL meaningful regardless of test run date.
+        self.now = datetime.now(review_strategy.JST).replace(
+            hour=4, minute=40, second=0, microsecond=0)
         self.payload = {
             "reviewed_count": 4,
             "all_posts": [

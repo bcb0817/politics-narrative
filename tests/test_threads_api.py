@@ -43,6 +43,27 @@ class FakeThreadsClient:
 
 
 class ThreadsApiTests(unittest.TestCase):
+    def test_multistage_threads_text_is_reused_without_api_call(self):
+        text = (
+            "政府が法案を提出した。X版を切り詰めた文章ではなく、"
+            "Threads向けに制度の対象、負担、検証責任を独立して説明する。"
+        )
+        factory = Mock(side_effect=AssertionError("OpenAI should not be called"))
+        payload, usage = threads_api._openai_text({
+            "politics_threads_text": text,
+        }, client_factory=factory)
+        self.assertEqual(payload["text"], text)
+        self.assertEqual(usage["estimated_cost_usd"], 0.0)
+        factory.assert_not_called()
+
+    def test_generated_posts_has_independent_threads_text_column(self):
+        with closing(sqlite3.connect(self.path)) as conn:
+            columns = {
+                row[1] for row in conn.execute(
+                    "PRAGMA table_info(generated_posts)")
+            }
+        self.assertIn("threads_text", columns)
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.path = Path(self.tmp.name) / "metrics.sqlite3"

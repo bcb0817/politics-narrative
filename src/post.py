@@ -1425,7 +1425,7 @@ def _candidate_quality_violations(candidate: dict, news_item: dict) -> list[str]
 LAST_GENERATION_FAILURE_REASON = ""
 
 
-def generate_candidates(news_item: dict, regeneration_attempt: int = 0, retries_used: int = 0) -> list:
+def _generate_candidates_legacy(news_item: dict, regeneration_attempt: int = 0, retries_used: int = 0) -> list:
     """Generate structured X post candidates with the OpenAI Responses API."""
     api_key = os.environ.get("OPENAI_API_KEY", "").strip()
     if not api_key:
@@ -1698,8 +1698,276 @@ def generate_candidates(news_item: dict, regeneration_attempt: int = 0, retries_
                 f"{news_item.get('summary', '')}\n再生成指示: 前回は品質検査で拒否。"
                 "内部ラベルを本文へ出さず、ニュース固有の事実と指定した批判軸だけで書き直す。"
             )
-            return generate_candidates(retry_item, regeneration_attempt + 1, retry_consumed + 1)
+            return _generate_candidates_legacy(
+                retry_item, regeneration_attempt + 1, retry_consumed + 1)
     return cleaned
+
+
+def _multistage_model(role: str, routed_model: str) -> str:
+    key = {
+        "analysis": "POLITICS_ANALYSIS_MODEL",
+        "writer": "POLITICS_WRITER_MODEL",
+        "judge": "POLITICS_JUDGE_MODEL",
+        "finalizer": "POLITICS_FINALIZER_MODEL",
+    }.get(role, "POLITICS_WRITER_MODEL")
+    return os.environ.get(key, "").strip() or routed_model
+
+
+def _multistage_candidate(
+    news_item: dict, history: list[dict], *,
+    candidate_count: int | None = None, minimum_mode: bool = False,
+    call_budget: dict | None = None,
+) -> list[dict]:
+    """Run the bounded pipeline and adapt its single winner to legacy metadata."""
+    from politics_multistage import (
+        MultiStagePipeline, PipelineConfig,
+        call_structured_json_with_retry,
+    )
+    from article_content import enrich_article
+
+    news_item = enrich_article(news_item, root=ROOT_DIR)
+
+    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("openai_api_key_missing")
+    from openai import OpenAI
+
+    state = _openai_usage_state()
+    route = ModelRouter(OPENAI_PRICING_FILE).select_model(
+        "post_generation",
+        importance_score=float(news_item.get("final_news_score", 0) or 0),
+        genre=str(news_item.get("genre", "")),
+        source_reliability=float(
+            news_item.get("source_reliability_score", 0) or 0),
+        claim_risk=str(news_item.get("claim_risk", "low") or "low"),
+        budget_state=state, daily_usage=_today_usage(state),
+        text=f"{news_item.get('title', '')} {news_item.get('summary', '')}",
+    )
+    routed_model = str(route.get("model") or "")
+    if not routed_model:
+        raise RuntimeError(route.get("skip_reason") or "model_route_skip")
+    client = OpenAI(
+        api_key=api_key,
+        timeout=max(15.0, _env_float("OPENAI_TIMEOUT_SECONDS", 90.0)),
+        max_retries=0,
+    )
+    call_budget = call_budget if call_budget is not None else {
+        "count": 0,
+        "max": max(1, _env_int(
+            "POLITICS_MAX_API_CALLS_PER_ARTICLE", 12)),
+    }
+
+    def call_json(stage: str, prompt: str, schema: dict, role: str) -> dict:
+        model = _multistage_model(role, routed_model)
+        max_tokens = min(4000, max(
+            900, _env_int("OPENAI_MAX_OUTPUT_TOKENS_POST", 1800)))
+        reservation, reason = reserve_budget(
+            "openai", "post_generation", model,
+            estimate_openai(model, 6000, max_tokens),
+            metadata={"generation_reason": f"politics_multistage_{stage}"},
+        )
+        if not reservation:
+            raise RuntimeError(reason or "openai_budget_guard")
+        last_error = None
+
+        def create_once():
+            if call_budget["count"] >= call_budget["max"]:
+                raise RuntimeError("politics_api_call_limit")
+            call_budget["count"] += 1
+            return client.responses.create(
+                model=model,
+                instructions=(
+                    "日本の政治ニュース編集工程。指定JSON Schemaへ厳密に従い、"
+                    "入力にない事実・数字・動機を作らない。JSON以外を書かない。"
+                ),
+                input=prompt,
+                max_output_tokens=max_tokens,
+                text={"format": {
+                    "type": "json_schema",
+                    "name": f"politics_{stage}",
+                    "strict": True,
+                    "schema": schema,
+                }},
+                store=False,
+            )
+
+        try:
+            response, payload, _attempts = call_structured_json_with_retry(
+                create_once, max_attempts=2)
+            actual_cost = _record_openai_usage(
+                response, model, f"multistage:{stage}",
+                fallback_used=bool(route.get("fallback_used")),
+            )
+            usage = getattr(response, "usage", None)
+            details = getattr(usage, "input_tokens_details", None)
+            finalize_budget(
+                reservation, actual_cost, success=True,
+                input_tokens=int(getattr(usage, "input_tokens", 0) or 0),
+                cached_tokens=int(getattr(details, "cached_tokens", 0) or 0),
+                output_tokens=int(getattr(usage, "output_tokens", 0) or 0),
+                fallback_used=bool(route.get("fallback_used")),
+            )
+            payload["__usage"] = {
+                "model": model,
+                "api_attempts": _attempts,
+                "input_tokens": int(
+                    getattr(usage, "input_tokens", 0) or 0),
+                "output_tokens": int(
+                    getattr(usage, "output_tokens", 0) or 0),
+                "estimated_cost_usd": actual_cost,
+            }
+            return payload
+        except Exception as exc:
+            last_error = exc
+        finalize_budget(
+            reservation, 0, success=False,
+            error_type=type(last_error).__name__ if last_error else "unknown",
+        )
+        raise RuntimeError(
+            f"politics_{stage}_failed:{type(last_error).__name__}:"
+            f"{str(last_error)[:120]}")
+
+    embedding_model = os.environ.get(
+        "POLITICS_EMBEDDING_MODEL", "").strip()
+
+    def embed_texts(texts: list[str]) -> list[list[float]]:
+        if not embedding_model:
+            return []
+        if call_budget["count"] >= call_budget["max"]:
+            raise RuntimeError("politics_api_call_limit")
+        call_budget["count"] += 1
+        response = client.embeddings.create(
+            model=embedding_model, input=texts)
+        return [list(row.embedding) for row in response.data]
+
+    config = PipelineConfig.from_env()
+    if candidate_count is not None:
+        config.candidate_count = max(
+            1, min(config.angle_count, int(candidate_count)))
+    pipeline = MultiStagePipeline(
+        call_json, root=ROOT_DIR, history=history,
+        config=config, embed_texts=embed_texts if embedding_model else None)
+    result = pipeline.run(news_item, minimum_mode=minimum_mode)
+    winner = result.get("winner") or {}
+    text = str(result.get("final_text") or "").strip()
+    if not winner or not text:
+        raise RuntimeError("politics_multistage_no_safe_winner")
+    safety = winner.get("safety_scores") or {}
+    quality = winner.get("quality_scores") or {}
+    score_map = {
+        "news": round(float(safety.get("factual_accuracy", 0) or 0)),
+        "controversy": round(float(quality.get("emotional_resonance", 0) or 0)),
+        "data_ability": round(float(quality.get("specificity", 0) or 0)),
+        "resonance": round(float(quality.get("daily_life_relevance", 0) or 0)),
+        "save_value": round(float(quality.get("specificity", 0) or 0)),
+        "quote_likelihood": round(float(quality.get("quotability", 0) or 0)),
+        "early_reaction_likelihood": round(float(quality.get("scroll_stop", 0) or 0)),
+        "quote_angle_strength": round(float(quality.get("argument_strength", 0) or 0)),
+        "text_diagram_clarity": round(float(quality.get("specificity", 0) or 0)),
+        "policy_structure_value": round(float(quality.get("accountability_clarity", 0) or 0)),
+        "conservative_angle_strength": round(float(quality.get("argument_strength", 0) or 0)),
+        "evergreen_value": round(float(quality.get("novelty", 0) or 0)),
+        "source_trust": round(float(safety.get("source_support", 0) or 0)),
+        "ban_risk": round(float(safety.get("policy_violation_risk", 0) or 0)),
+    }
+    candidate = {
+        "topic_key": news_item.get("topic_key", ""),
+        "post_type": news_item.get("post_type", "strong_opinion"),
+        "hook_type": news_item.get("hook_type", "conclusion_first"),
+        "title": news_item.get("title", ""),
+        "tweet_lines": text.splitlines(),
+        "tweet_text": text,
+        "final_text": text,
+        "threads_text": result.get("threads_text", ""),
+        "genre": news_item.get("genre", "国会法案"),
+        "critique_axis": news_item.get("critique_axis", ""),
+        "hook": winner.get("hook", text.splitlines()[0] if text else ""),
+        "opinion_conclusion": winner.get("thesis", ""),
+        "claim_summary": winner.get("thesis", ""),
+        "angle_id": winner.get("angle_id", ""),
+        "template_id": winner.get("template_id", ""),
+        "target_actor": winner.get("target_actor", ""),
+        "scores": score_map,
+        "overall": max(0, min(10, round(float(
+            winner.get("final_score", 0) or 0)))),
+        "decision_reason": (
+            f"multistage winner={winner.get('candidate_id','')} "
+            f"angle={winner.get('angle_id','')}"
+        ),
+        "source_url": news_item.get("url", ""),
+        "source_name": news_item.get("source_name", ""),
+        "keywords": news_item.get("keywords", []),
+        "uses_unverified_number": False,
+        "quality_score": float(winner.get("final_score", 0) or 0),
+        "ban_risk": score_map["ban_risk"],
+        "importance_score": float(news_item.get("final_news_score", 0) or 0),
+        "source_reliability_score": float(
+            news_item.get("source_reliability_score", 0) or 0),
+        "claim_risk": news_item.get("claim_risk", "low"),
+        "is_breaking": news_item.get("post_type") == "breaking_news",
+        "prompt_version": "politics-multistage-v1",
+        "politics_analysis": result.get("analysis", {}),
+        "politics_model_usage": {
+            **result.get("model_usage", {}),
+            "article_api_calls": call_budget["count"],
+        },
+    }
+    violations = _candidate_quality_violations(candidate, news_item)
+    if violations:
+        raise RuntimeError("multistage_quality_gate:" + ",".join(violations))
+    candidate["_db_generated_id"] = insert_generated(
+        news_item.get("_db_news_id"), candidate)
+    return [candidate]
+
+
+def generate_candidates(
+    news_item: dict, regeneration_attempt: int = 0, retries_used: int = 0
+) -> list:
+    """Prefer multi-stage generation and safely fall back to the legacy path."""
+    enabled = os.environ.get(
+        "POLITICS_ENABLE_MULTI_STAGE_GENERATION", "true"
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    call_budget = {
+        "count": 0,
+        "max": max(1, _env_int(
+            "POLITICS_MAX_API_CALLS_PER_ARTICLE", 12)),
+    }
+    if enabled:
+        history = load_post_history()
+        attempts = (
+            ("full", None, False),
+            ("reduced", min(3, _env_int(
+                "POLITICS_CANDIDATE_COUNT", 6)), False),
+            ("minimum", 1, True),
+        )
+        for label, count, minimum in attempts:
+            if call_budget["count"] >= call_budget["max"]:
+                break
+            try:
+                if label != "full":
+                    log(f"[INFO] Politics fallback stage: {label}")
+                return _multistage_candidate(
+                    news_item, history, candidate_count=count,
+                    minimum_mode=minimum, call_budget=call_budget)
+            except Exception as exc:
+                global LAST_GENERATION_FAILURE_REASON
+                LAST_GENERATION_FAILURE_REASON = str(exc)[:240]
+                log(
+                    f"[WARN] Multi-stage {label} failed: "
+                    f"{type(exc).__name__}")
+        if call_budget["count"] >= call_budget["max"]:
+            LAST_GENERATION_FAILURE_REASON = "politics_api_call_limit"
+            return []
+        if os.environ.get(
+            "POLITICS_FALLBACK_TO_LEGACY", "true"
+        ).strip().lower() not in {"1", "true", "yes", "on"}:
+            return []
+        log("[INFO] Politics fallback stage: legacy")
+        call_budget["count"] += 1
+        return _generate_candidates_legacy(
+            news_item, regeneration_attempt, retries_used=1)
+    return _generate_candidates_legacy(
+        news_item, regeneration_attempt, retries_used)
 
 # 実効スコアの加重（合計で割って 0〜10 相当に正規化する）
 EFFECTIVE_WEIGHTS = {
@@ -2212,7 +2480,16 @@ def main():
     # --- 候補生成・採点（複数ニュースからベスト1を選ぶ） ---
     best = None
     best_score = -1.0
-    for item in eligible_news:
+    politics_max_articles_raw = os.environ.get(
+        "POLITICS_MAX_ARTICLES_PER_RUN", "").strip()
+    if politics_max_articles_raw:
+        try:
+            politics_max_articles = max(1, int(politics_max_articles_raw))
+        except ValueError:
+            politics_max_articles = len(eligible_news)
+    else:
+        politics_max_articles = len(eligible_news)
+    for item in eligible_news[:politics_max_articles]:
         for c in generate_candidates(item):
             if is_duplicate(c, history):
                 continue
@@ -2351,6 +2628,21 @@ def main():
     if not x_reservation:
         finalize_skip(x_budget_reason, mark_attempted=False, extra={"title": best.get("title", "")})
         return
+    followers_at_publish = None
+    if _env_bool("FOLLOWER_SNAPSHOT_AT_PUBLISH_ENABLED", "true"):
+        try:
+            from growth_tracking import capture_follower_snapshot
+            snapshot = capture_follower_snapshot(now=now_jst)
+            if snapshot.get("captured"):
+                followers_at_publish = snapshot.get("followers_count")
+            else:
+                log(
+                    "[WARN] publish-time follower snapshot unavailable: "
+                    f"{snapshot.get('reason', 'unknown')}")
+        except Exception as exc:
+            log(
+                "[WARN] publish-time follower snapshot failed: "
+                f"{type(exc).__name__}")
     log("[INFO] Decision: post")
     try:
         tweet_id, sent_lengths = post_to_x(tweet_text, reply_texts)
@@ -2396,6 +2688,10 @@ def main():
         # --- 学習材料（効いた型・問い・スコアの振り返り用） ---
         "tweet_text": tweet_text,
         "hook": best.get("hook", ""),
+        "angle_id": best.get("angle_id", ""),
+        "claim_summary": best.get("claim_summary", ""),
+        "template_id": best.get("template_id", ""),
+        "target_actor": best.get("target_actor", ""),
         "structure_title": best.get("structure_title", ""),
         "structure_key_message": best.get("structure_key_message", ""),
         "opinion_conclusion": best.get("opinion_conclusion", ""),
@@ -2416,6 +2712,7 @@ def main():
         "xai_discovered_at": best.get("xai_discovered_at", ""),
         "xai_cost_allocated_usd": best.get("xai_cost_allocated_usd", 0.0),
         "final_news_score": best.get("final_news_score", 0.0),
+        "is_major_update": bool(best.get("is_major_update")),
         "low_quality_fallback": stagnation_fallback,
         "openai_model": best.get("openai_model", ""),
         "prompt_version": best.get("prompt_version", "x-growth-quality-v2"),
@@ -2437,6 +2734,7 @@ def main():
         "social_anger_target_type": best.get(
             "social_anger_target_type", ""),
         "automation_type": "automated_original",
+        "followers_at_publish": followers_at_publish,
     }
     if best.get("post_type") == "morning_evening_digest":
         digest_items = best.get("digest_items") or []

@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS news_candidates (
 CREATE TABLE IF NOT EXISTS generated_posts (
  id INTEGER PRIMARY KEY, news_candidate_id INTEGER, prompt_version TEXT, model TEXT,
  post_type TEXT, hook_type TEXT, critique_axis TEXT, text TEXT, quality_score REAL,
+ threads_text TEXT,
  ban_risk REAL, decision TEXT, decision_reason TEXT, created_at TEXT,
  input_tokens INTEGER, cached_input_tokens INTEGER, output_tokens INTEGER,
  estimated_cost_usd REAL);
@@ -43,7 +44,10 @@ CREATE TABLE IF NOT EXISTS post_metrics (
  id INTEGER PRIMARY KEY, tweet_id TEXT, measurement_window TEXT, measured_at TEXT,
  impressions INTEGER, likes INTEGER, reposts INTEGER, replies INTEGER, quotes INTEGER,
  bookmarks INTEGER, profile_clicks INTEGER, url_clicks INTEGER, engagement_rate REAL,
- impressions_per_hour REAL, UNIQUE(tweet_id, measurement_window));
+ impressions_per_hour REAL, impressions_source TEXT, profile_clicks_source TEXT,
+ url_clicks_source TEXT, public_metrics_available INTEGER,
+ private_metrics_available INTEGER, metric_fields_json TEXT,
+ UNIQUE(tweet_id, measurement_window));
 CREATE TABLE IF NOT EXISTS daily_reviews (
  id INTEGER PRIMARY KEY, review_date TEXT UNIQUE, generated_at TEXT, review_model TEXT,
  top_posts_json TEXT, bottom_posts_json TEXT, winning_patterns_json TEXT,
@@ -257,7 +261,8 @@ CREATE TABLE IF NOT EXISTS threads_search_queries (
  id INTEGER PRIMARY KEY, query_hash TEXT, query_text TEXT, search_type TEXT,
  search_mode TEXT, since_at TEXT, until_at TEXT, result_count INTEGER,
  status TEXT, fetched_at TEXT, cache_expires_at TEXT, created_at TEXT,
- updated_at TEXT, source TEXT, api_version TEXT, raw_response_hash TEXT);
+ updated_at TEXT, source TEXT, api_version TEXT, raw_response_hash TEXT,
+ page_count INTEGER, error_class TEXT, live_or_cached TEXT);
 CREATE TABLE IF NOT EXISTS threads_search_results (
  id INTEGER PRIMARY KEY, threads_post_id TEXT UNIQUE, username_hash TEXT,
  text TEXT, timestamp TEXT, permalink TEXT, media_type TEXT, topic_tag TEXT,
@@ -380,6 +385,40 @@ def init_db(path: Path | None = None) -> bool:
             if "request_id" in columns:
                 conn.execute("""CREATE UNIQUE INDEX IF NOT EXISTS
                     idx_xai_request_id ON xai_usage_events(request_id)""")
+            metric_columns = {
+                row["name"] for row in conn.execute(
+                    "PRAGMA table_info(post_metrics)")
+            }
+            provenance_columns = {
+                "impressions_source": "TEXT",
+                "profile_clicks_source": "TEXT",
+                "url_clicks_source": "TEXT",
+                "public_metrics_available": "INTEGER",
+                "private_metrics_available": "INTEGER",
+                "metric_fields_json": "TEXT",
+            }
+            added_provenance = False
+            for name, sql_type in provenance_columns.items():
+                if name not in metric_columns:
+                    conn.execute(
+                        f"ALTER TABLE post_metrics ADD COLUMN {name} {sql_type}")
+                    added_provenance = True
+            if added_provenance:
+                # Older collectors requested only public_metrics. Their private
+                # metric zeros therefore mean "not requested", not measured 0.
+                conn.execute("""UPDATE post_metrics SET
+                    profile_clicks=NULL,
+                    url_clicks=NULL,
+                    profile_clicks_source='legacy_not_requested',
+                    url_clicks_source='legacy_not_requested',
+                    impressions_source='legacy_public_metrics',
+                    public_metrics_available=1,
+                    private_metrics_available=0,
+                    metric_fields_json=?""", (json.dumps({
+                        "public_metrics": ["legacy_unknown_keys"],
+                        "non_public_metrics": [],
+                        "organic_metrics": [],
+                    }, sort_keys=True),))
             conn.commit()
         return True
     except sqlite3.Error as exc:
@@ -394,12 +433,34 @@ def apply_threads_full_migrations(path: Path | None = None) -> bool:
     try:
         with closing(connect(path)) as conn:
             conn.executescript(THREADS_FULL_SCHEMA)
+            columns = {
+                row["name"] for row in conn.execute(
+                    "PRAGMA table_info(threads_search_queries)")
+            }
+            for name, declaration in {
+                "page_count": "INTEGER",
+                "error_class": "TEXT",
+                "live_or_cached": "TEXT",
+            }.items():
+                if name not in columns:
+                    conn.execute(
+                        f"ALTER TABLE threads_search_queries "
+                        f"ADD COLUMN {name} {declaration}")
             conn.commit()
         return True
     except sqlite3.Error as exc:
         print(
             "Threads SQLite migration skipped; continuing "
             f"({type(exc).__name__})")
+        return False
+
+
+def apply_disaster_update_migrations(path: Path | None = None) -> bool:
+    """Create the isolated disaster-update schema idempotently."""
+    try:
+        from disaster_updates import apply_migrations
+        return apply_migrations(path)
+    except (ImportError, sqlite3.Error):
         return False
 
 
@@ -459,10 +520,11 @@ def insert_generated(news_id: int | None, post: dict, path: Path | None = None) 
         post.get("estimated_cost_usd", 0)), path)
     if generated_id is not None:
         apply_additive_migrations(path)
-        write("""UPDATE generated_posts SET factuality_score=?,relevance_score=?,logic_score=?,
+        write("""UPDATE generated_posts SET threads_text=?,factuality_score=?,relevance_score=?,logic_score=?,
           originality_score=?,natural_japanese_score=?,safety_score=?,anger_score=?,
           personal_attack_score=?,partisan_bias_score=?,claim_risk=?,trust_score=?,
           correction_required=?,manual_delete_required=? WHERE id=?""", (
+            post.get("threads_text", ""),
             post.get("factuality_score"), post.get("relevance_score"), post.get("logic_score"),
             post.get("originality_score"), post.get("natural_japanese_score"),
             post.get("safety_score"), post.get("anger_score"),
@@ -485,8 +547,9 @@ def insert_published(generated_id: int | None, row: dict,
       (generated_post_id,tweet_id,text,posted_at,topic_key,post_type,hook_type,critique_axis,
        model,prompt_version,is_breaking,discovered_via_json,xai_topic_match,xai_attention_score,
        xai_velocity_score,xai_discovered_at,xai_cost_allocated_usd,digest_type,digest_date,
-       included_topic_keys_json,primary_topic_key,posted_hour_jst)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+       included_topic_keys_json,primary_topic_key,posted_hour_jst,
+       followers_before_window)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
         generated_id, str(row.get("tweet_id", "")), row.get("tweet_text", ""),
         row.get("posted_at_jst") or row.get("posted_at", ""), row.get("topic_key", ""),
         row.get("post_type", ""), row.get("hook_type", ""), row.get("critique_axis", ""),
@@ -498,17 +561,24 @@ def insert_published(generated_id: int | None, row: dict,
         row.get("digest_date"), json.dumps(row.get("included_topic_keys") or [],
                                            ensure_ascii=False),
         row.get("primary_topic_key") or row.get("topic_key"),
-        row.get("posted_hour_jst")), path)
+        row.get("posted_hour_jst"), row.get("followers_at_publish")), path)
 
 
 def upsert_metric(row: dict, path: Path | None = None) -> int | None:
     return write("""INSERT OR IGNORE INTO post_metrics
       (tweet_id,measurement_window,measured_at,impressions,likes,reposts,replies,quotes,bookmarks,
-       profile_clicks,url_clicks,engagement_rate,impressions_per_hour) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+       profile_clicks,url_clicks,engagement_rate,impressions_per_hour,
+       impressions_source,profile_clicks_source,url_clicks_source,
+       public_metrics_available,private_metrics_available,metric_fields_json)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
         str(row.get("tweet_id", "")), row.get("measurement_window", "latest"), row.get("measured_at", ""),
-        row.get("impressions", 0), row.get("likes", 0), row.get("reposts", 0), row.get("replies", 0),
-        row.get("quotes", 0), row.get("bookmarks", 0), row.get("profile_clicks", 0), row.get("url_clicks", 0),
-        row.get("engagement_rate", 0), row.get("impressions_per_hour", 0)), path)
+        row.get("impressions"), row.get("likes"), row.get("reposts"), row.get("replies"),
+        row.get("quotes"), row.get("bookmarks"), row.get("profile_clicks"), row.get("url_clicks"),
+        row.get("engagement_rate"), row.get("impressions_per_hour"),
+        row.get("impressions_source"), row.get("profile_clicks_source"),
+        row.get("url_clicks_source"), int(bool(row.get("public_metrics_available"))),
+        int(bool(row.get("private_metrics_available"))),
+        row.get("metric_fields_json")), path)
 
 
 def table_counts(path: Path | None = None) -> dict:
@@ -561,6 +631,7 @@ def add_column_if_missing(table: str, column: str, declaration: str,
             "partisan_bias_score": "REAL", "claim_risk": "TEXT",
             "trust_score": "REAL", "correction_required": "INTEGER DEFAULT 0",
             "manual_delete_required": "INTEGER DEFAULT 0",
+            "threads_text": "TEXT",
         },
         "daily_reviews": {
             "four_axes_json": "TEXT", "winner_groups_json": "TEXT",
@@ -638,6 +709,7 @@ def apply_additive_migrations(path: Path | None = None) -> dict:
             "partisan_bias_score": "REAL", "claim_risk": "TEXT",
             "trust_score": "REAL", "correction_required": "INTEGER DEFAULT 0",
             "manual_delete_required": "INTEGER DEFAULT 0",
+            "threads_text": "TEXT",
         },
         "daily_reviews": {
             "four_axes_json": "TEXT", "winner_groups_json": "TEXT",

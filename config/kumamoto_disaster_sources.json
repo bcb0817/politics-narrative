@@ -1,0 +1,86 @@
+[
+  {
+    "source_id": "jma_kumamoto",
+    "name": "熊本地方気象台",
+    "url": "https://www.data.jma.go.jp/kumamoto/",
+    "source_class": "official",
+    "priority": 1
+  },
+  {
+    "source_id": "fdma_disaster",
+    "name": "総務省消防庁 災害情報",
+    "url": "https://www.fdma.go.jp/disaster/",
+    "source_class": "official",
+    "priority": 1
+  },
+  {
+    "source_id": "kumamoto_pref",
+    "name": "熊本県",
+    "url": "https://www.pref.kumamoto.jp/",
+    "source_class": "official",
+    "priority": 1
+  },
+  {
+    "source_id": "kumamoto_city",
+    "name": "熊本市",
+    "url": "https://www.city.kumamoto.jp/list04828.html",
+    "source_class": "official",
+    "priority": 2
+  },
+  {
+    "source_id": "uki_city",
+    "name": "宇城市",
+    "url": "https://www.city.uki.kumamoto.jp/",
+    "source_class": "official",
+    "priority": 2
+  },
+  {
+    "source_id": "hikawa_town",
+    "name": "氷川町",
+    "url": "https://www.town.hikawa.kumamoto.jp/",
+    "source_class": "official",
+    "priority": 2
+  },
+  {
+    "source_id": "mlit_disaster",
+    "name": "国土交通省 災害情報",
+    "url": "https://www.mlit.go.jp/saigai/saigai_260728.html",
+    "source_class": "official",
+    "priority": 1
+  },
+  {
+    "source_id": "kyushu_mlit",
+    "name": "九州地方整備局",
+    "url": "https://www.qsr.mlit.go.jp/",
+    "source_class": "official",
+    "priority": 2
+  },
+  {
+    "source_id": "jr_kyushu",
+    "name": "JR九州 運行情報",
+    "url": "https://www.jrkyushu.co.jp/trains/info/",
+    "source_class": "official",
+    "priority": 3
+  },
+  {
+    "source_id": "kumamoto_airport",
+    "name": "阿蘇くまもと空港",
+    "url": "https://www.kumamoto-airport.co.jp/",
+    "source_class": "official",
+    "priority": 3
+  },
+  {
+    "source_id": "nexco_west",
+    "name": "NEXCO西日本",
+    "url": "https://www.w-nexco.co.jp/",
+    "source_class": "official",
+    "priority": 3
+  },
+  {
+    "source_id": "aeon_mall_kumamoto",
+    "name": "イオンモール熊本",
+    "url": "https://kumamoto.aeonmall.jp/",
+    "source_class": "official",
+    "priority": 3
+  }
+]

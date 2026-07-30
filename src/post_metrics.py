@@ -20,6 +20,79 @@ WINDOWS = {
     "24h": timedelta(hours=24),
     "72h": timedelta(hours=72),
 }
+TWEET_METRIC_FIELDS = [
+    "public_metrics", "non_public_metrics", "organic_metrics", "created_at",
+]
+
+
+def _mapping(value) -> dict:
+    if isinstance(value, dict):
+        return value
+    try:
+        return dict(value or {})
+    except (TypeError, ValueError):
+        return {}
+
+
+def _integer(mapping: dict, name: str) -> int | None:
+    value = mapping.get(name)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def extract_tweet_metrics(tweet) -> dict:
+    """Extract measured values without turning unavailable fields into zero."""
+    public = _mapping(getattr(tweet, "public_metrics", None))
+    non_public = _mapping(getattr(tweet, "non_public_metrics", None))
+    organic = _mapping(getattr(tweet, "organic_metrics", None))
+
+    def first(name: str, sources: tuple[tuple[str, dict], ...]) -> tuple[int | None, str | None]:
+        for source_name, source in sources:
+            value = _integer(source, name)
+            if value is not None:
+                return value, source_name
+        return None, None
+
+    impressions, impressions_source = first(
+        "impression_count", (
+            ("non_public_metrics", non_public),
+            ("organic_metrics", organic),
+            ("public_metrics", public),
+        ))
+    profile_clicks, profile_source = first(
+        "user_profile_clicks", (
+            ("non_public_metrics", non_public),
+            ("organic_metrics", organic),
+        ))
+    url_clicks, url_source = first(
+        "url_link_clicks", (
+            ("non_public_metrics", non_public),
+            ("organic_metrics", organic),
+        ))
+    return {
+        "impressions": impressions,
+        "likes": _integer(public, "like_count"),
+        "reposts": _integer(public, "retweet_count"),
+        "replies": _integer(public, "reply_count"),
+        "quotes": _integer(public, "quote_count"),
+        "bookmarks": _integer(public, "bookmark_count"),
+        "profile_clicks": profile_clicks,
+        "url_clicks": url_clicks,
+        "impressions_source": impressions_source,
+        "profile_clicks_source": profile_source,
+        "url_clicks_source": url_source,
+        "public_metrics_available": bool(public),
+        "private_metrics_available": bool(non_public or organic),
+        "metric_fields_json": json.dumps({
+            "public_metrics": sorted(public),
+            "non_public_metrics": sorted(non_public),
+            "organic_metrics": sorted(organic),
+        }, ensure_ascii=False, sort_keys=True),
+    }
 
 
 def due_measurements(history: list[dict], now: datetime, path: Path | None = None) -> list[tuple[dict, str]]:
@@ -73,25 +146,30 @@ def collect(history: list[dict], now: datetime | None = None, client_factory=Non
         client = client_factory(consumer_key=os.environ.get("API_KEY"), consumer_secret=os.environ.get("API_KEY_SECRET"),
                                 access_token=os.environ.get("ACCESS_TOKEN"), access_token_secret=os.environ.get("ACCESS_TOKEN_SECRET"))
         ids = list(dict.fromkeys(str(post["tweet_id"]) for post, _ in due))
-        response = client.get_tweets(ids=ids, tweet_fields=["public_metrics", "created_at"], user_auth=True)
+        response = client.get_tweets(
+            ids=ids, tweet_fields=TWEET_METRIC_FIELDS, user_auth=True)
         by_id = {str(tweet.id): tweet for tweet in (response.data or [])}
         collected = 0; missing = 0
         for post, window in due:
             tweet = by_id.get(str(post["tweet_id"]))
             if not tweet:
                 missing += 1; continue
-            pm = tweet.public_metrics or {}
-            impressions = int(pm.get("impression_count", 0) or 0)
-            engagement = sum(int(pm.get(k, 0) or 0) for k in ("like_count", "retweet_count", "reply_count", "quote_count", "bookmark_count"))
+            measured = extract_tweet_metrics(tweet)
+            impressions = measured["impressions"]
+            engagement_parts = [
+                measured[name] for name in (
+                    "likes", "reposts", "replies", "quotes", "bookmarks")
+                if measured[name] is not None
+            ]
+            engagement = sum(engagement_parts) if engagement_parts else None
             hours = max(WINDOWS[window].total_seconds() / 3600, .25)
             row = {"tweet_id": str(post["tweet_id"]), "measurement_window": window,
-                   "measured_at": now.isoformat(), "impressions": impressions,
-                   "likes": pm.get("like_count", 0), "reposts": pm.get("retweet_count", 0),
-                   "replies": pm.get("reply_count", 0), "quotes": pm.get("quote_count", 0),
-                   "bookmarks": pm.get("bookmark_count", 0), "profile_clicks": pm.get("user_profile_clicks", 0),
-                   "url_clicks": pm.get("url_link_clicks", 0),
-                   "engagement_rate": engagement / impressions if impressions else 0,
-                   "impressions_per_hour": impressions / hours}
+                   "measured_at": now.isoformat(), **measured,
+                   "engagement_rate": (
+                       engagement / impressions
+                       if engagement is not None and impressions else None),
+                   "impressions_per_hour": (
+                       impressions / hours if impressions is not None else None)}
             if upsert_metric(row, path) is not None: collected += 1
         finalize(reservation, estimate_x("owned_read_per_resource", len(due)) or 0, success=True, path=path)
         return {"collected": collected, "missing": missing}

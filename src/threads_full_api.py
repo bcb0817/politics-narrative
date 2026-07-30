@@ -485,8 +485,14 @@ def collect_post_insights(client: ThreadsClient | None = None, *,
         posts = [dict(row) for row in conn.execute(
             """SELECT threads_post_id,published_at FROM threads_posts
                WHERE status='published' AND threads_post_id IS NOT NULL""")]
+        saved_windows: dict[str, set[str]] = defaultdict(set)
+        for row in conn.execute(
+                """SELECT threads_post_id,measurement_window
+                   FROM threads_post_insights"""):
+            saved_windows[str(row["threads_post_id"])].add(
+                str(row["measurement_window"]))
     api = client or ThreadsClient(path=path)
-    saved = failed = 0
+    api_calls = saved = skipped = failed = 0
     now = _now()
     windows = list(dict.fromkeys([
         "15m", "1h", "6h",
@@ -498,28 +504,34 @@ def collect_post_insights(client: ThreadsClient | None = None, *,
         "24h", "72h",
     ]))
     for post in posts:
+        post_id = str(post["threads_post_id"])
         published = _parse_datetime(post.get("published_at"))
         if not published:
+            skipped += 1
             continue
         age = (now - published.astimezone(JST)).total_seconds() / 3600
         due = [w for w in windows if age >= {
             "15m": .25, "1h": 1, "6h": 6, "24h": 24, "72h": 72, "7d": 168
-        }.get(w, math.inf)]
-        for window in due:
-            measured = now.replace(
-                minute=0, second=0, microsecond=0).isoformat()
-            try:
-                payload = api.insights(str(post["threads_post_id"]))
-                values = {row.get("name"): _metric_value(row)
-                          for row in payload.get("data") or []}
-                views = values.get("views")
-                engagement_values = [
-                    values.get(name) for name in POST_METRICS[1:]
-                    if values.get(name) is not None
-                ]
-                engagement = (
-                    sum(engagement_values) / views
-                    if views and views > 0 else None)
+        }.get(w, math.inf) and w not in saved_windows[post_id]]
+        if not due:
+            skipped += 1
+            continue
+        measured = now.replace(
+            minute=0, second=0, microsecond=0).isoformat()
+        try:
+            api_calls += 1
+            payload = api.insights(post_id)
+            values = {row.get("name"): _metric_value(row)
+                      for row in payload.get("data") or []}
+            views = values.get("views")
+            engagement_values = [
+                values.get(name) for name in POST_METRICS[1:]
+                if values.get(name) is not None
+            ]
+            engagement = (
+                sum(engagement_values) / views
+                if views and views > 0 else None)
+            for window in due:
                 saved += int(_upsert(
                     """INSERT OR IGNORE INTO threads_post_insights
                       (threads_post_id,measurement_window,measured_at,views,
@@ -527,7 +539,7 @@ def collect_post_insights(client: ThreadsClient | None = None, *,
                        views_per_hour,created_at,updated_at,source,api_version,
                        raw_response_hash)
                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
-                        str(post["threads_post_id"]), window, measured, views,
+                        post_id, window, measured, views,
                         values.get("likes"), values.get("replies"),
                         values.get("reposts"), values.get("quotes"),
                         values.get("shares"), engagement,
@@ -537,9 +549,12 @@ def collect_post_insights(client: ThreadsClient | None = None, *,
                         measured, measured, "meta_official_api",
                         cfg["api_version"], _hash_payload(payload),
                     ), path))
-            except Exception:
-                failed += 1
-    return {"status": "completed", "saved": saved, "failed": failed}
+        except Exception:
+            failed += 1
+    return {
+        "status": "completed", "api_calls": api_calls, "saved": saved,
+        "skipped": skipped, "failed": failed,
+    }
 
 
 def collect_account_insights(client: ThreadsClient | None = None, *,
@@ -607,8 +622,11 @@ def search(query: str, *, search_type: str = "", search_mode: str = "KEYWORD",
            client: ThreadsClient | None = None,
            path: Path | None = None) -> dict:
     cfg = settings()
+    query = str(query or "").strip()
     mode = search_mode.upper()
     search_type = (search_type or cfg["search_type"]).upper()
+    if not query:
+        return {"status": "rejected", "reason": "empty_query"}
     if hours and not since:
         since = (_now() - timedelta(
             hours=max(1, min(720, hours)))).isoformat()
@@ -617,8 +635,10 @@ def search(query: str, *, search_type: str = "", search_mode: str = "KEYWORD",
     flag = cfg["keyword_search"] if mode == "KEYWORD" else cfg["topic_tag_search"]
     if not flag:
         return {"status": "skipped", "reason": "search_disabled", "mode": mode}
+    if not cfg["access_token"]:
+        return {"status": "missing_credentials", "reason": "token_missing"}
     if "threads_keyword_search" not in _granted_scopes():
-        return {"status": "skipped", "reason": "permission_missing",
+        return {"status": "missing_scope", "reason": "permission_missing",
                 "permission": "threads_keyword_search"}
     if dry_run:
         return {
@@ -628,31 +648,78 @@ def search(query: str, *, search_type: str = "", search_mode: str = "KEYWORD",
         }
     apply_threads_full_migrations(path)
     query_hash = hashlib.sha256(
-        f"{query}|{search_type}|{mode}".encode("utf-8")).hexdigest()
+        f"{query}|{search_type}|{mode}|{since}|{until}".encode(
+            "utf-8")).hexdigest()
     now = _now()
     with closing(connect(path)) as conn:
-        cached = conn.execute("""SELECT id,result_count,cache_expires_at
-          FROM threads_search_queries WHERE query_hash=? AND status='success'
+        cached = conn.execute("""SELECT id,result_count,cache_expires_at,status
+          FROM threads_search_queries
+          WHERE query_hash=? AND status IN ('success','empty')
           ORDER BY fetched_at DESC LIMIT 1""", (query_hash,)).fetchone()
     if cached and (_parse_datetime(cached["cache_expires_at"]) or now) > now:
         return {
             "status": "cached", "query_id": cached["id"],
             "result_count": cached["result_count"], "api_calls": 0,
+            "cached_result_status": cached["status"],
+            "live_or_cached": "cached",
         }
-    rows = (client or ThreadsClient(path=path)).keyword_search(
-        query, search_type=search_type, search_mode=mode,
-        limit=cfg["search_limit"], since=since, until=until)
     now_text = now.isoformat()
+    active_client = client or ThreadsClient(path=path)
+    try:
+        response = active_client.keyword_search(
+            query, search_type=search_type, search_mode=mode,
+            limit=cfg["search_limit"], since=since, until=until,
+            return_metadata=True)
+        if isinstance(response, dict):
+            rows = response.get("data") or []
+            page_count = int(response.get("page_count") or 1)
+            pagination_truncated = bool(
+                response.get("pagination_truncated"))
+        else:
+            rows = response or []
+            page_count = 1
+            pagination_truncated = False
+        if not isinstance(rows, list):
+            raise RuntimeError("threads_api_invalid_data_schema")
+    except Exception as exc:
+        response = getattr(exc, "response", None)
+        status_code = getattr(response, "status_code", None)
+        error_class = (
+            "missing_scope" if status_code == 403
+            else "authentication_error" if status_code == 401
+            else "rate_limited" if status_code == 429
+            else type(exc).__name__
+        )
+        query_id = write("""INSERT INTO threads_search_queries
+          (query_hash,query_text,search_type,search_mode,since_at,until_at,
+           result_count,status,fetched_at,cache_expires_at,created_at,updated_at,
+           source,api_version,raw_response_hash,page_count,error_class,
+           live_or_cached)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+            query_hash, query, search_type, mode, since, until, None,
+            "failed", now_text, None, now_text, now_text,
+            "meta_official_api", cfg["api_version"], "", 0, error_class,
+            "live",
+        ), path)
+        return {
+            "status": error_class if error_class in {
+                "missing_scope", "rate_limited"} else "failing",
+            "query_id": query_id, "result_count": None,
+            "api_calls": 1, "error_class": error_class,
+            "live_or_cached": "live",
+        }
+    result_status = "success" if rows else "empty"
     query_id = write("""INSERT INTO threads_search_queries
       (query_hash,query_text,search_type,search_mode,since_at,until_at,
        result_count,status,fetched_at,cache_expires_at,created_at,updated_at,
-       source,api_version,raw_response_hash)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+       source,api_version,raw_response_hash,page_count,error_class,
+       live_or_cached)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
         query_hash, query, search_type, mode, since, until, len(rows),
-        "success", now_text,
+        result_status, now_text,
         (now + timedelta(minutes=cfg["search_cache_minutes"])).isoformat(),
         now_text, now_text, "meta_official_api", cfg["api_version"],
-        _hash_payload(rows),
+        _hash_payload(rows), page_count, None, "live",
     ), path)
     saved = 0
     for rank, row in enumerate(rows, 1):
@@ -691,8 +758,11 @@ def search(query: str, *, search_type: str = "", search_mode: str = "KEYWORD",
             "meta_official_api", cfg["api_version"], "",
         ), path))
     return {
-        "status": "success", "query_id": query_id,
-        "result_count": len(rows), "matches_saved": saved, "api_calls": 1,
+        "status": result_status, "query_id": query_id,
+        "result_count": len(rows), "matches_saved": saved,
+        "api_calls": page_count, "page_count": page_count,
+        "pagination_truncated": pagination_truncated,
+        "live_or_cached": "live",
         "coverage_note": "API search results only; not all Threads posts.",
     }
 

@@ -488,6 +488,57 @@ def notify_attempt_since(path: Path, previous_size: int, *, exit_code: int = 0) 
         return False
 
 
+def notify_disaster_update(result: dict[str, Any], *, dry_run: bool = False) -> bool:
+    """Notify one concise disaster result without raw logs or personal data."""
+    if dry_run:
+        return False
+    snapshot = result.get("snapshot") or {}
+    delta = result.get("delta") or {}
+    eligible = bool(result.get("publish_eligible"))
+    changes = [
+        row for row in delta.get("changes", [])
+        if row.get("delta_status") not in {"unchanged", "unavailable"}
+    ][:3]
+    return notify(
+        "disaster_update",
+        "【熊本地震・朝夕更新準備】" if eligible
+        else "【熊本地震・定点更新見送り】",
+        "公式情報の候補を準備しました。" if eligible
+        else "前回投稿から重大な公式変化が確認できなかったため、今回の投稿を見送りました。",
+        level="info" if eligible else "warning",
+        fields={
+            "時点": snapshot.get("cutoff_at"),
+            "スナップショット": snapshot.get("snapshot_id"),
+            "前回からの重要変化": "／".join(
+                str(row.get("metric_key")) for row in changes)
+                or "重大な変化なし",
+            "投稿判定": "投稿候補" if eligible else "見送り",
+            "理由": result.get("decision_reason"),
+        },
+    )
+
+
+def notify_disaster_correction(result: dict[str, Any], *,
+                               dry_run: bool = False) -> bool:
+    """Notify a correction candidate; automatic correction posting stays off."""
+    if dry_run or not result.get("correction_required"):
+        return False
+    return notify(
+        "disaster_correction",
+        "【熊本地震・訂正候補】",
+        "公式発表の訂正または集計範囲変更を検知しました。",
+        level="warning",
+        fields={
+            "対象投稿": result.get("snapshot_id"),
+            "訂正項目": result.get("metric_key"),
+            "旧情報": result.get("previous_value"),
+            "新情報": result.get("current_value"),
+            "公式情報源": result.get("source_name"),
+            "自動投稿": "OFF",
+        },
+    )
+
+
 _LOG_FILES = {
     "bot": "bot.log",
     "supervisor": "supervisor.log",

@@ -278,6 +278,18 @@ def next_auxiliary_event(now: datetime) -> tuple[datetime, str]:
             if value > now:
                 candidates.append((value, "follower_snapshot"))
                 break
+    if os.environ.get(
+        "STORAGE_CLEANUP_ENABLED", "true"
+    ).strip().lower() in {"1", "true", "yes", "on"}:
+        for clock in _parse_clock_list(os.environ.get(
+            "STORAGE_CLEANUP_SCHEDULE", "03:30")):
+            for day_offset in (0, 1):
+                value = (now + timedelta(days=day_offset)).replace(
+                    hour=clock.hour, minute=clock.minute,
+                    second=0, microsecond=0)
+                if value > now:
+                    candidates.append((value, "storage_cleanup"))
+                    break
     weekday = {"MON": 0, "TUE": 1, "WED": 2, "THU": 3,
                "FRI": 4, "SAT": 5, "SUN": 6}
     weekly_specs = (
@@ -319,10 +331,27 @@ def _run_auxiliary_event(event_name: str, scheduled_at: datetime) -> None:
             cmd_weekly_report()
         elif event_name == "weekly_batch_collect":
             cmd_batch_collect()
+        elif event_name == "storage_cleanup":
+            cmd_storage_cleanup(apply=True)
     finally:
         state[event_key] = datetime.now(JST).isoformat()
         state = dict(list(state.items())[-100:])
         state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def cmd_storage_cleanup(*, apply: bool = False) -> int:
+    """Preview or apply the allowlisted runtime-artifact retention policy."""
+    if str(SRC_DIR) not in sys.path:
+        sys.path.insert(0, str(SRC_DIR))
+    from storage_cleanup import compact_summary, run_cleanup, save_report
+
+    result = run_cleanup(ROOT_DIR, dry_run=not apply)
+    report_path = save_report(ROOT_DIR, result)
+    summary = compact_summary(result)
+    summary["report"] = str(report_path)
+    summary["mode"] = "apply" if apply else "dry-run"
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    return 0
 
 
 def _run_due_review_after_start(now: datetime) -> None:
@@ -719,12 +748,15 @@ def cmd_report() -> int:
                 encoding="utf-8",
             )
 
+        from post_metrics import (  # noqa: E402
+            TWEET_METRIC_FIELDS, extract_tweet_metrics,
+        )
         resp = client.get_users_tweets(
             id=user_id,
             start_time=start_jst.astimezone(ZoneInfo("UTC")),
             end_time=now_jst.astimezone(ZoneInfo("UTC")),
             max_results=100,
-            tweet_fields=["public_metrics", "created_at"],
+            tweet_fields=TWEET_METRIC_FIELDS,
             user_auth=True,
         )
     except KeyError as e:
@@ -741,17 +773,7 @@ def cmd_report() -> int:
         tid = str(t.id)
         if tid not in local_by_id:
             continue
-        pm = t.public_metrics or {}
-        metrics[tid] = {
-            "impressions": int(pm.get("impression_count", 0) or 0),
-            "likes": int(pm.get("like_count", 0) or 0),
-            "reposts": int(pm.get("retweet_count", 0) or 0),
-            "replies": int(pm.get("reply_count", 0) or 0),
-            "quotes": int(pm.get("quote_count", 0) or 0),
-            "bookmarks": int(pm.get("bookmark_count", 0) or 0),
-            "profile_clicks": int(pm.get("user_profile_clicks", 0) or 0),
-            "url_clicks": int(pm.get("url_link_clicks", 0) or 0),
-        }
+        metrics[tid] = extract_tweet_metrics(t)
 
     missing_tweet_errors = [
         {"reason": "missing_from_x_timeline", "tweet_id": tid,
@@ -768,19 +790,19 @@ def cmd_report() -> int:
                     row = conn.execute("""SELECT * FROM post_metrics WHERE tweet_id=?
                       ORDER BY measured_at DESC LIMIT 1""", (tid,)).fetchone()
                     if row:
+                        def optional_int(name):
+                            value = row[name]
+                            return int(value) if value is not None else None
+
                         metrics[tid] = {
-                            "impressions": int(row["impressions"] or 0),
-                            "likes": int(row["likes"] or 0),
-                            "reposts": int(row["reposts"] or 0),
-                            "replies": int(row["replies"] or 0),
-                            "quotes": int(row["quotes"] or 0),
-                            "bookmarks": int(row["bookmarks"] or 0),
-                            "profile_clicks": (
-                                int(row["profile_clicks"]) if row["profile_clicks"] is not None else None
-                            ),
-                            "url_clicks": (
-                                int(row["url_clicks"]) if row["url_clicks"] is not None else None
-                            ),
+                            "impressions": optional_int("impressions"),
+                            "likes": optional_int("likes"),
+                            "reposts": optional_int("reposts"),
+                            "replies": optional_int("replies"),
+                            "quotes": optional_int("quotes"),
+                            "bookmarks": optional_int("bookmarks"),
+                            "profile_clicks": optional_int("profile_clicks"),
+                            "url_clicks": optional_int("url_clicks"),
                         }
         except Exception:
             pass
@@ -823,10 +845,20 @@ def cmd_report() -> int:
         m = metrics[tid]
         posted_dt = h["_posted_dt"]
         age_hours = max((now_jst - posted_dt).total_seconds() / 3600.0, 0.25)
-        engagement_total = m["likes"] + m["reposts"] + m["replies"] + m["quotes"] + m["bookmarks"]
+        engagement_values = [
+            m.get(name) for name in (
+                "likes", "reposts", "replies", "quotes", "bookmarks")
+            if m.get(name) is not None
+        ]
+        engagement_total = (
+            sum(engagement_values) if engagement_values else None)
         impressions = m["impressions"]
-        impressions_per_hour = round(impressions / age_hours, 2)
-        engagement_rate = round((engagement_total / impressions), 6) if impressions else 0.0
+        impressions_per_hour = (
+            round(impressions / age_hours, 2)
+            if impressions is not None else None)
+        engagement_rate = (
+            round((engagement_total / impressions), 6)
+            if engagement_total is not None and impressions else None)
         row = {
             "tweet_id": tid,
             "text": h.get("tweet_text", ""),
@@ -873,7 +905,12 @@ def cmd_report() -> int:
         row["winner_types"] = winner_types(row)
         rows.append(row)
 
-    by_impressions = sorted(rows, key=lambda r: (r["impressions"], r["impressions_per_hour"]), reverse=True)
+    by_impressions = sorted(
+        rows, key=lambda r: (
+            r["impressions"] if r["impressions"] is not None else -1,
+            r["impressions_per_hour"]
+            if r["impressions_per_hour"] is not None else -1),
+        reverse=True)
     by_growth = sorted(rows, key=lambda r: r["growth_score"], reverse=True)
     top3 = by_impressions[:3]
     eligible_rows = [row for row in rows if row["eligible_winning_example"]]
@@ -894,8 +931,18 @@ def cmd_report() -> int:
             key: {
                 "count": len(values),
                 "avg_growth_score": round(sum(v["growth_score"] for v in values) / len(values), 4),
-                "avg_impressions": round(sum(v["impressions"] for v in values) / len(values), 2),
-                "avg_profile_clicks": round(sum(v["profile_clicks"] for v in values) / len(values), 2),
+                "avg_impressions": (
+                    round(sum(v["impressions"] for v in values
+                              if v["impressions"] is not None) /
+                          sum(v["impressions"] is not None for v in values), 2)
+                    if any(v["impressions"] is not None for v in values)
+                    else None),
+                "avg_profile_clicks": (
+                    round(sum(v["profile_clicks"] for v in values
+                              if v["profile_clicks"] is not None) /
+                          sum(v["profile_clicks"] is not None for v in values), 2)
+                    if any(v["profile_clicks"] is not None for v in values)
+                    else None),
             }
             for key, values in sorted(grouped.items())
         }
@@ -2410,6 +2457,111 @@ def cmd_review_strategy_disable(confirm: bool) -> int:
     return 0
 
 
+def _disaster_output(action: str, **kwargs) -> int:
+    """Run the isolated disaster-update lifecycle pipeline."""
+    load_env(require=False)
+    ensure_dirs()
+    import disaster_updates as disaster
+
+    incident_id = kwargs.get("incident_id") or disaster.INCIDENT_ID
+    actions = {
+        "status": lambda: disaster.status(incident_id),
+        "create": lambda: disaster.create_snapshot(
+            incident_id, kwargs["snapshot_type"],
+            dry_run=kwargs.get("dry_run", False)),
+        "list": lambda: disaster.list_snapshots(incident_id),
+        "detail": lambda: disaster.detail(kwargs["snapshot_id"]),
+        "delta": lambda: disaster.latest_delta(incident_id),
+        "visual": lambda: disaster.render_latest(
+            incident_id, kwargs["snapshot_type"],
+            dry_run=kwargs.get("dry_run", False)),
+        "candidates": lambda: disaster.latest_candidates(
+            incident_id, kwargs["snapshot_type"],
+            dry_run=kwargs.get("dry_run", False)),
+        "corrections": lambda: disaster.latest_correction(incident_id),
+        "frequency": lambda: disaster.frequency_recommendation(incident_id),
+        "approve": lambda: disaster.approve_candidate(
+            kwargs["snapshot_id"], kwargs["platform"],
+            decision=kwargs.get("decision", "approved"),
+            approved_by=kwargs.get("approved_by", "local_operator"),
+            notes=kwargs.get("notes", "")),
+        "publish": lambda: disaster.publish_candidate(
+            kwargs["snapshot_id"], kwargs["platform"],
+            confirm=kwargs.get("confirm", False)),
+        "auto_publish": lambda: disaster.auto_publish_verified(
+            kwargs["snapshot_id"]),
+        "frequency_apply": lambda: disaster.apply_frequency_mode(
+            incident_id, kwargs["mode"],
+            confirm=kwargs.get("confirm", False)),
+        "recovery_brief": lambda: disaster.recovery_brief(incident_id),
+        "closure": lambda: disaster.closure_package(incident_id),
+        "full_cycle": lambda: disaster.full_cycle(
+            incident_id, kwargs["snapshot_type"],
+            dry_run=kwargs.get("dry_run", False)),
+    }
+    result = actions[action]()
+    print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    if isinstance(result, dict) and result.get("status") in {
+        "not_found", "no_snapshots",
+    }:
+        return 1
+    return 0
+
+
+def _post_experiment_output(action: str, **kwargs) -> int:
+    """Run Phase A analysis only; this dispatcher has no publishing action."""
+    load_env(require=False)
+    ensure_dirs()
+    if str(SRC_DIR) not in sys.path:
+        sys.path.insert(0, str(SRC_DIR))
+    import post_experiments as experiments
+
+    limit = kwargs.get("limit", 300)
+    actions = {
+        "status": lambda: experiments.status(ROOT_DIR),
+        "extract": lambda: experiments.feature_extract(ROOT_DIR, limit),
+        "sync": lambda: experiments.performance_sync(ROOT_DIR, limit),
+        "audit": lambda: experiments.audit(ROOT_DIR, limit),
+        "backtest": lambda: experiments.backtest(
+            ROOT_DIR, limit, dry_run=kwargs.get("dry_run", True)),
+        "candidates": lambda: experiments.candidate_for_content(
+            ROOT_DIR, kwargs["content_id"],
+            dry_run=kwargs.get("dry_run", True)),
+        "compare": lambda: experiments.build_analysis(
+            experiments.resolve_db_path(ROOT_DIR)[0],
+            kwargs.get("window_days", 90)),
+        "correlation": lambda: experiments.build_analysis(
+            experiments.resolve_db_path(ROOT_DIR)[0],
+            kwargs.get("window_days", 90))["correlations"],
+        "report": lambda: experiments.full_cycle(
+            ROOT_DIR, limit, dry_run=True, notify_discord=False),
+        "weekly_report": lambda: experiments.full_cycle(
+            ROOT_DIR, limit, dry_run=True, notify_discord=False),
+        "full_cycle": lambda: experiments.full_cycle(
+            ROOT_DIR, limit, dry_run=kwargs.get("dry_run", False)),
+        "phase_b_assign": lambda: experiments.assign_phase_b(
+            experiments.resolve_db_path(ROOT_DIR)[0],
+            kwargs["experiment_id"], kwargs["platform"], kwargs.get("stratum", "default")),
+        "phase_b_approve": lambda: experiments.approve_phase_b(
+            experiments.resolve_db_path(ROOT_DIR)[0],
+            kwargs["experiment_id"], kwargs["candidate_id"],
+            kwargs["approved_by"], kwargs.get("decision", "approved"),
+            kwargs.get("reason", "")),
+        "phase_b_link": lambda: experiments.link_phase_b_publication(
+            experiments.resolve_db_path(ROOT_DIR)[0],
+            kwargs["experiment_id"], kwargs["candidate_id"],
+            kwargs["platform"], kwargs["post_id"]),
+        "phase_b_evaluate": lambda: experiments.evaluate_phase_b_rollout(
+            experiments.resolve_db_path(ROOT_DIR)[0], kwargs.get("minimum")),
+    }
+    result = actions[action]()
+    # Avoid dumping full joined records from compare commands.
+    if action == "compare" and isinstance(result, dict):
+        result = {key: value for key, value in result.items() if key != "records"}
+    print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
@@ -2432,6 +2584,86 @@ def main() -> int:
     sub.add_parser("daemon", help="常駐実行（スロット間隔・時間帯は.envで設定）")
     sub.add_parser("init-state", help="初回用: 過去スロットを処理済み化（バックログ暴発防止）")
     sub.add_parser("status", help="状態確認")
+    p_cleanup = sub.add_parser(
+        "storage-cleanup",
+        help="不要なキャッシュ・古いログ等を保持期限に従って整理")
+    p_cleanup.add_argument(
+        "--apply", action="store_true",
+        help="削除・ログローテーションを実行（省略時はdry-run）")
+    sub.add_parser(
+        "post-experiment-status", help="投稿実績検証Phase Aの状態を表示")
+    for command, help_text in (
+        ("post-feature-extract", "既存投稿・候補の特徴量を抽出"),
+        ("post-performance-sync", "既存の公開実績を欠損保持で同期"),
+        ("post-performance-audit", "投稿・実績データの利用可能範囲を監査"),
+        ("post-experiment-compare", "特徴別の実績比較を表示"),
+        ("post-experiment-report", "Phase A比較レポートを生成"),
+        ("post-experiment-weekly-report", "Phase A週次レポートを生成"),
+    ):
+        item = sub.add_parser(command, help=help_text)
+        item.add_argument("--limit", type=int, default=300)
+        if command in {
+            "post-experiment-compare", "post-experiment-report",
+            "post-experiment-weekly-report",
+        }:
+            item.add_argument("--dry-run", action="store_true")
+    p_post_backtest = sub.add_parser(
+        "post-experiment-backtest", help="過去テーマの候補をローカル再生成")
+    p_post_backtest.add_argument("--limit", type=int, default=100)
+    p_post_backtest.add_argument("--dry-run", action="store_true")
+    p_post_candidates = sub.add_parser(
+        "post-experiment-candidates", help="同一fact packetのcontrol/variant候補を生成")
+    p_post_candidates.add_argument(
+        "--content-id", help="省略時は社会保障の固定fixtureを使用")
+    p_post_candidates.add_argument("--dry-run", action="store_true")
+    p_post_correlation = sub.add_parser(
+        "post-feature-correlation", help="特徴量と実績の相関を分析")
+    p_post_correlation.add_argument("--window-days", type=int, default=90)
+    p_post_full = sub.add_parser(
+        "post-experiment-full-cycle", help="外部投稿なしでPhase A一式を実行")
+    p_post_full.add_argument("--limit", type=int, default=300)
+    p_post_full.add_argument("--dry-run", action="store_true")
+    p_phase_b_assign = sub.add_parser(
+        "post-experiment-phase-b-assign",
+        help="Phase Bのcontrol/variantを決定論的に割当（投稿なし）")
+    p_phase_b_assign.add_argument("--experiment-id", required=True)
+    p_phase_b_assign.add_argument("--platform", choices=("x", "threads"), required=True)
+    p_phase_b_assign.add_argument("--stratum", default="default")
+    p_phase_b_approve = sub.add_parser(
+        "post-experiment-phase-b-approve", help="Phase Bの人間承認を記録（投稿なし）")
+    p_phase_b_approve.add_argument("--experiment-id", required=True)
+    p_phase_b_approve.add_argument("--candidate-id", required=True)
+    p_phase_b_approve.add_argument("--approved-by", required=True)
+    p_phase_b_approve.add_argument(
+        "--decision", choices=("approved", "rejected"), default="approved")
+    p_phase_b_approve.add_argument("--reason", default="")
+    p_phase_b_link = sub.add_parser(
+        "post-experiment-phase-b-link", help="既存公開post IDを候補へ紐付け")
+    p_phase_b_link.add_argument("--experiment-id", required=True)
+    p_phase_b_link.add_argument("--candidate-id", required=True)
+    p_phase_b_link.add_argument("--platform", choices=("x", "threads"), required=True)
+    p_phase_b_link.add_argument("--post-id", required=True)
+    p_phase_b_eval = sub.add_parser(
+        "post-experiment-phase-b-evaluate", help="自動採用なしでrollout適格性を評価")
+    p_phase_b_eval.add_argument("--minimum", type=int)
+    p_post_replies = sub.add_parser(
+        "post-replies-collect",
+        help="X公式Recent Searchで自分の投稿への返信を読み取り専用収集")
+    p_post_replies.add_argument("--post-limit", type=int, default=5)
+    p_post_replies.add_argument("--replies-per-post", type=int, default=20)
+    sub.add_parser(
+        "measurement-status",
+        help="投稿指標・返信・フォロワー計測計画を外部通信なしで表示")
+    p_measurement = sub.add_parser(
+        "measurement-cycle",
+        help="計測計画を表示（--execute指定時だけ読み取りAPIを実行）")
+    p_measurement.add_argument("--execute", action="store_true")
+    p_measurement_reconcile = sub.add_parser(
+        "measurement-reconcile",
+        help="外部APIなしで計測計画の作成・期限切れ整合を確認")
+    p_measurement_reconcile.add_argument(
+        "--apply", action="store_true",
+        help="SQLite内の計画作成・整合だけを適用")
     sub.add_parser("report", help="投稿実績（インプレッション等）を取得しknowledge/へ学習パターンを書き出す")
     sub.add_parser("weekly-report", help="週次AI分析をローカル保存（既定では無効・X投稿なし）")
     sub.add_parser("premium-report", help="手動プレミアム分析をローカル保存（既定では無効・X投稿なし）")
@@ -2445,6 +2677,95 @@ def main() -> int:
         help="ChatGPT日次レビュー方針を監査履歴を残して停止")
     p_strategy_disable.add_argument(
         "--confirm", action="store_true", help="停止を実行")
+    p_disaster_status = sub.add_parser(
+        "disaster-update-status", help="熊本地震朝夕更新のPhase A状態を表示")
+    p_disaster_status.add_argument(
+        "--incident-id", default="kumamoto-earthquake-20260728")
+    p_disaster_create = sub.add_parser(
+        "disaster-snapshot-create", help="公式情報スナップショットを保存")
+    p_disaster_create.add_argument("--incident-id", required=True)
+    p_disaster_create.add_argument(
+        "--snapshot-type", choices=["morning", "evening"], required=True)
+    p_disaster_create.add_argument("--dry-run", action="store_true")
+    p_disaster_list = sub.add_parser(
+        "disaster-snapshot-list", help="災害スナップショット一覧を表示")
+    p_disaster_list.add_argument(
+        "--incident-id", default="kumamoto-earthquake-20260728")
+    p_disaster_detail = sub.add_parser(
+        "disaster-snapshot-detail", help="災害スナップショット詳細を表示")
+    p_disaster_detail.add_argument("--snapshot-id", required=True)
+    p_disaster_delta = sub.add_parser(
+        "disaster-delta", help="直近2スナップショットの差分を表示")
+    p_disaster_delta.add_argument("--incident-id", required=True)
+    p_disaster_visual = sub.add_parser(
+        "disaster-visual-render", help="X・Threads用定型画像を生成")
+    p_disaster_visual.add_argument("--incident-id", required=True)
+    p_disaster_visual.add_argument(
+        "--snapshot-type", choices=["morning", "evening"], required=True)
+    p_disaster_visual.add_argument("--dry-run", action="store_true")
+    p_disaster_candidates = sub.add_parser(
+        "disaster-update-candidates", help="X・Threads投稿候補を生成")
+    p_disaster_candidates.add_argument("--incident-id", required=True)
+    p_disaster_candidates.add_argument(
+        "--snapshot-type", choices=["morning", "evening"], required=True)
+    p_disaster_candidates.add_argument("--dry-run", action="store_true")
+    p_disaster_correction = sub.add_parser(
+        "disaster-correction-candidates", help="公式訂正の候補を生成")
+    p_disaster_correction.add_argument("--incident-id", required=True)
+    p_disaster_correction.add_argument("--dry-run", action="store_true")
+    p_disaster_frequency = sub.add_parser(
+        "disaster-frequency-recommendation",
+        help="頻度縮小・終了候補を人間承認用に評価")
+    p_disaster_frequency.add_argument("--incident-id", required=True)
+    p_disaster_approve = sub.add_parser(
+        "disaster-update-approve",
+        help="Phase BのX・Threads候補を人間承認または却下")
+    p_disaster_approve.add_argument("--snapshot-id", required=True)
+    p_disaster_approve.add_argument(
+        "--platform", choices=["x", "threads"], required=True)
+    p_disaster_approve.add_argument(
+        "--decision", choices=["approved", "rejected"], default="approved")
+    p_disaster_approve.add_argument("--approved-by", default="local_operator")
+    p_disaster_approve.add_argument("--notes", default="")
+    p_disaster_publish = sub.add_parser(
+        "disaster-update-publish",
+        help="承認済み災害候補を明示確認付きで1媒体へ投稿")
+    p_disaster_publish.add_argument("--snapshot-id", required=True)
+    p_disaster_publish.add_argument(
+        "--platform", choices=["x", "threads"], required=True)
+    p_disaster_publish.add_argument(
+        "--confirm", action="store_true", help="外部投稿を明示承認")
+    p_disaster_auto = sub.add_parser(
+        "disaster-update-auto-publish",
+        help="Phase Cの確認済み情報限定自動投稿ゲートを実行")
+    p_disaster_auto.add_argument("--snapshot-id", required=True)
+    p_disaster_frequency_apply = sub.add_parser(
+        "disaster-frequency-apply",
+        help="人間承認後に災害更新モードを記録")
+    p_disaster_frequency_apply.add_argument("--incident-id", required=True)
+    p_disaster_frequency_apply.add_argument(
+        "--mode", choices=[
+            "active_twice_daily", "active_daily",
+            "recovery_periodic", "closed"], required=True)
+    p_disaster_frequency_apply.add_argument(
+        "--confirm", action="store_true", help="モード変更を明示承認")
+    p_disaster_recovery = sub.add_parser(
+        "disaster-recovery-brief",
+        help="Phase Dの定期復旧報告候補をローカル生成")
+    p_disaster_recovery.add_argument(
+        "--incident-id", default="kumamoto-earthquake-20260728")
+    p_disaster_closure = sub.add_parser(
+        "disaster-closure-package",
+        help="終了時の総括記事・防災解説候補をローカル生成")
+    p_disaster_closure.add_argument(
+        "--incident-id", default="kumamoto-earthquake-20260728")
+    p_disaster_cycle = sub.add_parser(
+        "disaster-update-full-cycle",
+        help="Phase Aの収集・差分・候補・画像・通知を一括実行")
+    p_disaster_cycle.add_argument("--incident-id", required=True)
+    p_disaster_cycle.add_argument(
+        "--snapshot-type", choices=["morning", "evening"], required=True)
+    p_disaster_cycle.add_argument("--dry-run", action="store_true")
     sub.add_parser("weekly-review", help="週次レビューをローカル保存")
     sub.add_parser("preview-extensions", help="拡張投稿案をプレビュー保存（投稿なし）")
     sub.add_parser("budget-status", help="今月のOpenAI/X/合計費用を表示")
@@ -2824,6 +3145,81 @@ def main() -> int:
         return cmd_init_state()
     if args.command == "status":
         return cmd_status()
+    if args.command == "storage-cleanup":
+        return cmd_storage_cleanup(apply=args.apply)
+    if args.command == "post-experiment-status":
+        return _post_experiment_output("status")
+    if args.command == "post-feature-extract":
+        return _post_experiment_output("extract", limit=args.limit)
+    if args.command == "post-performance-sync":
+        return _post_experiment_output("sync", limit=args.limit)
+    if args.command == "post-performance-audit":
+        return _post_experiment_output("audit", limit=args.limit)
+    if args.command == "post-experiment-backtest":
+        return _post_experiment_output(
+            "backtest", limit=args.limit, dry_run=args.dry_run)
+    if args.command == "post-experiment-candidates":
+        return _post_experiment_output(
+            "candidates", content_id=args.content_id, dry_run=args.dry_run)
+    if args.command == "post-experiment-compare":
+        return _post_experiment_output(
+            "compare", limit=args.limit, dry_run=args.dry_run)
+    if args.command == "post-feature-correlation":
+        return _post_experiment_output(
+            "correlation", window_days=args.window_days)
+    if args.command == "post-experiment-report":
+        return _post_experiment_output("report", limit=args.limit)
+    if args.command == "post-experiment-weekly-report":
+        return _post_experiment_output("weekly_report", limit=args.limit)
+    if args.command == "post-experiment-full-cycle":
+        return _post_experiment_output(
+            "full_cycle", limit=args.limit, dry_run=args.dry_run)
+    if args.command == "post-experiment-phase-b-assign":
+        return _post_experiment_output(
+            "phase_b_assign", experiment_id=args.experiment_id,
+            platform=args.platform, stratum=args.stratum)
+    if args.command == "post-experiment-phase-b-approve":
+        return _post_experiment_output(
+            "phase_b_approve", experiment_id=args.experiment_id,
+            candidate_id=args.candidate_id, approved_by=args.approved_by,
+            decision=args.decision, reason=args.reason)
+    if args.command == "post-experiment-phase-b-link":
+        return _post_experiment_output(
+            "phase_b_link", experiment_id=args.experiment_id,
+            candidate_id=args.candidate_id, platform=args.platform,
+            post_id=args.post_id)
+    if args.command == "post-experiment-phase-b-evaluate":
+        return _post_experiment_output(
+            "phase_b_evaluate", minimum=args.minimum)
+    if args.command == "post-replies-collect":
+        load_env()
+        ensure_dirs()
+        from reply_metrics import collect_x_replies
+        print(json.dumps(collect_x_replies(
+            post_limit=args.post_limit,
+            replies_per_post=args.replies_per_post,
+        ), ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "measurement-reconcile":
+        load_env()
+        if str(SRC_DIR) not in sys.path:
+            sys.path.insert(0, str(SRC_DIR))
+        from measurement_jobs import reconcile_local
+        print(json.dumps(
+            reconcile_local(apply=args.apply),
+            ensure_ascii=False, indent=2))
+        return 0
+    if args.command in {"measurement-status", "measurement-cycle"}:
+        load_env()
+        ensure_dirs()
+        from measurement_jobs import (
+            run as run_measurements, status as measurement_status)
+        if args.command == "measurement-status":
+            result = measurement_status()
+        else:
+            result = run_measurements(execute=args.execute)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
     if args.command == "report":
         return cmd_report()
     if args.command == "weekly-report":
@@ -2838,6 +3234,58 @@ def main() -> int:
         return cmd_review_strategy_status()
     if args.command == "review-strategy-disable":
         return cmd_review_strategy_disable(args.confirm)
+    if args.command == "disaster-update-status":
+        return _disaster_output("status", incident_id=args.incident_id)
+    if args.command == "disaster-snapshot-create":
+        return _disaster_output(
+            "create", incident_id=args.incident_id,
+            snapshot_type=args.snapshot_type, dry_run=args.dry_run)
+    if args.command == "disaster-snapshot-list":
+        return _disaster_output("list", incident_id=args.incident_id)
+    if args.command == "disaster-snapshot-detail":
+        return _disaster_output("detail", snapshot_id=args.snapshot_id)
+    if args.command == "disaster-delta":
+        return _disaster_output("delta", incident_id=args.incident_id)
+    if args.command == "disaster-visual-render":
+        return _disaster_output(
+            "visual", incident_id=args.incident_id,
+            snapshot_type=args.snapshot_type, dry_run=args.dry_run)
+    if args.command == "disaster-update-candidates":
+        return _disaster_output(
+            "candidates", incident_id=args.incident_id,
+            snapshot_type=args.snapshot_type, dry_run=args.dry_run)
+    if args.command == "disaster-correction-candidates":
+        return _disaster_output(
+            "corrections", incident_id=args.incident_id,
+            dry_run=args.dry_run)
+    if args.command == "disaster-frequency-recommendation":
+        return _disaster_output("frequency", incident_id=args.incident_id)
+    if args.command == "disaster-update-approve":
+        return _disaster_output(
+            "approve", snapshot_id=args.snapshot_id,
+            platform=args.platform, decision=args.decision,
+            approved_by=args.approved_by, notes=args.notes)
+    if args.command == "disaster-update-publish":
+        return _disaster_output(
+            "publish", snapshot_id=args.snapshot_id,
+            platform=args.platform, confirm=args.confirm)
+    if args.command == "disaster-update-auto-publish":
+        return _disaster_output(
+            "auto_publish", snapshot_id=args.snapshot_id)
+    if args.command == "disaster-frequency-apply":
+        return _disaster_output(
+            "frequency_apply", incident_id=args.incident_id,
+            mode=args.mode, confirm=args.confirm)
+    if args.command == "disaster-recovery-brief":
+        return _disaster_output(
+            "recovery_brief", incident_id=args.incident_id)
+    if args.command == "disaster-closure-package":
+        return _disaster_output(
+            "closure", incident_id=args.incident_id)
+    if args.command == "disaster-update-full-cycle":
+        return _disaster_output(
+            "full_cycle", incident_id=args.incident_id,
+            snapshot_type=args.snapshot_type, dry_run=args.dry_run)
     if args.command == "weekly-review":
         return cmd_weekly_report()
     if args.command == "preview-extensions":

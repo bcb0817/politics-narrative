@@ -495,11 +495,21 @@ class ThreadsClient:
     def paginate(self, path: str, *, token: str = "",
                  params: dict | None = None, max_pages: int = 20) -> list[dict]:
         """Follow official cursor paging while never trusting a next URL."""
+        return self.paginate_with_metadata(
+            path, token=token, params=params, max_pages=max_pages)["data"]
+
+    def paginate_with_metadata(
+            self, path: str, *, token: str = "",
+            params: dict | None = None, max_pages: int = 20) -> dict:
+        """Return rows plus page count and whether another page was truncated."""
         output: list[dict] = []
         current = dict(params or {})
         seen: set[str] = set()
+        pages = 0
+        truncated = False
         for _ in range(max(1, min(100, max_pages))):
             payload = self._request("GET", path, token=token, params=current)
+            pages += 1
             rows = payload.get("data") or []
             if not isinstance(rows, list):
                 raise RuntimeError("threads_api_invalid_data_schema")
@@ -512,7 +522,13 @@ class ThreadsClient:
             seen.add(after)
             current["after"] = after
             current.pop("before", None)
-        return output
+        else:
+            truncated = bool(after)
+        return {
+            "data": output,
+            "page_count": pages,
+            "pagination_truncated": truncated,
+        }
 
     @staticmethod
     def _resource(path: str) -> str:
@@ -685,7 +701,8 @@ class ThreadsClient:
 
     def keyword_search(self, query: str, *, search_type: str = "RECENT",
                        search_mode: str = "KEYWORD", limit: int = 50,
-                       since: str = "", until: str = "") -> list[dict]:
+                       since: str = "", until: str = "",
+                       return_metadata: bool = False):
         params = {
             "q": query, "search_type": search_type,
             "search_mode": search_mode, "limit": limit,
@@ -699,9 +716,10 @@ class ThreadsClient:
             params["since"] = since
         if until:
             params["until"] = until
-        return self.paginate(
+        result = self.paginate_with_metadata(
             self._resource("keyword_search"),
             token=settings()["access_token"], params=params)
+        return result if return_metadata else result["data"]
 
     def repost(self, post_id: str) -> dict:
         return self._request(
@@ -1039,6 +1057,7 @@ def _candidate_query(path: Path | None = None,
     params: tuple = (x_post_id,) if x_post_id else ()
     query = f"""SELECT p.tweet_id,p.text x_text,p.posted_at,p.topic_key,
       p.post_type,g.id generated_post_id,g.quality_score,g.ban_risk,
+      g.threads_text politics_threads_text,
       n.id news_id,n.title,n.summary,n.source_name,n.source_url,
       n.source_type,n.genre,n.metadata_json,n.verified,n.final_news_score,
       n.source_reliability_score,
@@ -1287,6 +1306,21 @@ def _threads_month_spent(path: Path | None = None) -> float:
 def _openai_text(source: dict, client_factory=None,
                  path: Path | None = None) -> tuple[dict, dict]:
     cfg = settings()
+    prepared = str(source.get("politics_threads_text") or "").strip()
+    if prepared:
+        from politics_multistage import fit_platform_text
+        prepared = fit_platform_text(prepared, cfg["target_max_chars"])
+        if prepared:
+            return {
+                "threads_post_type": "policy_context",
+                "text": prepared,
+                "question_included": prepared.endswith(("？", "?")),
+                "decision_reason": "politics_multistage_independent_threads_text",
+            }, {
+                "model": "politics_multistage_reuse",
+                "input_tokens": 0, "output_tokens": 0,
+                "estimated_cost_usd": 0.0,
+            }
     if (
         not os.environ.get("OPENAI_API_KEY", "").strip()
         or _threads_month_spent(path) + cfg["max_cost_per_post"]
