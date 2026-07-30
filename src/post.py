@@ -2829,6 +2829,23 @@ def main():
                 best["integrated_research_topic_id"],
             ),
         )
+        db_write(
+            """INSERT OR IGNORE INTO integrated_research_decisions
+               (topic_id,run_id,stage,decision,reason,scores_json,actor,
+                decided_at) VALUES (?,?,?,?,?,?,?,?)""",
+            (
+                best["integrated_research_topic_id"],
+                best.get("integrated_research_run_id", ""),
+                "standard_post_pipeline", "published",
+                "passed_quality_safety_budget_interval_and_duplicate_gates",
+                json.dumps({
+                    "effective_score": best.get("effective_score"),
+                    "quality_score": best.get("quality_score"),
+                    "ban_risk": best.get("ban_risk"),
+                }, ensure_ascii=False),
+                "post_pipeline", now_jst.isoformat(),
+            ),
+        )
     db_write("""INSERT INTO post_style_experiments
       (tweet_id,post_type,hook_type,is_exploration,experiment_name,created_at,result_json)
       VALUES (?,?,?,?,?,?,?)""", (str(tweet_id), best.get("post_type", ""), best.get("hook_type", ""),

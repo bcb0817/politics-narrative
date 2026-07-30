@@ -1715,6 +1715,20 @@ def publish(draft_id: int, client: ThreadsClient | None = None,
                 ),
                 path,
             )
+            write(
+                """INSERT OR IGNORE INTO integrated_research_decisions
+                   (topic_id,run_id,stage,decision,reason,scores_json,actor,
+                    decided_at)
+                   SELECT id,run_id,'threads_post_pipeline','published',
+                          'threads_api_publish_succeeded','{}',
+                          'threads_post_pipeline',?
+                   FROM integrated_research_topics WHERE x_post_id=?""",
+                (
+                    _now().isoformat(),
+                    str(draft["source_x_post_id"]),
+                ),
+                path,
+            )
         return {
             "published": True, "threads_post_id": threads_post_id,
             "creation_id_saved": True, "threads_api_calls": calls,

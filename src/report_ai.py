@@ -174,6 +174,15 @@ def compact_daily_payload(payload: dict) -> dict:
             "current_active_strategy", {}),
         "prior_strategy_evaluation": payload.get(
             "prior_strategy_evaluation", {}),
+        "integrated_research": {
+            key: (payload.get("integrated_research") or {}).get(key)
+            for key in (
+                "topics", "eligible_topics", "x_posts", "threads_posts",
+                "average_confidence", "average_posting_value",
+                "decisions", "outcomes", "top_topics",
+                "interpretation_limit",
+            )
+        },
     }
 
 

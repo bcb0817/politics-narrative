@@ -111,20 +111,39 @@ CREATE TABLE IF NOT EXISTS integrated_research_runs (
  generated_at TEXT, research_window_start TEXT, research_window_end TEXT,
  provider_status_json TEXT, source_family_count INTEGER,
  topic_count INTEGER, eligible_topic_count INTEGER,
- status TEXT, created_at TEXT);
+ status TEXT, discord_notified_at TEXT, created_at TEXT);
 CREATE TABLE IF NOT EXISTS integrated_research_topics (
  id INTEGER PRIMARY KEY, run_id TEXT, topic_key TEXT, title TEXT,
  fact_summary TEXT, main_claims_json TEXT, counterclaims_json TEXT,
  reaction_summary TEXT, confidence REAL, source_family_count INTEGER,
  evidence_count INTEGER, change_status TEXT, post_eligible INTEGER,
  decision_reason TEXT, candidate_news_id INTEGER, x_post_id TEXT,
- threads_post_id TEXT, created_at TEXT, updated_at TEXT,
+ threads_post_id TEXT, previous_topic_id INTEGER, change_summary TEXT,
+ claim_classification_json TEXT, contradictions_json TEXT,
+ anger_summary TEXT, posting_value_score REAL,
+ missing_sources_json TEXT, cache_status TEXT,
+ correction_status TEXT DEFAULT 'current',
+ deleted_source_count INTEGER DEFAULT 0, content_packet_id TEXT,
+ created_at TEXT, updated_at TEXT,
  UNIQUE(run_id,topic_key));
 CREATE TABLE IF NOT EXISTS integrated_research_evidence (
  id INTEGER PRIMARY KEY, topic_id INTEGER, provider TEXT,
  evidence_type TEXT, source_id TEXT, source_url TEXT, title TEXT,
- summary TEXT, reliability REAL, observed_at TEXT, created_at TEXT,
+ summary TEXT, reliability REAL, observed_at TEXT,
+ canonical_url TEXT, content_hash TEXT, freshness_status TEXT,
+ is_deleted INTEGER DEFAULT 0, deleted_at TEXT, created_at TEXT,
  UNIQUE(topic_id,provider,source_id));
+CREATE TABLE IF NOT EXISTS integrated_research_decisions (
+ id INTEGER PRIMARY KEY, topic_id INTEGER, run_id TEXT, stage TEXT,
+ decision TEXT, reason TEXT, scores_json TEXT, actor TEXT,
+ decided_at TEXT, UNIQUE(topic_id,stage,decision,reason));
+CREATE TABLE IF NOT EXISTS integrated_research_corrections (
+ id INTEGER PRIMARY KEY, topic_id INTEGER, correction_type TEXT,
+ previous_json TEXT, corrected_json TEXT, reason TEXT, detected_at TEXT,
+ applied_at TEXT, status TEXT);
+CREATE TABLE IF NOT EXISTS integrated_research_audits (
+ id INTEGER PRIMARY KEY, audited_at TEXT, status TEXT,
+ summary_json TEXT, report_path TEXT, created_at TEXT);
 CREATE TABLE IF NOT EXISTS engagement_queue (
  id INTEGER PRIMARY KEY, queue_type TEXT, source_post_id TEXT, author_handle TEXT,
  author_type TEXT, topic_key TEXT, source_verified INTEGER, reason_selected TEXT,
@@ -258,6 +277,10 @@ CREATE INDEX IF NOT EXISTS idx_integrated_research_topic_run
  ON integrated_research_topics(run_id,topic_key,post_eligible);
 CREATE INDEX IF NOT EXISTS idx_integrated_research_evidence_topic
  ON integrated_research_evidence(topic_id,provider);
+CREATE INDEX IF NOT EXISTS idx_integrated_research_decision_topic
+ ON integrated_research_decisions(topic_id,decided_at);
+CREATE INDEX IF NOT EXISTS idx_integrated_research_correction_topic
+ ON integrated_research_corrections(topic_id,detected_at);
 CREATE INDEX IF NOT EXISTS idx_queue_status ON engagement_queue(queue_type, status);
 CREATE INDEX IF NOT EXISTS idx_engagement_results_queue ON engagement_results(queue_id, measurement_window);
 CREATE INDEX IF NOT EXISTS idx_openai_batch_status ON openai_batch_jobs(status, submitted_at);
@@ -677,7 +700,10 @@ def table_counts(path: Path | None = None) -> dict:
                          "xai_discovery_topics", "xai_budget_mode_history",
                          "xai_roi_results", "integrated_research_runs",
                          "integrated_research_topics",
-                         "integrated_research_evidence"):
+                         "integrated_research_evidence",
+                         "integrated_research_decisions",
+                         "integrated_research_corrections",
+                         "integrated_research_audits"):
                 out[name] = conn.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0]
     except sqlite3.Error:
         pass
@@ -752,6 +778,29 @@ def add_column_if_missing(table: str, column: str, declaration: str,
             "review_strategy_id": "TEXT",
             "review_strategy_experiment": "TEXT",
             "review_strategy_variant": "TEXT DEFAULT 'inactive'",
+        },
+        "integrated_research_runs": {
+            "discord_notified_at": "TEXT",
+        },
+        "integrated_research_topics": {
+            "previous_topic_id": "INTEGER",
+            "change_summary": "TEXT",
+            "claim_classification_json": "TEXT",
+            "contradictions_json": "TEXT",
+            "anger_summary": "TEXT",
+            "posting_value_score": "REAL",
+            "missing_sources_json": "TEXT",
+            "cache_status": "TEXT",
+            "correction_status": "TEXT DEFAULT 'current'",
+            "deleted_source_count": "INTEGER DEFAULT 0",
+            "content_packet_id": "TEXT",
+        },
+        "integrated_research_evidence": {
+            "canonical_url": "TEXT",
+            "content_hash": "TEXT",
+            "freshness_status": "TEXT",
+            "is_deleted": "INTEGER DEFAULT 0",
+            "deleted_at": "TEXT",
         },
     }
     if declaration != allowed.get(table, {}).get(column):
@@ -837,6 +886,29 @@ def apply_additive_migrations(path: Path | None = None) -> dict:
             "review_strategy_experiment": "TEXT",
             "review_strategy_variant": "TEXT DEFAULT 'inactive'",
         },
+        "integrated_research_runs": {
+            "discord_notified_at": "TEXT",
+        },
+        "integrated_research_topics": {
+            "previous_topic_id": "INTEGER",
+            "change_summary": "TEXT",
+            "claim_classification_json": "TEXT",
+            "contradictions_json": "TEXT",
+            "anger_summary": "TEXT",
+            "posting_value_score": "REAL",
+            "missing_sources_json": "TEXT",
+            "cache_status": "TEXT",
+            "correction_status": "TEXT DEFAULT 'current'",
+            "deleted_source_count": "INTEGER DEFAULT 0",
+            "content_packet_id": "TEXT",
+        },
+        "integrated_research_evidence": {
+            "canonical_url": "TEXT",
+            "content_hash": "TEXT",
+            "freshness_status": "TEXT",
+            "is_deleted": "INTEGER DEFAULT 0",
+            "deleted_at": "TEXT",
+        },
     }
     added = {
         table: [
@@ -854,6 +926,11 @@ def apply_additive_migrations(path: Path | None = None) -> dict:
             conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_conversion_event_key "
                 "ON conversion_events(event_key)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS "
+                "idx_integrated_research_evidence_canonical "
+                "ON integrated_research_evidence(canonical_url,content_hash)"
             )
             conn.execute("""UPDATE xai_usage_events
                 SET request_id='legacy-xai-' || id WHERE request_id IS NULL OR request_id=''""")

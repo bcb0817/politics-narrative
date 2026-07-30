@@ -66,7 +66,9 @@ class IntegratedResearchTests(unittest.TestCase):
             "INTEGRATED_RESEARCH_MIN_SOURCE_FAMILIES": "2",
             "INTEGRATED_RESEARCH_MIN_EVIDENCE": "2",
             "INTEGRATED_RESEARCH_MIN_CONFIDENCE": "0.65",
+            "INTEGRATED_RESEARCH_MIN_POSTING_VALUE_SCORE": "6.0",
             "INTEGRATED_RESEARCH_MAX_POST_CANDIDATES_PER_RUN": "1",
+            "INTEGRATED_RESEARCH_DISCORD_ENABLED": "false",
             "SEMANTIC_TOPIC_COOLDOWN_HOURS": "72",
         }
 
@@ -167,6 +169,111 @@ class IntegratedResearchTests(unittest.TestCase):
         self.assertEqual(result["counts"]["integrated_research_runs"], 1)
         self.assertEqual(result["counts"]["integrated_research_topics"], 1)
         self.assertEqual(result["counts"]["integrated_research_evidence"], 3)
+        self.assertEqual(result["counts"]["integrated_research_decisions"], 1)
+
+    def test_analysis_fields_and_decision_are_persisted(self):
+        self.build()
+        with sqlite3.connect(self.path) as conn:
+            row = conn.execute(
+                """SELECT claim_classification_json,contradictions_json,
+                          anger_summary,posting_value_score,change_summary,
+                          cache_status FROM integrated_research_topics"""
+            ).fetchone()
+            decision = conn.execute(
+                """SELECT decision,reason FROM integrated_research_decisions"""
+            ).fetchone()
+        self.assertIn('"fact"', row[0])
+        self.assertIn("policy_disagreement", row[1])
+        self.assertGreater(row[3], 6)
+        self.assertEqual(row[4], "初回観測")
+        self.assertEqual(row[5], "fresh")
+        self.assertEqual(decision[0], "eligible")
+
+    def test_history_outcomes_export_dashboard_audit_and_restore(self):
+        candidate = self.build()[0]
+        topic_id = candidate["integrated_research_topic_id"]
+        with sqlite3.connect(self.path) as conn:
+            conn.execute(
+                """UPDATE integrated_research_topics
+                   SET x_post_id='x-1',threads_post_id='t-1' WHERE id=?""",
+                (topic_id,),
+            )
+            conn.execute(
+                """INSERT INTO post_metrics
+                   (tweet_id,measurement_window,impressions,likes,reposts)
+                   VALUES ('x-1','24h',120,8,2)"""
+            )
+            conn.execute(
+                """INSERT INTO threads_metrics
+                   (threads_post_id,measurement_window,views,likes,reposts)
+                   VALUES ('t-1','24h',80,6,1)"""
+            )
+            conn.commit()
+        history = integrated_research.history(limit=5, path=self.path)
+        self.assertEqual(history["count"], 1)
+        self.assertEqual(len(history["topics"][0]["decisions"]), 1)
+        outcome = integrated_research.outcomes(30, self.path)
+        self.assertEqual(outcome["x_impressions"], 120)
+        self.assertEqual(outcome["threads_views"], 80)
+        export_path = Path(self.temp.name) / "research.json"
+        exported = integrated_research.export_results(
+            "json", 30, export_path, self.path)
+        self.assertTrue(Path(exported["output"]).exists())
+        dashboard = integrated_research.render_dashboard(
+            30, Path(self.temp.name) / "dashboard.html", self.path)
+        self.assertTrue(Path(dashboard["output"]).exists())
+        self.assertEqual(integrated_research.audit(
+            path=self.path)["status"], "ok")
+        self.assertTrue(
+            integrated_research.validate_backup_restore(self.path)["ok"])
+
+    def test_correction_deletion_and_retention_preserve_audit_history(self):
+        topic_id = self.build()[0]["integrated_research_topic_id"]
+        correction = integrated_research.record_correction(
+            topic_id, "訂正後の公式事実", "公式訂正", True, self.path)
+        self.assertEqual(correction["status"], "applied")
+        deleted = integrated_research.mark_source_deleted(
+            "xai_x_search", "100", True, self.path)
+        self.assertEqual(deleted["marked_deleted"], 1)
+        with sqlite3.connect(self.path) as conn:
+            conn.execute(
+                """UPDATE integrated_research_evidence
+                   SET created_at='2020-01-01T00:00:00+09:00',
+                       is_deleted=0 WHERE provider='xai_x_search'"""
+            )
+            conn.commit()
+        result = integrated_research.retention(30, True, self.path)
+        self.assertGreaterEqual(result["redacted"], 1)
+        self.assertEqual(self.count("integrated_research_topics"), 1)
+        self.assertEqual(self.count("integrated_research_corrections"), 1)
+
+    def test_backfill_is_audit_only_and_never_posts(self):
+        with sqlite3.connect(self.path) as conn:
+            conn.execute(
+                """INSERT INTO xai_discovery_runs
+                   (run_id,completed_at,status) VALUES ('old-run',?,'success')""",
+                (self.now.isoformat(),),
+            )
+            conn.execute(
+                """INSERT INTO xai_discovery_topics
+                   (run_id,topic_key,stance_summary_json,
+                    counterargument_summary_json,evidence_count,
+                    search_confidence,created_at)
+                   VALUES ('old-run','過去政策','["意見"]','["反対"]',2,0.7,?)""",
+                (self.now.isoformat(),),
+            )
+            conn.commit()
+        preview = integrated_research.backfill(10, False, self.path)
+        self.assertEqual(preview["imported"], 0)
+        applied = integrated_research.backfill(10, True, self.path)
+        self.assertEqual(applied["imported"], 1)
+        self.assertEqual(applied["external_posts"], 0)
+        with sqlite3.connect(self.path) as conn:
+            row = conn.execute(
+                """SELECT post_eligible,decision_reason
+                   FROM integrated_research_topics""").fetchone()
+        self.assertEqual(row[0], 0)
+        self.assertEqual(row[1], "historical_backfill_no_auto_post")
 
 
 if __name__ == "__main__":

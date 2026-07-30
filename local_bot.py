@@ -29,6 +29,7 @@ import time as time_mod
 import signal
 import argparse
 import subprocess
+import atexit
 from pathlib import Path
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
@@ -59,6 +60,7 @@ def _monitor_schedule_minute() -> int:
 
 # 実行が重ならないようにするロックファイル
 LOCK_STALE_SECONDS = 30 * 60  # 30分以上残っている lock は stale とみなす
+_DAEMON_LOCK_HANDLE = None
 
 # Windowsコンソール(cp932)対策
 try:
@@ -409,6 +411,67 @@ def release_lock() -> None:
         pass
 
 
+def daemon_lock_path() -> Path:
+    return resolve_dir("STATE_DIR", "data") / "daemon.lock"
+
+
+def acquire_daemon_lock() -> bool:
+    """Hold an OS lock for the daemon lifetime, including orphan processes."""
+    global _DAEMON_LOCK_HANDLE
+    if _DAEMON_LOCK_HANDLE is not None:
+        return True
+    path = daemon_lock_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(path, "a+b")
+    try:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"0")
+            handle.flush()
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        handle.seek(0)
+        handle.truncate()
+        handle.write(json.dumps({
+            "pid": os.getpid(),
+            "started_at_jst": datetime.now(JST).isoformat(),
+        }).encode("utf-8"))
+        handle.flush()
+        _DAEMON_LOCK_HANDLE = handle
+        return True
+    except (OSError, IOError):
+        handle.close()
+        return False
+
+
+def release_daemon_lock() -> None:
+    global _DAEMON_LOCK_HANDLE
+    handle = _DAEMON_LOCK_HANDLE
+    if handle is None:
+        return
+    try:
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except (OSError, IOError):
+        pass
+    finally:
+        handle.close()
+        _DAEMON_LOCK_HANDLE = None
+
+
+atexit.register(release_daemon_lock)
+
+
 # ---------------------------------------------------------------------------
 # post.py 実行
 # ---------------------------------------------------------------------------
@@ -471,6 +534,9 @@ def cmd_daemon() -> int:
     load_env()
     ensure_dirs()
     check_api_keys()
+    if not acquire_daemon_lock():
+        log("[WARN] daemon: another daemon process already holds daemon.lock; exit")
+        return 0
 
     stop = {"flag": False}
 
@@ -583,6 +649,7 @@ def cmd_daemon() -> int:
             time_mod.sleep(1.0)
 
     log("[INFO] daemon: stopped")
+    release_daemon_lock()
     return 0
 
 
@@ -1093,6 +1160,12 @@ def cmd_report() -> int:
     review_payload["xai_attribution_weekly"] = xai_roi(days=7)
     from threads_api import daily_review_summary  # noqa: E402
     review_payload["threads"] = daily_review_summary()
+    from integrated_research import (  # noqa: E402
+        daily_review_summary as integrated_daily_review_summary,
+    )
+    review_payload["integrated_research"] = (
+        integrated_daily_review_summary(days=1, path=review_db)
+    )
     from review_strategy import (  # noqa: E402
         activate_strategy,
         deactivate_strategy,
@@ -1653,6 +1726,57 @@ def cmd_integrated_research_status() -> int:
         sys.path.insert(0, str(SRC_DIR))
     from integrated_research import status  # noqa: E402
     print(json.dumps(status(), ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_integrated_research(action: str, **kwargs) -> int:
+    load_env(require=False)
+    ensure_dirs()
+    if str(SRC_DIR) not in sys.path:
+        sys.path.insert(0, str(SRC_DIR))
+    import integrated_research as research  # noqa: E402
+
+    if action == "history":
+        result = research.history(
+            kwargs.get("topic_key", ""), kwargs.get("limit", 20))
+    elif action == "outcomes":
+        result = research.outcomes(kwargs.get("days", 30))
+    elif action == "sources":
+        result = research.source_contribution(kwargs.get("days", 30))
+    elif action == "export":
+        output = Path(kwargs["output"]) if kwargs.get("output") else None
+        result = research.export_results(
+            kwargs.get("format", "json"), kwargs.get("days", 30), output)
+    elif action == "dashboard":
+        output = Path(kwargs["output"]) if kwargs.get("output") else None
+        result = research.render_dashboard(
+            kwargs.get("days", 30), output)
+    elif action == "audit":
+        output = Path(kwargs["output"]) if kwargs.get("output") else None
+        result = research.audit(output)
+    elif action == "backfill":
+        result = research.backfill(
+            kwargs.get("limit", 500), kwargs.get("apply", False))
+    elif action == "retention":
+        result = research.retention(
+            kwargs.get("days"), kwargs.get("apply", False))
+    elif action == "backup_check":
+        result = research.validate_backup_restore()
+    elif action == "correction":
+        result = research.record_correction(
+            kwargs["topic_id"], kwargs["fact_summary"], kwargs["reason"],
+            kwargs.get("apply", False))
+    elif action == "source_delete":
+        result = research.mark_source_deleted(
+            kwargs["provider"], kwargs["source_id"],
+            kwargs.get("apply", False))
+    elif action == "reuse":
+        result = research.reuse_topic(kwargs["topic_id"])
+    elif action == "mitigations":
+        result = research.mitigation_report()
+    else:
+        raise ValueError(f"unknown integrated research action: {action}")
+    print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -2871,6 +2995,55 @@ def main() -> int:
     sub.add_parser(
         "integrated-research-status",
         help="統合リサーチDBと分析投稿候補の状態を表示")
+    p_ir_history = sub.add_parser(
+        "integrated-research-history", help="統合テーマと判断履歴を表示")
+    p_ir_history.add_argument("--topic-key", default="")
+    p_ir_history.add_argument("--limit", type=int, default=20)
+    for command, help_text in (
+        ("integrated-research-outcomes", "統合リサーチ投稿の成果を表示"),
+        ("integrated-research-source-contribution", "情報源別の寄与を表示"),
+    ):
+        item = sub.add_parser(command, help=help_text)
+        item.add_argument("--days", type=int, default=30)
+    p_ir_export = sub.add_parser(
+        "integrated-research-export", help="統合結果をJSON・CSV・Markdown出力")
+    p_ir_export.add_argument(
+        "--format", choices=["json", "csv", "markdown"], default="json")
+    p_ir_export.add_argument("--days", type=int, default=30)
+    p_ir_export.add_argument("--output")
+    p_ir_dashboard = sub.add_parser(
+        "integrated-research-dashboard", help="ローカルHTML可視化を生成")
+    p_ir_dashboard.add_argument("--days", type=int, default=30)
+    p_ir_dashboard.add_argument("--output")
+    p_ir_audit = sub.add_parser(
+        "integrated-research-audit", help="DB整合性と証拠状態を監査")
+    p_ir_audit.add_argument("--output")
+    p_ir_backfill = sub.add_parser(
+        "integrated-research-backfill", help="過去xAI結果を監査専用で移行")
+    p_ir_backfill.add_argument("--limit", type=int, default=500)
+    p_ir_backfill.add_argument("--apply", action="store_true")
+    p_ir_retention = sub.add_parser(
+        "integrated-research-retention", help="古いSNS本文を監査情報を残して秘匿")
+    p_ir_retention.add_argument("--days", type=int)
+    p_ir_retention.add_argument("--apply", action="store_true")
+    sub.add_parser(
+        "integrated-research-backup-check", help="一時復元でDBバックアップを検証")
+    p_ir_correction = sub.add_parser(
+        "integrated-research-correction", help="事実訂正を履歴付きで記録")
+    p_ir_correction.add_argument("--topic-id", type=int, required=True)
+    p_ir_correction.add_argument("--fact-summary", required=True)
+    p_ir_correction.add_argument("--reason", required=True)
+    p_ir_correction.add_argument("--apply", action="store_true")
+    p_ir_delete = sub.add_parser(
+        "integrated-research-source-delete", help="削除済み情報源を墓標化")
+    p_ir_delete.add_argument("--provider", required=True)
+    p_ir_delete.add_argument("--source-id", required=True)
+    p_ir_delete.add_argument("--apply", action="store_true")
+    p_ir_reuse = sub.add_parser(
+        "integrated-research-reuse", help="note・動画向けコンテンツパケット化")
+    p_ir_reuse.add_argument("--topic-id", type=int, required=True)
+    sub.add_parser(
+        "integrated-research-mitigations", help="外部制約と代替策を表示")
     sub.add_parser("xai-discovery-status", help="xAI discovery status and safety state")
     sub.add_parser("xai-budget-mode", help="Show current dynamic xAI budget mode")
     sub.add_parser("xai-run-budget", help="Show the dynamic per-run xAI budget")
@@ -3425,6 +3598,42 @@ def main() -> int:
         return cmd_xai_roi()
     if args.command == "integrated-research-status":
         return cmd_integrated_research_status()
+    if args.command == "integrated-research-history":
+        return cmd_integrated_research(
+            "history", topic_key=args.topic_key, limit=args.limit)
+    if args.command == "integrated-research-outcomes":
+        return cmd_integrated_research("outcomes", days=args.days)
+    if args.command == "integrated-research-source-contribution":
+        return cmd_integrated_research("sources", days=args.days)
+    if args.command == "integrated-research-export":
+        return cmd_integrated_research(
+            "export", format=args.format, days=args.days, output=args.output)
+    if args.command == "integrated-research-dashboard":
+        return cmd_integrated_research(
+            "dashboard", days=args.days, output=args.output)
+    if args.command == "integrated-research-audit":
+        return cmd_integrated_research("audit", output=args.output)
+    if args.command == "integrated-research-backfill":
+        return cmd_integrated_research(
+            "backfill", limit=args.limit, apply=args.apply)
+    if args.command == "integrated-research-retention":
+        return cmd_integrated_research(
+            "retention", days=args.days, apply=args.apply)
+    if args.command == "integrated-research-backup-check":
+        return cmd_integrated_research("backup_check")
+    if args.command == "integrated-research-correction":
+        return cmd_integrated_research(
+            "correction", topic_id=args.topic_id,
+            fact_summary=args.fact_summary, reason=args.reason,
+            apply=args.apply)
+    if args.command == "integrated-research-source-delete":
+        return cmd_integrated_research(
+            "source_delete", provider=args.provider,
+            source_id=args.source_id, apply=args.apply)
+    if args.command == "integrated-research-reuse":
+        return cmd_integrated_research("reuse", topic_id=args.topic_id)
+    if args.command == "integrated-research-mitigations":
+        return cmd_integrated_research("mitigations")
     if args.command == "xai-discovery-status":
         return cmd_xai_discovery("status")
     if args.command == "xai-budget-mode":

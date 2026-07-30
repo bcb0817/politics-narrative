@@ -252,6 +252,8 @@ python local_bot.py daemon
 - タスクスケジューラを使う場合: 「タスクの作成」→ トリガー「ログオン時」→
   操作でプログラム `C:\path\to\repo\.venv\Scripts\python.exe`、
   引数 `local_bot.py daemon`、開始（作業）フォルダをリポジトリ直下に設定。
+- `daemon`は稼働中ずっと `data/daemon.lock` のOSロックを保持する。
+  タスクや手動ターミナルから重複起動されても、後発プロセスは即時終了する。
 
 ### macOS
 
@@ -421,7 +423,10 @@ OpenAI予算は投稿生成 `$5`、分類 `$0.5`、日次レビュー `$1.5`、�
 Official information and RSS remain the factual foundation. xAI X Search and
 available Threads Search results are stored separately as public-reaction
 signals. Integrated records are saved in `integrated_research_runs`,
-`integrated_research_topics`, and `integrated_research_evidence`.
+`integrated_research_topics`, `integrated_research_evidence`, plus decision,
+correction, and audit history. The pipeline classifies fact, opinion, and
+speculation; separates disagreement from explicit factual contradiction;
+scores posting value; and links X/Threads outcomes to the daily AI review.
 
 At most one qualified integrated-analysis candidate is added to the normal
 posting pipeline per research run. It does not add a separate posting slot and
@@ -430,6 +435,9 @@ must pass the existing quality, safety, budget, interval, daily-limit, and
 
 ```powershell
 .\.venv\Scripts\python.exe .\local_bot.py integrated-research-status
+.\.venv\Scripts\python.exe .\local_bot.py integrated-research-dashboard --days 30
+.\.venv\Scripts\python.exe .\local_bot.py integrated-research-audit
+.\.venv\Scripts\python.exe .\local_bot.py integrated-research-mitigations
 ```
 
 See [`docs/INTEGRATED_RESEARCH.md`](docs/INTEGRATED_RESEARCH.md).

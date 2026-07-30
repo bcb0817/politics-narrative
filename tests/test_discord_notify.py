@@ -325,6 +325,36 @@ class DiscordNotifyTests(unittest.TestCase):
         self.assertIn("https://x.com/i/web/status/1234567890", rendered)
         self.assertNotIn("must-not-be-sent", rendered)
 
+    def test_integrated_research_sends_only_bounded_result(self):
+        env = {
+            "DISCORD_NOTIFICATIONS_ENABLED": "true",
+            "DISCORD_NOTIFY_INTEGRATED_RESEARCH": "true",
+            "DISCORD_WEBHOOK_URL": "https://discord.invalid/webhook",
+        }
+        report = {
+            "topic_count": 1,
+            "eligible_count": 1,
+            "skipped_count": 0,
+            "topics": [{
+                "title": "子育て支援制度",
+                "confidence": 0.82,
+                "posting_value_score": 8.1,
+                "post_eligible": True,
+                "raw_prompt": "must-not-be-sent",
+            }],
+            "access_token": "must-not-be-sent",
+        }
+        with patch.dict(os.environ, env, clear=False), patch(
+            "discord_notify.requests.post", return_value=FakeResponse()
+        ) as post:
+            self.assertTrue(
+                discord_notify.notify_integrated_research(report))
+        rendered = json.dumps(
+            post.call_args.kwargs["json"], ensure_ascii=False)
+        self.assertIn("子育て支援制度", rendered)
+        self.assertIn("投稿候補: 1件", rendered)
+        self.assertNotIn("must-not-be-sent", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()

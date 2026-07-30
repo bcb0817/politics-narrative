@@ -417,6 +417,42 @@ def notify_x_research(report: dict[str, Any], *,
     )
 
 
+def notify_integrated_research(report: dict[str, Any], *,
+                               dry_run: bool = False) -> bool:
+    """Notify only the bounded outcome of a cross-source research run."""
+    if dry_run:
+        return False
+    topics = report.get("topics") or []
+    result_lines = []
+    for row in topics[:5]:
+        if not isinstance(row, dict):
+            continue
+        result_lines.append(
+            f"• **{_clean(row.get('title'), 100)}**\n"
+            f"  信頼度 {float(row.get('confidence') or 0):.2f} / "
+            f"投稿価値 {float(row.get('posting_value_score') or 0):.1f} / "
+            f"{'候補' if row.get('post_eligible') else '見送り'}"
+        )
+    return notify(
+        "integrated_research",
+        "🧭 統合リサーチ結果",
+        "公式・報道の事実と、X・Threadsの反応標本を分けて照合しました。",
+        level="success" if int(report.get("eligible_count") or 0) else "info",
+        fields={
+            "結果": (
+                f"分析: {int(report.get('topic_count') or len(topics))}件\n"
+                f"投稿候補: {int(report.get('eligible_count') or 0)}件\n"
+                f"見送り: {int(report.get('skipped_count') or 0)}件"
+            ),
+            "主要テーマ": "\n".join(result_lines) or "対象テーマなし",
+            "注意": (
+                "SNS反応は検索で取得できた標本です。"
+                "未検証の反応だけでは投稿しません。"
+            ),
+        },
+    )
+
+
 def _note_webhook_settings() -> tuple[bool, str, str]:
     enabled_raw = os.environ.get(
         "DISCORD_NOTE_ENABLED",
