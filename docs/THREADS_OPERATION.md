@@ -69,6 +69,13 @@ XとThreadsは指標定義が異なるため単純な勝者判定は行わず、
 .\.venv\Scripts\python.exe local_bot.py threads-auth-url --scope-profile full-analysis
 ```
 
+キーワード検索だけを追加する場合は、不要な返信管理・削除権限を要求しない
+最小権限プロファイルを使用します。
+
+```powershell
+.\.venv\Scripts\python.exe local_bot.py threads-auth-url --scope-profile keyword-search
+```
+
 読み取り・ローカル分析:
 
 ```powershell

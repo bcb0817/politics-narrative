@@ -2962,7 +2962,8 @@ def main() -> int:
     p_threads_auth = sub.add_parser(
         "threads-auth-url", help="Meta公式OAuth認可URLを表示")
     p_threads_auth.add_argument(
-        "--scope-profile", choices=["basic", "full-analysis"],
+        "--scope-profile",
+        choices=["basic", "keyword-search", "full-analysis"],
         default="basic")
     p_threads_exchange = sub.add_parser(
         "threads-exchange-code", help="OAuthコードを長期トークンへ交換")

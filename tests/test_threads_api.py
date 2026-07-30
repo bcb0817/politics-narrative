@@ -250,6 +250,24 @@ class ThreadsApiTests(unittest.TestCase):
         self.assertEqual(result["requested_scopes"], list(
             threads_api.INITIAL_SCOPES))
 
+    def test_27b_keyword_search_profile_requests_least_privilege(self):
+        with patch.dict(os.environ, {
+            "THREADS_APP_ID": "app",
+            "THREADS_REDIRECT_URI":
+                "https://localhost/threads/callback",
+            "THREADS_PUBLIC_BASE_URL": "https://localhost",
+        }):
+            result = threads_api.authorization_url(
+                self.path, scope_profile="keyword-search")
+        self.assertEqual(result["requested_scopes"], [
+            "threads_basic", "threads_content_publish",
+            "threads_manage_insights", "threads_keyword_search",
+        ])
+        self.assertNotIn(
+            "threads_delete", result["requested_scopes"])
+        self.assertNotIn(
+            "threads_manage_replies", result["requested_scopes"])
+
     def test_28_token_status_hides_token(self):
         with patch.dict(os.environ, {"THREADS_ACCESS_TOKEN": "secret"}):
             result = threads_api.token_status()
