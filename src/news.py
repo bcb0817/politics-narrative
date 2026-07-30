@@ -21,6 +21,7 @@ from api_budget import (estimate_x, finalize as finalize_budget, forecast as cos
                         reserve as reserve_budget, usage_totals)
 from metrics_db import connect, db_path, init_db
 from xai_radar import apply_verified_attention, search as fetch_xai_radar
+from integrated_research import build_integrated_research_candidates
 
 # リポジトリ直下（cwdに依存しない）
 _ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -481,9 +482,11 @@ def fetch_all_items(include_x=True):
         provider = os.environ.get("X_TOPIC_DISCOVERY_PROVIDER", "xai").strip().lower()
         try:
             if provider == "xai" and _env_bool("XAI_ENABLED", "true"):
-                all_items = apply_verified_attention(
-                    all_items, fetch_xai_radar(
-                        candidates=all_items, notify_discord=True))
+                xai_topics = fetch_xai_radar(
+                    candidates=all_items, notify_discord=True)
+                all_items = apply_verified_attention(all_items, xai_topics)
+                all_items.extend(build_integrated_research_candidates(
+                    all_items, xai_topics))
             elif provider == "native_x" and _env_bool("X_NATIVE_SEARCH_ENABLED", "false") \
                     and _env_bool("X_SEARCH_ENABLED"):
                 all_items = match_topics_to_rss(all_items, fetch_x_search_topics(all_items))

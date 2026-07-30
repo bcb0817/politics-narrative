@@ -1646,6 +1646,16 @@ def cmd_xai_roi() -> int:
     return 0
 
 
+def cmd_integrated_research_status() -> int:
+    load_env(require=False)
+    ensure_dirs()
+    if str(SRC_DIR) not in sys.path:
+        sys.path.insert(0, str(SRC_DIR))
+    from integrated_research import status  # noqa: E402
+    print(json.dumps(status(), ensure_ascii=False, indent=2))
+    return 0
+
+
 def cmd_xai_discovery(action: str, days: int = 30, max_topics: int = 5,
                       apply: bool = False) -> int:
     load_env(require=False)
@@ -2858,6 +2868,9 @@ def main() -> int:
     sub.add_parser("budget-status", help="今月のOpenAI/X/合計費用を表示")
     sub.add_parser("cost-forecast", help="過去7日から月末費用を予測")
     sub.add_parser("xai-roi", help="xAI由来投稿と非xAI投稿の費用対効果を比較")
+    sub.add_parser(
+        "integrated-research-status",
+        help="統合リサーチDBと分析投稿候補の状態を表示")
     sub.add_parser("xai-discovery-status", help="xAI discovery status and safety state")
     sub.add_parser("xai-budget-mode", help="Show current dynamic xAI budget mode")
     sub.add_parser("xai-run-budget", help="Show the dynamic per-run xAI budget")
@@ -3410,6 +3423,8 @@ def main() -> int:
         return cmd_cost_forecast()
     if args.command == "xai-roi":
         return cmd_xai_roi()
+    if args.command == "integrated-research-status":
+        return cmd_integrated_research_status()
     if args.command == "xai-discovery-status":
         return cmd_xai_discovery("status")
     if args.command == "xai-budget-mode":

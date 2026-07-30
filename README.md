@@ -416,6 +416,24 @@ OpenAI予算は投稿生成 `$5`、分類 `$0.5`、日次レビュー `$1.5`、�
 .\.venv\Scripts\python.exe local_bot.py review-strategy-status
 ```
 
+## Integrated research database and analysis posts 📊
+
+Official information and RSS remain the factual foundation. xAI X Search and
+available Threads Search results are stored separately as public-reaction
+signals. Integrated records are saved in `integrated_research_runs`,
+`integrated_research_topics`, and `integrated_research_evidence`.
+
+At most one qualified integrated-analysis candidate is added to the normal
+posting pipeline per research run. It does not add a separate posting slot and
+must pass the existing quality, safety, budget, interval, daily-limit, and
+72-hour semantic-duplicate checks before X or Threads publication.
+
+```powershell
+.\.venv\Scripts\python.exe .\local_bot.py integrated-research-status
+```
+
+See [`docs/INTEGRATED_RESEARCH.md`](docs/INTEGRATED_RESEARCH.md).
+
 ## OpenAI Batch API
 
 日次レビューは翌日の投稿へ即時反映するため同期Responses APIを使用します。

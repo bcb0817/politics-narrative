@@ -1704,6 +1704,17 @@ def publish(draft_id: int, client: ThreadsClient | None = None,
           published_at=?,updated_at=? WHERE id=?""", (
             threads_post_id, _now().isoformat(), _now().isoformat(), post_id,
         ), path)
+        if draft.get("source_x_post_id"):
+            write(
+                """UPDATE integrated_research_topics
+                   SET threads_post_id=?,updated_at=?
+                   WHERE x_post_id=?""",
+                (
+                    threads_post_id, _now().isoformat(),
+                    str(draft["source_x_post_id"]),
+                ),
+                path,
+            )
         return {
             "published": True, "threads_post_id": threads_post_id,
             "creation_id_saved": True, "threads_api_calls": calls,

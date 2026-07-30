@@ -736,6 +736,23 @@ def gather_candidate_news(include_x: bool = True) -> list:
             "xai_discovered_at": str(it.get("xai_discovered_at", "") or ""),
             "xai_cost_allocated_usd": float(
                 it.get("xai_cost_allocated_usd", 0) or 0),
+            "source_type": str(it.get("source_type", "") or ""),
+            "verified": bool(it.get("verified")),
+            "verification_reason": str(
+                it.get("verification_reason", "") or ""),
+            "source_reliability_score": float(
+                it.get("source_reliability_score", 0) or 0),
+            "freshness_score": float(it.get("freshness_score", 0) or 0),
+            "final_news_score": float(
+                it.get("final_news_score", 0) or 0),
+            "has_counter_claims": bool(it.get("has_counter_claims")),
+            "post_type_hint": str(it.get("post_type_hint", "") or ""),
+            "integrated_research_topic_id": it.get(
+                "integrated_research_topic_id"),
+            "integrated_research_run_id": str(
+                it.get("integrated_research_run_id", "") or ""),
+            "integrated_research_confidence": float(
+                it.get("integrated_research_confidence", 0) or 0),
         })
     return items
 
@@ -2446,8 +2463,13 @@ def main():
         enriched["review_strategy_id"] = str(
             active_review_strategy.get("strategy_id") or "")
         enriched["review_strategy_variant"] = review_variant
-        enriched["post_type"], enriched["is_exploration"] = choose_post_style(
-            enriched, history, now_jst)
+        post_type_hint = str(enriched.get("post_type_hint") or "")
+        if post_type_hint in POST_TYPES:
+            enriched["post_type"] = post_type_hint
+            enriched["is_exploration"] = False
+        else:
+            enriched["post_type"], enriched["is_exploration"] = choose_post_style(
+                enriched, history, now_jst)
         enriched["hook_type"] = classify_hook_type(enriched, history)
         enriched["critique_axis"] = classify_critique_axis(enriched)
         try:
@@ -2503,6 +2525,19 @@ def main():
             blocked_for_topic = True
             continue
         enriched["_db_news_id"] = insert_news(enriched)
+        if (
+            enriched.get("integrated_research_topic_id")
+            and enriched.get("_db_news_id")
+        ):
+            db_write(
+                """UPDATE integrated_research_topics
+                   SET candidate_news_id=?,updated_at=?
+                   WHERE id=?""",
+                (
+                    enriched["_db_news_id"], now_jst.isoformat(),
+                    enriched["integrated_research_topic_id"],
+                ),
+            )
         eligible_news.append(enriched)
 
     if not eligible_news:
@@ -2524,6 +2559,10 @@ def main():
         politics_max_articles = len(eligible_news)
     for item in eligible_news[:politics_max_articles]:
         for c in generate_candidates(item):
+            c["integrated_research_topic_id"] = item.get(
+                "integrated_research_topic_id")
+            c["integrated_research_run_id"] = item.get(
+                "integrated_research_run_id", "")
             if is_duplicate(c, history):
                 continue
             s = effective_score(c, history)
@@ -2781,6 +2820,15 @@ def main():
     post_record["posted_hour_jst"] = now_jst.hour
     save_post_record(post_record)
     insert_published(best.get("_db_generated_id"), post_record)
+    if best.get("integrated_research_topic_id"):
+        db_write(
+            """UPDATE integrated_research_topics
+               SET x_post_id=?,updated_at=? WHERE id=?""",
+            (
+                str(tweet_id), now_jst.isoformat(),
+                best["integrated_research_topic_id"],
+            ),
+        )
     db_write("""INSERT INTO post_style_experiments
       (tweet_id,post_type,hook_type,is_exploration,experiment_name,created_at,result_json)
       VALUES (?,?,?,?,?,?,?)""", (str(tweet_id), best.get("post_type", ""), best.get("hook_type", ""),

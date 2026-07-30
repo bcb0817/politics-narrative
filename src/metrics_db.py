@@ -106,6 +106,25 @@ CREATE TABLE IF NOT EXISTS xai_roi_results (
  id INTEGER PRIMARY KEY, period_start TEXT, period_end TEXT,
  comparison_group TEXT, sample_size INTEGER, metrics_json TEXT,
  cost_json TEXT, conclusion TEXT, created_at TEXT);
+CREATE TABLE IF NOT EXISTS integrated_research_runs (
+ id INTEGER PRIMARY KEY, run_id TEXT UNIQUE, xai_run_id TEXT,
+ generated_at TEXT, research_window_start TEXT, research_window_end TEXT,
+ provider_status_json TEXT, source_family_count INTEGER,
+ topic_count INTEGER, eligible_topic_count INTEGER,
+ status TEXT, created_at TEXT);
+CREATE TABLE IF NOT EXISTS integrated_research_topics (
+ id INTEGER PRIMARY KEY, run_id TEXT, topic_key TEXT, title TEXT,
+ fact_summary TEXT, main_claims_json TEXT, counterclaims_json TEXT,
+ reaction_summary TEXT, confidence REAL, source_family_count INTEGER,
+ evidence_count INTEGER, change_status TEXT, post_eligible INTEGER,
+ decision_reason TEXT, candidate_news_id INTEGER, x_post_id TEXT,
+ threads_post_id TEXT, created_at TEXT, updated_at TEXT,
+ UNIQUE(run_id,topic_key));
+CREATE TABLE IF NOT EXISTS integrated_research_evidence (
+ id INTEGER PRIMARY KEY, topic_id INTEGER, provider TEXT,
+ evidence_type TEXT, source_id TEXT, source_url TEXT, title TEXT,
+ summary TEXT, reliability REAL, observed_at TEXT, created_at TEXT,
+ UNIQUE(topic_id,provider,source_id));
 CREATE TABLE IF NOT EXISTS engagement_queue (
  id INTEGER PRIMARY KEY, queue_type TEXT, source_post_id TEXT, author_handle TEXT,
  author_type TEXT, topic_key TEXT, source_verified INTEGER, reason_selected TEXT,
@@ -233,6 +252,12 @@ CREATE INDEX IF NOT EXISTS idx_xai_discovery_run_started ON xai_discovery_runs(s
 CREATE INDEX IF NOT EXISTS idx_xai_discovery_topic_run ON xai_discovery_topics(run_id,topic_key);
 CREATE INDEX IF NOT EXISTS idx_xai_budget_mode_evaluated ON xai_budget_mode_history(evaluated_at);
 CREATE INDEX IF NOT EXISTS idx_xai_roi_period ON xai_roi_results(period_start,period_end);
+CREATE INDEX IF NOT EXISTS idx_integrated_research_run_generated
+ ON integrated_research_runs(generated_at,status);
+CREATE INDEX IF NOT EXISTS idx_integrated_research_topic_run
+ ON integrated_research_topics(run_id,topic_key,post_eligible);
+CREATE INDEX IF NOT EXISTS idx_integrated_research_evidence_topic
+ ON integrated_research_evidence(topic_id,provider);
 CREATE INDEX IF NOT EXISTS idx_queue_status ON engagement_queue(queue_type, status);
 CREATE INDEX IF NOT EXISTS idx_engagement_results_queue ON engagement_results(queue_id, measurement_window);
 CREATE INDEX IF NOT EXISTS idx_openai_batch_status ON openai_batch_jobs(status, submitted_at);
@@ -650,7 +675,9 @@ def table_counts(path: Path | None = None) -> dict:
                          "threads_sync_cursors", "threads_daily_reports",
                          "threads_weekly_reports", "xai_discovery_runs",
                          "xai_discovery_topics", "xai_budget_mode_history",
-                         "xai_roi_results"):
+                         "xai_roi_results", "integrated_research_runs",
+                         "integrated_research_topics",
+                         "integrated_research_evidence"):
                 out[name] = conn.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0]
     except sqlite3.Error:
         pass
