@@ -87,8 +87,8 @@ class NewRequirementsTests(unittest.TestCase):
             self.assertFalse(xai_radar.should_run(datetime(2026, 7, 21, 7, 0, tzinfo=JST)))
             self.assertTrue(xai_radar.should_run(datetime(2026, 7, 21, 12, 0, tzinfo=JST)))
 
-    def test_04_xai_daily_calls_capped_at_three(self):
-        self.assertEqual(int(os.environ.get("XAI_SEARCH_MAX_CALLS_PER_DAY", "3")), 3)
+    def test_04_xai_daily_calls_capped_at_six(self):
+        self.assertEqual(int(os.environ.get("XAI_SEARCH_MAX_CALLS_PER_DAY", "6")), 6)
 
     def test_05_xai_ticks_are_saved_as_actual_cost(self):
         with tempfile.TemporaryDirectory() as td, patch.dict(os.environ, {
@@ -273,8 +273,8 @@ class NewRequirementsTests(unittest.TestCase):
         self.assertNotIn("selenium", text.lower())
         self.assertNotIn("playwright", text.lower())
 
-    def test_34_total_budget_is_thirty_six(self):
-        self.assertEqual(float(os.environ.get("TOTAL_MONTHLY_API_BUDGET_USD", "36")), 36)
+    def test_34_total_budget_is_sixty_one(self):
+        self.assertEqual(float(os.environ.get("TOTAL_MONTHLY_API_BUDGET_USD", "61")), 61)
 
     def test_35_restriction_stage_pauses_xai(self):
         with tempfile.TemporaryDirectory() as td, patch.dict(os.environ, {
@@ -290,13 +290,13 @@ class NewRequirementsTests(unittest.TestCase):
             self.assertTrue(path.exists())
             self.assertIn("プロフィール変更は行っていません", path.read_text(encoding="utf-8"))
 
-    def test_37_xai_request_caps_tool_calls_at_one(self):
+    def test_37_standard_xai_request_caps_tool_calls_at_two(self):
         with tempfile.TemporaryDirectory() as td, patch.dict(os.environ, {
             "XAI_ENABLED": "true", "X_TOPIC_DISCOVERY_PROVIDER": "xai", "XAI_API_KEY": "dummy",
             "XAI_SEARCH_SCHEDULE": "06:00", "XAI_MONTHLY_BUDGET_USD": "2",
             "XAI_BUDGET_RESERVE_USD": "0"}), patch.object(xai_radar, "_state_dir", return_value=Path(td)):
             xai_radar.search(datetime(2026, 7, 21, 6, 0, tzinfo=JST), FakeXAIClient, Path(td) / "db.sqlite")
-            self.assertEqual(FakeXAIClient.last_kwargs["max_tool_calls"], 1)
+            self.assertEqual(FakeXAIClient.last_kwargs["max_tool_calls"], 2)
 
     def test_38_xai_search_is_required(self):
         with tempfile.TemporaryDirectory() as td, patch.dict(os.environ, {
@@ -327,13 +327,13 @@ class NewRequirementsTests(unittest.TestCase):
         )
         self.assertEqual(xai_radar._tool_call_count(response), 1)
 
-    def test_41_xai_agentic_turns_are_capped_at_one(self):
+    def test_41_standard_xai_agentic_turns_are_capped_at_two(self):
         with tempfile.TemporaryDirectory() as td, patch.dict(os.environ, {
             "XAI_ENABLED": "true", "X_TOPIC_DISCOVERY_PROVIDER": "xai", "XAI_API_KEY": "dummy",
             "XAI_SEARCH_SCHEDULE": "06:00", "XAI_MONTHLY_BUDGET_USD": "2",
             "XAI_BUDGET_RESERVE_USD": "0"}), patch.object(xai_radar, "_state_dir", return_value=Path(td)):
             xai_radar.search(datetime(2026, 7, 21, 6, 0, tzinfo=JST), FakeXAIClient, Path(td) / "db.sqlite")
-            self.assertEqual(FakeXAIClient.last_kwargs["extra_body"], {"max_turns": 1})
+            self.assertEqual(FakeXAIClient.last_kwargs["extra_body"], {"max_turns": 2})
 
 
 if __name__ == "__main__":

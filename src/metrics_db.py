@@ -71,9 +71,41 @@ CREATE TABLE IF NOT EXISTS xai_usage_events (
  id INTEGER PRIMARY KEY, request_id TEXT UNIQUE, timestamp TEXT, model TEXT, operation TEXT,
  schedule_slot TEXT, input_tokens INTEGER, output_tokens INTEGER,
  cached_input_tokens INTEGER, tool_call_count INTEGER, successful_tool_call_count INTEGER,
+ reasoning_tokens INTEGER DEFAULT 0, image_tokens INTEGER DEFAULT 0,
+ service_tier TEXT, started_at TEXT, completed_at TEXT,
  cost_in_usd_ticks INTEGER, actual_cost_usd REAL, estimated_cost_usd REAL,
+ reserved_cost_usd REAL DEFAULT 0, reservation_delta_usd REAL DEFAULT 0,
+ cost_verified INTEGER DEFAULT 0,
  cost_source TEXT, cache_used INTEGER DEFAULT 0, success INTEGER,
  error_type TEXT, metadata_json TEXT);
+CREATE TABLE IF NOT EXISTS xai_discovery_runs (
+ id INTEGER PRIMARY KEY, run_id TEXT UNIQUE, mode TEXT, started_at TEXT,
+ completed_at TEXT, requested_from_at TEXT, requested_to_at TEXT,
+ search_window_minutes INTEGER, coverage_gap_minutes INTEGER,
+ topic_count INTEGER, tool_call_count INTEGER, turn_count INTEGER,
+ image_understanding_used INTEGER, video_understanding_used INTEGER,
+ estimated_cost_usd REAL, reserved_cost_usd REAL, actual_cost_ticks INTEGER,
+ actual_cost_usd REAL, cost_verified INTEGER, budget_mode TEXT,
+ dynamic_target_usd REAL, status TEXT, failure_reason TEXT, created_at TEXT);
+CREATE TABLE IF NOT EXISTS xai_discovery_topics (
+ id INTEGER PRIMARY KEY, run_id TEXT, content_id TEXT, topic_key TEXT,
+ signal_type TEXT, attention_estimate REAL, velocity_estimate REAL,
+ stance_summary_json TEXT, counterargument_summary_json TEXT,
+ representative_post_ids_json TEXT, evidence_count INTEGER,
+ unique_source_estimate INTEGER, search_confidence REAL,
+ data_sufficiency TEXT, news_match_confidence REAL,
+ news_match_reason TEXT, score_bonus REAL, allocated_cost_usd REAL,
+ created_at TEXT);
+CREATE TABLE IF NOT EXISTS xai_budget_mode_history (
+ id INTEGER PRIMARY KEY, evaluated_at TEXT, actual_cost_usd REAL,
+ reserved_cost_usd REAL, remaining_budget_usd REAL, actual_ratio REAL,
+ forecast_month_end_usd REAL, forecast_ratio REAL,
+ remaining_planned_runs INTEGER, dynamic_target_per_run REAL,
+ previous_mode TEXT, new_mode TEXT, reason TEXT, created_at TEXT);
+CREATE TABLE IF NOT EXISTS xai_roi_results (
+ id INTEGER PRIMARY KEY, period_start TEXT, period_end TEXT,
+ comparison_group TEXT, sample_size INTEGER, metrics_json TEXT,
+ cost_json TEXT, conclusion TEXT, created_at TEXT);
 CREATE TABLE IF NOT EXISTS engagement_queue (
  id INTEGER PRIMARY KEY, queue_type TEXT, source_post_id TEXT, author_handle TEXT,
  author_type TEXT, topic_key TEXT, source_verified INTEGER, reason_selected TEXT,
@@ -197,6 +229,10 @@ CREATE TABLE IF NOT EXISTS post_quality_dimensions (
 CREATE INDEX IF NOT EXISTS idx_usage_month ON api_usage_events(timestamp, provider);
 CREATE INDEX IF NOT EXISTS idx_metrics_window ON post_metrics(tweet_id, measurement_window);
 CREATE INDEX IF NOT EXISTS idx_xai_usage_month ON xai_usage_events(timestamp);
+CREATE INDEX IF NOT EXISTS idx_xai_discovery_run_started ON xai_discovery_runs(started_at,status);
+CREATE INDEX IF NOT EXISTS idx_xai_discovery_topic_run ON xai_discovery_topics(run_id,topic_key);
+CREATE INDEX IF NOT EXISTS idx_xai_budget_mode_evaluated ON xai_budget_mode_history(evaluated_at);
+CREATE INDEX IF NOT EXISTS idx_xai_roi_period ON xai_roi_results(period_start,period_end);
 CREATE INDEX IF NOT EXISTS idx_queue_status ON engagement_queue(queue_type, status);
 CREATE INDEX IF NOT EXISTS idx_engagement_results_queue ON engagement_results(queue_id, measurement_window);
 CREATE INDEX IF NOT EXISTS idx_openai_batch_status ON openai_batch_jobs(status, submitted_at);
@@ -612,7 +648,9 @@ def table_counts(path: Path | None = None) -> dict:
                          "threads_api_quotas", "threads_containers",
                          "threads_locations", "threads_poll_snapshots",
                          "threads_sync_cursors", "threads_daily_reports",
-                         "threads_weekly_reports"):
+                         "threads_weekly_reports", "xai_discovery_runs",
+                         "xai_discovery_topics", "xai_budget_mode_history",
+                         "xai_roi_results"):
                 out[name] = conn.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0]
     except sqlite3.Error:
         pass
@@ -658,6 +696,12 @@ def add_column_if_missing(table: str, column: str, declaration: str,
             "successful_tool_call_count": "INTEGER DEFAULT 0",
             "estimated_cost_usd": "REAL DEFAULT 0", "cost_source": "TEXT",
             "cache_used": "INTEGER DEFAULT 0",
+            "reasoning_tokens": "INTEGER DEFAULT 0",
+            "image_tokens": "INTEGER DEFAULT 0",
+            "service_tier": "TEXT", "started_at": "TEXT",
+            "completed_at": "TEXT", "reserved_cost_usd": "REAL DEFAULT 0",
+            "reservation_delta_usd": "REAL DEFAULT 0",
+            "cost_verified": "INTEGER DEFAULT 0",
         },
         "engagement_queue": {
             "source_author": "TEXT", "candidate_created_at": "TEXT",
@@ -736,6 +780,12 @@ def apply_additive_migrations(path: Path | None = None) -> dict:
             "successful_tool_call_count": "INTEGER DEFAULT 0",
             "estimated_cost_usd": "REAL DEFAULT 0", "cost_source": "TEXT",
             "cache_used": "INTEGER DEFAULT 0",
+            "reasoning_tokens": "INTEGER DEFAULT 0",
+            "image_tokens": "INTEGER DEFAULT 0",
+            "service_tier": "TEXT", "started_at": "TEXT",
+            "completed_at": "TEXT", "reserved_cost_usd": "REAL DEFAULT 0",
+            "reservation_delta_usd": "REAL DEFAULT 0",
+            "cost_verified": "INTEGER DEFAULT 0",
         },
         "engagement_queue": {
             "source_author": "TEXT", "candidate_created_at": "TEXT",

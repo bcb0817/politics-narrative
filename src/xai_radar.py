@@ -16,6 +16,17 @@ from metrics_db import (apply_additive_migrations, connect, db_path, init_db,
                         write)
 from publishing_policy import normalize_topic_key
 from xai_cost import ticks_to_usd
+from xai_discovery import (
+    budget_plan as discovery_budget_plan,
+    is_important,
+    new_run_id,
+    phase_d_optimize,
+    phase_d_tuning,
+    research_profile,
+    save_discovery_run,
+    search_window as discovery_search_window,
+    topic_audit_record,
+)
 
 JST = ZoneInfo("Asia/Tokyo")
 def _root() -> Path:
@@ -77,21 +88,66 @@ def effective_schedule(now_jst: datetime | None = None,
         value.strip() for value in os.environ.get(
             "XAI_SEARCH_SCHEDULE", "06:00,12:00,18:00").split(",") if value.strip()
     }
-    schedule = set(sorted(schedule)[:max(1, int(os.environ.get("XAI_MAX_CALLS_PER_DAY", "3")))])
+    max_calls = max(1, int(os.environ.get("XAI_MAX_CALLS_PER_DAY", "6")))
+    min_calls = max(1, min(
+        max_calls, int(os.environ.get("XAI_MIN_CALLS_PER_DAY", "3"))))
+    schedule = set(sorted(schedule)[:max_calls])
+    tuning = phase_d_tuning(path)
+    tuned_daily_runs = int(tuning.get("recommended_daily_runs") or 0)
+    if tuned_daily_runs:
+        schedule = set(sorted(schedule)[:max(1, min(6, tuned_daily_runs))])
+    if not schedule:
+        return set()
+    try:
+        mode = discovery_budget_plan(path, now_jst).mode
+        if mode == "stopped":
+            return set()
+        if mode == "emergency_only":
+            emergency = {"06:00", "18:00"} & schedule
+            return emergency or set(sorted(schedule)[:min(2, len(schedule))])
+        if mode == "restricted":
+            restricted = {
+                value.strip() for value in os.environ.get(
+                    "XAI_RESTRICTED_SCHEDULE", "06:00,18:00").split(",")
+                if value.strip()
+            } & schedule
+            return restricted or set(sorted(schedule)[:min(2, len(schedule))])
+    except Exception:
+        # Legacy budget gates below remain the safe fallback.
+        mode = "normal"
+    low_schedule = {
+        value.strip() for value in os.environ.get(
+            "XAI_LOW_VOLATILITY_SCHEDULE", "06:00,12:00,18:00").split(",")
+        if value.strip()
+    } & schedule
+    if len(low_schedule) < min_calls:
+        low_schedule = set(sorted(schedule)[:min_calls])
+    if mode == "low_frequency":
+        return low_schedule
     monthly_xai = float(usage_totals(path, now_jst).get("xai", 0) or 0)
-    projected_xai = float(forecast(path, now_jst).get("projected", {}).get("xai", 0) or 0)
-    if forecast(path, now_jst).get("restriction_level", 0) >= 5:
+    budget_forecast = forecast(path, now_jst)
+    projected_xai = float(
+        budget_forecast.get("projected", {}).get("xai", 0) or 0)
+    if budget_forecast.get("restriction_level", 0) >= 5:
+        reduced = {
+            value.strip() for value in os.environ.get(
+                "XAI_RESTRICTED_SCHEDULE", "06:00,18:00").split(",")
+            if value.strip()
+        } & schedule
+        return reduced or set(sorted(schedule)[:min(2, len(schedule))])
+    xai_limit = max(0.01, effective_xai_limit())
+    xai_ratio = max(monthly_xai, projected_xai) / xai_limit
+    if xai_ratio >= float(os.environ.get("BUDGET_RESTRICT_RATIO", "0.93")):
         reduced = {"06:00", "18:00"} & schedule
-        return reduced or set(sorted(schedule)[:2])
-    if max(monthly_xai, projected_xai) > 1.80:
-        return {"06:00", "18:00"} & schedule or set(sorted(schedule)[::max(1, len(schedule)-1)])
+        return reduced or set(sorted(schedule)[:min(2, len(schedule))])
+    if xai_ratio >= float(os.environ.get("BUDGET_WARNING_RATIO", "0.85")):
+        return low_schedule
     adaptive = os.environ.get("XAI_ADAPTIVE_SCHEDULE_ENABLED", "true").lower() in {
         "1", "true", "yes"
     }
     low_threshold = float(os.environ.get("XAI_VOLATILITY_THRESHOLD_LOW", "3.0"))
     if adaptive and local_volatility_score(path, now_jst) < low_threshold:
-        reduced = {"06:00", "18:00"} & schedule
-        return reduced or {min(schedule), max(schedule)}
+        return low_schedule
     return schedule
 
 
@@ -108,7 +164,14 @@ def load_cache(now: datetime | None = None, allow_expired: bool = False) -> list
         if expires.tzinfo is None:
             expires = expires.replace(tzinfo=timezone.utc)
         if allow_expired or now <= expires:
-            return payload.get("topics", []) if isinstance(payload.get("topics"), list) else []
+            topics = payload.get("topics", [])
+            if not isinstance(topics, list):
+                return []
+            generated = datetime.fromisoformat(payload.get("generated_at", ""))
+            if generated.tzinfo is None:
+                generated = generated.replace(tzinfo=timezone.utc)
+            from xai_discovery import cached_signal
+            return [cached_signal(topic, generated, now) for topic in topics]
     except Exception:
         pass
     return []
@@ -146,10 +209,19 @@ def _schema(max_topics: int, max_posts: int) -> dict:
             "representative_post_ids": {
                 "type": "array", "items": {"type": "string"}, "maxItems": max_posts
             },
+            "evidence_count": {"type": "integer", "minimum": 0},
+            "unique_source_estimate": {"type": "integer", "minimum": 0},
+            "search_confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            "data_sufficiency": {
+                "type": "string",
+                "enum": ["insufficient", "limited", "sufficient"],
+            },
             "verification_required": {"type": "boolean"},
         },
         "required": ["topic_key", "attention_score", "velocity_score", "main_claims",
                      "counter_claims", "representative_post_ids",
+                     "evidence_count", "unique_source_estimate",
+                     "search_confidence", "data_sufficiency",
                      "verification_required"],
         "additionalProperties": False,
     }
@@ -171,6 +243,13 @@ def _sanitize(payload: dict, max_topics: int, max_posts: int) -> dict:
             "representative_post_ids": [
                 str(v)[:30] for v in (row.get("representative_post_ids") or [])[:max_posts]
             ],
+            "evidence_count": max(0, int(row.get("evidence_count") or 0)),
+            "unique_source_estimate": max(
+                0, int(row.get("unique_source_estimate") or 0)),
+            "search_confidence": max(
+                0, min(1, float(row.get("search_confidence") or 0))),
+            "data_sufficiency": str(
+                row.get("data_sufficiency") or "insufficient"),
             "verification_required": True,
         }
         if topic["topic_key"]:
@@ -207,27 +286,37 @@ def _record_usage(model: str, ticks: int, input_tokens: int, output_tokens: int,
                   schedule_slot: str = "", cache_used: bool = False,
                   path: Path | None = None, request_id: str = "",
                   cached_input_tokens: int = 0, successful_tool_calls: int | None = None,
-                  estimated_cost_usd: float = 0.0) -> str:
+                  estimated_cost_usd: float = 0.0,
+                  reasoning_tokens: int = 0, image_tokens: int = 0,
+                  service_tier: str = "", started_at: str = "",
+                  completed_at: str = "", reserved_cost_usd: float = 0.0) -> str:
     apply_additive_migrations(path)
     now = datetime.now(JST).isoformat()
     request_id = request_id or f"xai-{uuid.uuid4()}"
     actual_cost = ticks_to_usd(ticks)
-    cost_source = "actual" if ticks > 0 else "estimated"
+    cost_verified = int(ticks > 0)
+    cost_source = "actual" if cost_verified else "unverified_estimate"
     successful_tool_calls = (
         tool_calls if success else 0
         if successful_tool_calls is None else successful_tool_calls
     )
+    reservation_delta = actual_cost - reserved_cost_usd
     metadata = {"cost_in_usd_ticks": ticks, "tool_call_count": tool_calls,
-                "schedule_slot": schedule_slot, "cache_used": cache_used}
+                "schedule_slot": schedule_slot, "cache_used": cache_used,
+                "cost_verified": bool(cost_verified)}
     write("""INSERT OR IGNORE INTO xai_usage_events
       (request_id,timestamp,model,operation,schedule_slot,input_tokens,output_tokens,
        cached_input_tokens,tool_call_count,successful_tool_call_count,cost_in_usd_ticks,
-       actual_cost_usd,estimated_cost_usd,cost_source,cache_used,success,error_type,metadata_json)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+       actual_cost_usd,estimated_cost_usd,cost_source,cache_used,success,error_type,
+       metadata_json,reasoning_tokens,image_tokens,service_tier,started_at,completed_at,
+       reserved_cost_usd,reservation_delta_usd,cost_verified)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
       request_id, now, model, "x_search_radar", schedule_slot, input_tokens, output_tokens,
       cached_input_tokens, tool_calls, successful_tool_calls, ticks, actual_cost,
       estimated_cost_usd, cost_source, int(cache_used), int(success), error_type,
-      json.dumps(metadata, ensure_ascii=False)), path)
+      json.dumps(metadata, ensure_ascii=False), reasoning_tokens, image_tokens,
+      service_tier, started_at or now, completed_at or now, reserved_cost_usd,
+      reservation_delta, cost_verified), path)
     history = _state_dir() / "xai_usage_history.jsonl"
     with open(history, "a", encoding="utf-8") as handle:
         handle.write(json.dumps({"request_id": request_id, "timestamp": now,
@@ -238,6 +327,7 @@ def _record_usage(model: str, ticks: int, input_tokens: int, output_tokens: int,
           "successful_tool_call_count": successful_tool_calls,
           "cost_in_usd_ticks": ticks, "actual_cost_usd": actual_cost,
           "estimated_cost_usd": estimated_cost_usd, "cost_source": cost_source,
+          "cost_verified": bool(cost_verified),
           "schedule_slot": schedule_slot, "cache_used": cache_used,
           "success": success, "error_type": error_type}, ensure_ascii=False) + "\n")
     return request_id
@@ -322,16 +412,17 @@ def _save_cache(payload: dict, now_jst: datetime, *,
 
 def search(now_jst: datetime | None = None, client_factory=None,
            path: Path | None = None, candidates: list[dict] | None = None,
-           notify_discord: bool = False) -> list[dict]:
+           notify_discord: bool = False, force_run: bool = False) -> list[dict]:
     """Run one xAI request at configured slots; failures degrade to cache/RSS."""
     now_jst = now_jst or datetime.now(JST)
     path = path or db_path()
     if not _enabled() or os.environ.get("X_TOPIC_DISCOVERY_PROVIDER", "xai") != "xai":
         return []
-    if not should_run(now_jst, path) or _already_ran(now_jst):
+    if not force_run and (
+            not should_run(now_jst, path) or _already_ran(now_jst)):
         return load_cache()
     from audit_tools import guard_provider_execution
-    if not guard_provider_execution("xai", now_jst):
+    if not force_run and not guard_provider_execution("xai", now_jst):
         print("Discovery provider conflict: native_x already executed in this slot")
         return load_cache()
     runtime = _runtime_state()
@@ -340,24 +431,76 @@ def search(now_jst: datetime | None = None, client_factory=None,
     if forecast(path).get("pause_x_search"):
         print("xAI X Search paused: projected monthly budget reached the 93% restriction stage")
         return load_cache()
+    plan = discovery_budget_plan(path, now_jst, persist=True)
+    if plan.mode == "stopped":
+        print(f"xAI X Search stopped: {plan.reason}")
+        return load_cache()
+    if plan.mode == "emergency_only" and not any(
+            is_important(row) for row in (candidates or [])):
+        print("xAI X Search emergency-only: no qualifying major update")
+        return load_cache()
     actual_xai = float(usage_totals(path, now_jst).get("xai", 0) or 0)
     if actual_xai >= effective_xai_limit():
         print("xAI X Search stopped: monthly budget reached")
         return load_cache()
     daily_cap = min(
-        int(os.environ.get("XAI_SEARCH_MAX_CALLS_PER_DAY", "3")),
-        int(os.environ.get("XAI_MAX_CALLS_PER_DAY", "3")),
+        int(os.environ.get("XAI_SEARCH_MAX_CALLS_PER_DAY", "6")),
+        int(os.environ.get("XAI_MAX_CALLS_PER_DAY", "6")),
     )
     if _runs_today(path) >= daily_cap:
         return load_cache()
     model = os.environ.get("XAI_MODEL", "grok-4.5")
-    max_topics = int(os.environ.get("XAI_SEARCH_MAX_TOPICS_PER_RUN", "5"))
-    max_posts = int(os.environ.get("XAI_SEARCH_MAX_REPRESENTATIVE_POSTS_PER_TOPIC", "3"))
-    maximum_cost = float(os.environ.get(
+    profile = research_profile(
+        candidates or [], plan.mode, plan.dynamic_target_per_run_usd)
+    max_topics = int(profile["max_topics"])
+    max_posts = int(os.environ.get("XAI_SEARCH_MAX_REPRESENTATIVE_POSTS_PER_TOPIC", "5"))
+    max_tool_calls = max(1, int(profile["max_tool_calls"]))
+    tuning = phase_d_tuning(path)
+    if profile["research_mode"] == "standard":
+        max_tool_calls = min(max_tool_calls, int(
+            tuning.get("recommended_standard_tool_calls") or max_tool_calls))
+    else:
+        max_tool_calls = min(max_tool_calls, int(
+            tuning.get("recommended_extended_tool_calls") or max_tool_calls))
+    max_turns = max(1, int(profile["max_turns"]))
+    hard_limit = float(os.environ.get(
         "XAI_COST_PER_RUN_HARD_LIMIT_USD",
-        os.environ.get("XAI_MAX_COST_PER_CALL_USD", "0.020")))
+        os.environ.get("XAI_MAX_COST_PER_CALL_USD", "0.300")))
+    maximum_cost = (
+        min(hard_limit, plan.dynamic_target_per_run_usd)
+        if os.environ.get(
+            "XAI_DYNAMIC_RUN_BUDGET_ENABLED", "true").lower()
+        in {"1", "true", "yes"}
+        else hard_limit
+    )
+    if maximum_cost < float(os.environ.get(
+            "XAI_MIN_USEFUL_RUN_BUDGET_USD", "0.020")):
+        print("xAI X Search skipped: dynamic run budget below useful minimum")
+        return load_cache()
     max_attempts = 1
     compact_candidates = _compact_candidate_input(candidates, max_topics)
+    window = discovery_search_window(path, now_jst)
+    run_id = new_run_id()
+    run_started_at = datetime.now(JST)
+    base_run = {
+        "run_id": run_id, "mode": profile["research_mode"],
+        "started_at": run_started_at.isoformat(), "completed_at": None,
+        "requested_from_at": window.requested_from_at,
+        "requested_to_at": window.requested_to_at,
+        "search_window_minutes": window.actual_search_window_minutes,
+        "coverage_gap_minutes": window.coverage_gap_minutes,
+        "topic_count": 0, "tool_call_count": 0, "turn_count": max_turns,
+        "image_understanding_used": int(profile["image_understanding"]),
+        "video_understanding_used": int(profile["video_understanding"]),
+        "estimated_cost_usd": maximum_cost,
+        "reserved_cost_usd": maximum_cost,
+        "actual_cost_ticks": 0, "actual_cost_usd": 0,
+        "cost_verified": 0, "budget_mode": plan.mode,
+        "dynamic_target_usd": plan.dynamic_target_per_run_usd,
+        "status": "running", "failure_reason": "",
+        "created_at": run_started_at.isoformat(),
+    }
+    save_discovery_run(base_run, [], path)
     try:
         if client_factory is None:
             from openai import OpenAI
@@ -381,17 +524,24 @@ def search(now_jst: datetime | None = None, client_factory=None,
             try:
                 retry_note = (" This is a retry: you must execute X Search and return any genuinely "
                               "observed topics; do not answer from model memory.") if attempt else ""
+                x_search_tool = {"type": "x_search"}
+                if profile["image_understanding"]:
+                    x_search_tool["enable_image_understanding"] = True
+                if profile["video_understanding"]:
+                    x_search_tool["enable_video_understanding"] = True
                 response = client.responses.create(
                     model=model,
-                    instructions=("Use X Search once and answer in Japanese JSON. Compare only the "
+                    instructions=(f"Use X Search between one and {max_tool_calls} times and answer "
+                                  "in Japanese JSON. Compare only the "
                                   "provided topic candidates with current X attention. Representative "
                                   "accounts may be official institutions, politicians, journalists, "
                                   "researchers, or media. X is not a factual authority, so "
                                   "verification_required must be true. Do not generate post text, "
                                   "quote post bodies, or target private people."),
                     input=json.dumps({
-                        "lookback_minutes": int(os.environ.get(
-                            "XAI_SEARCH_LOOKBACK_MINUTES", "360")),
+                        "requested_from_at": window.requested_from_at,
+                        "requested_to_at": window.requested_to_at,
+                        "lookback_minutes": window.actual_search_window_minutes,
                         "language": "ja",
                         "candidate_topics": compact_candidates,
                         "requested_account_categories": [
@@ -404,11 +554,10 @@ def search(now_jst: datetime | None = None, client_factory=None,
                             f"{retry_note}"
                         ),
                     }, ensure_ascii=False, separators=(",", ":")),
-                    tools=[{"type": "x_search"}], tool_choice="required",
-                    max_tool_calls=int(os.environ.get(
-                        "XAI_MAX_TOOL_CALLS_PER_REQUEST", "1")),
+                    tools=[x_search_tool], tool_choice="required",
+                    max_tool_calls=max_tool_calls,
                     parallel_tool_calls=False,
-                    extra_body={"max_turns": 1},
+                    extra_body={"max_turns": max_turns},
                     text={"format": {"type": "json_schema", "name": "x_radar_topics",
                                       "strict": True, "schema": _schema(max_topics, max_posts)}},
                     store=False,
@@ -437,7 +586,17 @@ def search(now_jst: datetime | None = None, client_factory=None,
                      else getattr(input_details, "cached_tokens", 0)) or 0
                 )
                 tool_calls = _tool_call_count(response)
-                semantic_success = tool_calls == 1
+                output_details = getattr(usage, "output_tokens_details", None)
+                reasoning = int(
+                    (output_details.get("reasoning_tokens", 0)
+                     if isinstance(output_details, dict)
+                     else getattr(output_details, "reasoning_tokens", 0)) or 0)
+                image_tokens = int(
+                    (input_details.get("image_tokens", 0)
+                     if isinstance(input_details, dict)
+                     else getattr(input_details, "image_tokens", 0)) or 0)
+                completed_at = datetime.now(JST)
+                semantic_success = 1 <= tool_calls <= max_tool_calls
                 error_type = ("" if semantic_success else
                               "x_search_not_called" if tool_calls == 0 else "x_search_call_cap_exceeded")
                 finalize(reservation, ticks_to_usd(ticks), success=semantic_success,
@@ -450,10 +609,44 @@ def search(now_jst: datetime | None = None, client_factory=None,
                     cached_input_tokens=cached,
                     successful_tool_calls=tool_calls if semantic_success else 0,
                     estimated_cost_usd=maximum_cost,
+                    reasoning_tokens=reasoning,
+                    image_tokens=image_tokens,
+                    service_tier=str(getattr(response, "service_tier", "") or ""),
+                    started_at=run_started_at.isoformat(),
+                    completed_at=completed_at.isoformat(),
+                    reserved_cost_usd=maximum_cost,
                 )
                 actual_cost = ticks_to_usd(ticks)
-                warning = float(os.environ.get("XAI_COST_PER_RUN_WARNING_USD", "0.012"))
-                hard_limit = float(os.environ.get("XAI_COST_PER_RUN_HARD_LIMIT_USD", "0.020"))
+                topic_rows = []
+                if semantic_success:
+                    for candidate in candidates or []:
+                        for topic in payload["topics"]:
+                            row = topic_audit_record(
+                                candidate, topic, run_id,
+                                allocated_cost=(
+                                    actual_cost / max(1, len(payload["topics"]))
+                                    if ticks > 0 else 0.0))
+                            if row["news_match_confidence"] >= float(
+                                    os.environ.get(
+                                        "XAI_NEWS_MATCH_MIN_CONFIDENCE", "0.80")):
+                                topic_rows.append(row)
+                finished_run = dict(base_run)
+                finished_run.update({
+                    "completed_at": completed_at.isoformat(),
+                    "topic_count": len(payload["topics"]),
+                    "tool_call_count": tool_calls,
+                    "actual_cost_ticks": ticks,
+                    "actual_cost_usd": actual_cost,
+                    "cost_verified": int(ticks > 0),
+                    "reserved_cost_usd": 0.0,
+                    "status": "success" if semantic_success else "failed",
+                    "failure_reason": error_type,
+                })
+                save_discovery_run(finished_run, topic_rows, path)
+                # Phase D remains inert until at least 30 successful runs.
+                phase_d_optimize(path=path, now=completed_at, apply=True)
+                warning = float(os.environ.get("XAI_COST_PER_RUN_WARNING_USD", "0.200"))
+                hard_limit = float(os.environ.get("XAI_COST_PER_RUN_HARD_LIMIT_USD", "0.300"))
                 if actual_cost > warning:
                     print("xAI cost warning: request exceeded configured target")
                 if actual_cost > hard_limit:
@@ -464,7 +657,7 @@ def search(now_jst: datetime | None = None, client_factory=None,
                         "updated_at": datetime.now(JST).isoformat(),
                     })
                     print("xAI X Search paused for the rest of today: per-run hard limit exceeded")
-                if tool_calls > 1:
+                if tool_calls > max_tool_calls:
                     print(f"xAI X Search call cap exceeded ({tool_calls}); stopping retries")
                     break
                 if not semantic_success:
@@ -478,11 +671,23 @@ def search(now_jst: datetime | None = None, client_factory=None,
                 if attempt + 1 < max_attempts:
                     print("xAI X Search returned no topics; retrying once")
             except Exception as exc:
+                completed_at = datetime.now(JST)
                 finalize(reservation, 0, success=False, error_type=type(exc).__name__,
                          resource_count=0, path=path)
                 _record_usage(model, 0, 0, 0, 0, False, type(exc).__name__,
                               now_jst.strftime("%H:%M"), False, path,
-                              estimated_cost_usd=0.0)
+                              estimated_cost_usd=0.0,
+                              started_at=run_started_at.isoformat(),
+                              completed_at=completed_at.isoformat(),
+                              reserved_cost_usd=maximum_cost)
+                failed_run = dict(base_run)
+                failed_run.update({
+                    "completed_at": completed_at.isoformat(),
+                    "reserved_cost_usd": 0.0,
+                    "status": "failed",
+                    "failure_reason": type(exc).__name__,
+                })
+                save_discovery_run(failed_run, [], path)
                 raise
         if last_payload is not None:
             return _save_cache(
@@ -495,7 +700,7 @@ def search(now_jst: datetime | None = None, client_factory=None,
 
 
 def apply_verified_attention(items: list[dict], topics: list[dict]) -> list[dict]:
-    """Attach xAI attention only to independently sourced RSS/official candidates."""
+    """Attach qualitative xAI estimates only to independently sourced candidates."""
     latest_cost = 0.0
     discovered_at = ""
     try:
@@ -512,31 +717,58 @@ def apply_verified_attention(items: list[dict], topics: list[dict]) -> list[dict
             )
     except Exception:
         pass
-    matches: list[tuple[dict, dict]] = []
+    matches: list[tuple[dict, dict, dict]] = []
     for item in items:
-        haystack = f"{item.get('title','')} {item.get('summary','')}".lower()
-        best = None
+        best: tuple[dict, dict] | None = None
         for topic in topics:
-            key = str(topic.get("topic_key", "")).lower()
-            tokens = [token for token in key.replace("・", " ").split() if len(token) >= 2]
-            if key and (key in haystack or any(token in haystack for token in tokens)):
-                if best is None or topic.get("attention_score", 0) > best.get("attention_score", 0):
-                    best = topic
+            audit = topic_audit_record(item, topic, "cache-attachment")
+            if audit["news_match_confidence"] < float(os.environ.get(
+                    "XAI_NEWS_MATCH_MIN_CONFIDENCE", "0.80")):
+                continue
+            if best is None or audit["news_match_confidence"] > (
+                    best[1]["news_match_confidence"]):
+                best = (topic, audit)
         if best:
-            matches.append((item, best))
+            matches.append((item, best[0], best[1]))
     allocated = latest_cost / len(matches) if matches else 0.0
-    for item, best in matches:
-            item["discovered_via"] = list(dict.fromkeys(
-                (item.get("discovered_via") or []) + ["xai"]))
-            item["x_attention_score"] = float(best.get("attention_score", 0) or 0)
-            item["x_velocity_score"] = float(best.get("velocity_score", 0) or 0)
-            item["xai_topic_match"] = True
-            item["xai_attention_score"] = item["x_attention_score"]
-            item["xai_velocity_score"] = item["x_velocity_score"]
-            item["xai_discovered_at"] = discovered_at
-            item["xai_cost_allocated_usd"] = round(allocated, 10)
-            item["xai_topic_metadata"] = {k: best.get(k) for k in (
-                "topic_key", "main_claims", "counter_claims",
-                "representative_post_ids")}
-            item["verified"] = True  # verified by the existing RSS/official item, not by xAI.
+    for item, best, audit in matches:
+        item["discovered_via"] = list(dict.fromkeys(
+            (item.get("discovered_via") or []) + ["xai"]))
+        attention = float(best.get(
+            "attention_estimate", best.get("attention_score", 0)) or 0)
+        velocity = best.get(
+            "velocity_estimate", best.get("velocity_score", 0))
+        item["x_attention_score"] = attention  # Backward compatibility.
+        item["x_velocity_score"] = (
+            float(velocity) if velocity is not None else None)
+        item["x_attention_estimate"] = attention
+        item["x_velocity_estimate"] = item["x_velocity_score"]
+        item["x_signal_type"] = str(
+            best.get("x_signal_type") or "qualitative_xai")
+        item["xai_topic_match"] = True
+        item["xai_attention_score"] = attention
+        item["xai_velocity_score"] = item["x_velocity_score"]
+        item["xai_news_match_confidence"] = audit["news_match_confidence"]
+        item["xai_news_match_reason"] = audit["news_match_reason"]
+        item["xai_discovery_bonus"] = audit["score_bonus"]
+        item["xai_discovered_at"] = discovered_at
+        item["xai_cost_allocated_usd"] = round(allocated, 10)
+        item["xai_topic_metadata"] = {
+            "topic_key": best.get("topic_key"),
+            "stance_summary": best.get("main_claims") or [],
+            "counterargument_summary": best.get("counter_claims") or [],
+            "representative_post_ids": (
+                best.get("representative_post_ids") or []),
+            "evidence_count": best.get("evidence_count", 0),
+            "unique_source_estimate": best.get(
+                "unique_source_estimate", 0),
+            "search_confidence": best.get("search_confidence", 0),
+            "data_sufficiency": best.get(
+                "data_sufficiency", "insufficient"),
+            "semantics": (
+                "xAI X Searchによる定性的な推定値。"
+                "X全体の正確なインプレッション・速度ではない。"),
+        }
+        # Fact verification comes from the original RSS/official source.
+        item["verified"] = bool(item.get("verified", True))
     return items

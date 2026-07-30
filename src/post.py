@@ -47,11 +47,13 @@ from publishing_policy import (
     classify_hook_type,
     classify_post_type,
     choose_post_style,
+    has_material_policy_update,
     normalize_topic_key,
     post_type_quota_reached,
     pre_generation_skip_reason,
     phase_daily_limit_reached,
     stagnation_fallback_active,
+    semantic_policy_signature,
     topic_cooldown_skip_reason,
 )
 from x_attention import final_news_score
@@ -645,6 +647,8 @@ def is_duplicate(candidate: dict, history: list) -> bool:
     title = (candidate.get("title") or "").strip()
     kw = set(candidate.get("keywords") or [])
     text = re.sub(r"\s+", "", candidate.get("tweet_text") or candidate.get("final_text") or "")
+    semantic = semantic_policy_signature(
+        f"{title} {candidate.get('summary', '')} {text}")
     for h in history[-120:]:
         if url and url == (h.get("source_url") or "").strip():
             return True
@@ -654,6 +658,17 @@ def is_duplicate(candidate: dict, history: list) -> bool:
         if kw and hkw and len(kw & hkw) >= max(2, min(len(kw), len(hkw))):
             return True
         old_text = re.sub(r"\s+", "", h.get("tweet_text") or "")
+        old_semantic = semantic_policy_signature(
+            f"{h.get('title', '')} {h.get('summary', '')} {old_text}")
+        if (
+            semantic
+            and old_semantic == semantic
+            and not has_material_policy_update(
+                f"{title} {text}",
+                f"{h.get('title', '')} {old_text}",
+            )
+        ):
+            return True
         if text and old_text and SequenceMatcher(None, text, old_text).ratio() >= 0.88:
             return True
     return False
@@ -903,12 +918,25 @@ def prefilter_news(items: list, top_n: int = None, allow_low_quality: bool = Fal
             freshness = 4.0
         source = (it.get("source_name") or "").strip()
         reliability = SOURCE_RELIABILITY.get(source, 6.0)
-        x_attention = float(it.get("x_attention_score", 0) or 0)
+        # xAI X Search values are qualitative discovery estimates, not a
+        # quantitative X-wide popularity measurement.  Keep native X scoring
+        # unchanged, but apply xAI only as a separately capped bonus.
+        xai_match = bool(it.get("xai_topic_match"))
+        x_attention = (
+            0.0 if xai_match
+            else float(it.get("x_attention_score", 0) or 0))
         x_weight = max(0.0, min(_env_float("X_SEARCH_WEIGHT", 0.25), 0.50))
         s = final_news_score(relevance, freshness, x_attention, reliability, x_weight)
+        xai_bonus = (
+            max(0.0, min(
+                float(it.get("xai_discovery_bonus", 0) or 0),
+                _env_float("XAI_TOTAL_DISCOVERY_BONUS_MAX", 2.0)))
+            if xai_match else 0.0)
+        s += xai_bonus
         it["news_relevance_score"] = round(relevance, 3)
         it["freshness_score"] = round(freshness, 3)
         it["source_reliability_score"] = round(reliability, 3)
+        it["xai_discovery_bonus_applied"] = round(xai_bonus, 3)
         it["final_news_score"] = s
         # 除外・低優先テーマは大きく減点（実質除外）
         if any(t in text for t in EXCLUDED_TOPICS):
@@ -2392,7 +2420,8 @@ def main():
     for item in target_news:
         enriched = dict(item)
         enriched["topic_key"] = normalize_topic_key(
-            enriched.get("title", ""), enriched.get("keywords") or []
+            f"{enriched.get('title', '')} {enriched.get('summary', '')}",
+            enriched.get("keywords") or [],
         )
         try:
             from review_strategy import (
@@ -2465,8 +2494,12 @@ def main():
         cooldown_reason = topic_cooldown_skip_reason(
             enriched["topic_key"], enriched.get("title", ""), recent_topics,
             now_jst, TOPIC_COOLDOWN_HOURS,
+            semantic_cooldown_hours=_env_float(
+                "SEMANTIC_TOPIC_COOLDOWN_HOURS", 168.0),
         )
-        if cooldown_reason and not stagnation_fallback:
+        # Silence rescue may relax quality thresholds, but never topic
+        # duplication. Repeating the same policy is not a valid rescue post.
+        if cooldown_reason:
             blocked_for_topic = True
             continue
         enriched["_db_news_id"] = insert_news(enriched)

@@ -144,8 +144,62 @@ def pre_generation_skip_reason(
     return None
 
 
+def semantic_policy_signature(text: str) -> str:
+    """Return a stable policy-family key across headline paraphrases.
+
+    This deliberately covers only high-confidence policy families.  It is
+    preferable to miss an unknown family than to merge unrelated stories.
+    """
+    normalized = unicodedata.normalize("NFKC", text or "").lower()
+    compact = re.sub(r"[\s\u3000、。・「」『』（）()【】\[\]:：]+", "", normalized)
+    consumption_tax = "\u6d88\u8cbb\u7a0e" in compact
+    food = any(term in compact for term in (
+        "\u98df\u6599\u54c1",  # 食料品
+        "\u98df\u54c1",        # 食品
+        "\u98df\u6599",        # 食料
+    ))
+    one_percent = any(term in compact for term in (
+        "1%", "1\uff05", "\u4e00\u30d1\u30fc\u30bb\u30f3\u30c8",
+    ))
+    if consumption_tax and food and one_percent:
+        return "policy:consumption_tax:food:1_percent"
+    if consumption_tax and food and any(term in compact for term in (
+        "\u6e1b\u7a0e", "\u5f15\u304d\u4e0b\u3052", "\u5f15\u4e0b\u3052",
+        "\u7121\u7a0e", "\u30bc\u30ed", "0%",
+    )):
+        return "policy:consumption_tax:food:reduction"
+    return ""
+
+
+def has_material_policy_update(new_text: str, previous_text: str = "") -> bool:
+    """Allow a repeated policy family only for an explicit status change."""
+    new_normalized = unicodedata.normalize("NFKC", new_text or "")
+    old_normalized = unicodedata.normalize("NFKC", previous_text or "")
+    material_terms = (
+        "\u6210\u7acb",      # 成立
+        "\u53ef\u6c7a",      # 可決
+        "\u5426\u6c7a",      # 否決
+        "\u64a4\u56de",      # 撤回
+        "\u5ec3\u6b62",      # 廃止
+        "\u65bd\u884c",      # 施行
+        "\u958b\u59cb",      # 開始
+        "\u7d42\u4e86",      # 終了
+        "\u5ef6\u671f",      # 延期
+        "\u51cd\u7d50",      # 凍結
+        "\u65b9\u91dd\u8ee2\u63db",  # 方針転換
+    )
+    return any(
+        term in new_normalized and term not in old_normalized
+        for term in material_terms
+    )
+
+
 def normalize_topic_key(title: str, keywords: list[str] | None = None) -> str:
     text = unicodedata.normalize("NFKC", title or "")
+    semantic = semantic_policy_signature(
+        f"{text} {' '.join(keywords or [])}")
+    if semantic:
+        return semantic
     text = re.sub(r"https?://\S+", "", text)
     text = re.sub(r"[【】\[\]（）()「」『』〈〉《》!?！？…・:：|｜]", " ", text)
     text = re.sub(r"\b(?:20\d{2}|\d{1,2})[年/月日時分]\b", " ", text)
@@ -182,9 +236,26 @@ def topic_cooldown_skip_reason(
     recent_topics: list[dict],
     now_jst: datetime,
     cooldown_hours: float,
+    semantic_cooldown_hours: float | None = None,
 ) -> str | None:
+    semantic_cooldown = (
+        max(cooldown_hours, semantic_cooldown_hours)
+        if semantic_cooldown_hours is not None else cooldown_hours
+    )
+    new_family = semantic_policy_signature(f"{topic_key} {news_title}")
     for row in reversed(recent_topics):
         old_key = str(row.get("topic_key") or "")
+        old_title = str(row.get("news_title") or "")
+        old_family = semantic_policy_signature(f"{old_key} {old_title}")
+        if new_family and old_family == new_family:
+            posted_at = parse_jst(row.get("last_posted_at"))
+            if (
+                posted_at
+                and now_jst - posted_at < timedelta(hours=semantic_cooldown)
+                and not has_material_policy_update(news_title, old_title)
+            ):
+                return "semantic_topic_cooldown"
+            continue
         similarity = SequenceMatcher(None, topic_key, old_key).ratio() if old_key else 0.0
         if old_key != topic_key and similarity < 0.82:
             continue

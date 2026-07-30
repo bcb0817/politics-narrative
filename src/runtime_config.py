@@ -75,7 +75,7 @@ SPECS = (
     ConfigSpec("SOCIAL_CONTENT_FACTORY_PHASE", "A", str, "src/social_content_factory.py"),
     ConfigSpec("SOCIAL_GROWTH_OPENAI_MONTHLY_BUDGET_USD", 18.0, float, "budget simulation only"),
     ConfigSpec("VIDEO_SCRIPT_OPENAI_MONTHLY_BUDGET_USD", 7.0, float, "budget simulation only"),
-    ConfigSpec("XAI_DISCOVERY_MONTHLY_BUDGET_USD", 5.0, float, "budget simulation only"),
+    ConfigSpec("XAI_DISCOVERY_MONTHLY_BUDGET_USD", 30.0, float, "budget simulation only"),
     ConfigSpec("MEDIA_GENERATION_MONTHLY_BUDGET_USD", 8.0, float, "budget simulation only"),
 )
 

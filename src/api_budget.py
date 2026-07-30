@@ -17,13 +17,13 @@ JST = ZoneInfo("Asia/Tokyo")
 
 DEFAULT_BUDGETS = {
     "OPENAI_MONTHLY_BUDGET_USD": 15.0,
-    "XAI_MONTHLY_BUDGET_USD": 5.0,
+    "XAI_MONTHLY_BUDGET_USD": 30.0,
     "X_MONTHLY_BUDGET_USD": 16.0,
-    "TOTAL_MONTHLY_API_BUDGET_USD": 36.0,
+    "TOTAL_MONTHLY_API_BUDGET_USD": 61.0,
     "OPENAI_BUDGET_RESERVE_USD": 1.0,
-    "XAI_BUDGET_RESERVE_USD": 0.25,
+    "XAI_BUDGET_RESERVE_USD": 1.5,
     "X_BUDGET_RESERVE_USD": 0.75,
-    "TOTAL_BUDGET_RESERVE_USD": 2.0,
+    "TOTAL_BUDGET_RESERVE_USD": 3.25,
     "BUDGET_USD_JPY_RATE": 165.0,
     "BUDGET_WARNING_RATIO": 0.85,
     "BUDGET_RESTRICT_RATIO": 0.93,
@@ -184,9 +184,17 @@ def xai_ledger_verified() -> bool:
 def effective_xai_limit() -> float:
     """Apply the configured operator cap while the xAI ledger is unverified."""
     configured = _budget_float("XAI_MONTHLY_BUDGET_USD")
+    verified_cap = max(
+        0.0, _float("XAI_VERIFIED_EFFECTIVE_LIMIT_USD", configured))
     unverified_cap = max(
-        0.0, _float("XAI_UNVERIFIED_EFFECTIVE_LIMIT_USD", 5.0))
-    return configured if xai_ledger_verified() else min(
+        0.0, _float("XAI_UNVERIFIED_EFFECTIVE_LIMIT_USD", 7.5))
+    allow_unverified_full = os.environ.get(
+        "XAI_ALLOW_UNVERIFIED_FULL_BUDGET", "false").lower() in {
+            "1", "true", "yes"
+        }
+    if xai_ledger_verified():
+        return min(configured, verified_cap)
+    return configured if allow_unverified_full else min(
         configured, unverified_cap)
 
 

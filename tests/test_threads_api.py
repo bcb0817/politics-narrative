@@ -528,6 +528,35 @@ class ThreadsApiTests(unittest.TestCase):
             threads_api.generate(dry_run=True, path=self.path)["reason"],
             "no_eligible_verified_source")
 
+    def test_57b_semantic_topic_cooldown_blocks_paraphrase(self):
+        self.add_x_source()
+        now = datetime.now(threads_api.JST)
+        metrics_db.write(
+            """UPDATE news_candidates SET
+               title='食料品の消費税を1%へ引き下げる方針',
+               summary='対象と期間を公式資料で説明',
+               topic_key='new-headline-key'""",
+            (), self.path)
+        metrics_db.write(
+            """UPDATE published_posts SET
+               text='食品への消費税1％案を検証',
+               topic_key='new-headline-key'""",
+            (), self.path)
+        metrics_db.write(
+            """INSERT INTO threads_posts
+               (client_post_key,topic_key,text,status,published_at,created_at)
+               VALUES ('old-semantic','different-key',
+                       '食料品の消費税を1%にする方針を解説',
+                       'published',?,?)""",
+            ((now - timedelta(days=3)).isoformat(), now.isoformat()),
+            self.path)
+        with patch.dict(os.environ, {
+            "SEMANTIC_TOPIC_COOLDOWN_HOURS": "168",
+        }):
+            self.assertEqual(
+                threads_api.generate(dry_run=True, path=self.path)["reason"],
+                "no_eligible_verified_source")
+
     def test_58_five_metric_windows_are_unique(self):
         now = datetime.now(threads_api.JST)
         metrics_db.write(

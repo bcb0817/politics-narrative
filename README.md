@@ -569,22 +569,27 @@ NOTE_DRAFT_DISCORD_WEBHOOK_USERNAME=久世ゆい note Bot
 - 自動起動は `PoliticsNarrativeBot` へ統一しました。
 - `production\register_task.ps1` は登録のみ行い、自動開始しません。
 - xAI費用の正本はSQLite `xai_usage_events` です。
-- `XAI_COST_LEDGER_VERIFIED=false` の間も、xAI実効月額上限は5ドルです。
-- xAIは原則06:00・12:00・18:00、低変動日は06:00・18:00に実行します。
+- `XAI_COST_LEDGER_VERIFIED=false` の間も、運用者指定のxAI実効月額上限は30ドルです。
+- xAIは通常06:00・09:00・12:00・15:00・18:00・21:00、低変動日は
+  06:00・12:00・18:00、予算制限時は06:00・18:00に実行します。
 - `xai-roi` と `openai-usage-breakdown` で費用対効果と用途別費用を確認できます。
 - 詳細は `AUDIT_BUDGET_STARTUP_XAI.md` を参照してください。
 # API予算 💰
 
-現行の月額API予算は、OpenAI `$15`、xAI `$5`、X API `$16`、
-合計 `$36` です。reserve `$2` は総額に追加せず、36ドル内の保留額として扱うため、
-通常の実効利用可能額は `$34` です。
+現行の月額API予算は、OpenAI `$15`、xAI `$30`、X API `$16`、
+合計 `$61` です。reserve `$3.25` は総額に追加せず、61ドル内の保留額として扱うため、
+通常の実効利用可能額は `$57.75` です。
 
 円表示は固定5,000円ではなく、`TOTAL_MONTHLY_API_BUDGET_USD` と
-`BUDGET_USD_JPY_RATE` から動的に計算します。標準レート165円では5,940円です。
+`BUDGET_USD_JPY_RATE` から動的に計算します。標準レート165円では10,065円です。
 
-xAIは `XAI_COST_LEDGER_VERIFIED=false` の場合も
-`XAI_UNVERIFIED_EFFECTIVE_LIMIT_USD=5.0`を適用し、実効上限を5ドルにします。
-台帳検証失敗は引き続き警告として表示し、RSS・公式情報へのフォールバックを維持します。
+xAIの設定上限は月30ドルです。ただし、
+`XAI_COST_LEDGER_VERIFIED=false` の間は
+`XAI_UNVERIFIED_EFFECTIVE_LIMIT_USD=7.5`を適用します。台帳検証済みの場合のみ
+`XAI_VERIFIED_EFFECTIVE_LIMIT_USD=30.0`まで利用できます。未検証状態で30ドルを
+開放するには、運用者が明示的に
+`XAI_ALLOW_UNVERIFIED_FULL_BUDGET=true`を設定する必要があります。
+検証失敗時もRSS・公式情報へのフォールバックは継続します。
 
 予算ステージは85%で警告、93%で補助機能を順次縮小、100%で新規の有料API処理を
 停止します。RSS・公式情報のローカル監視と既存キャッシュは継続します。

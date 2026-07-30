@@ -1646,6 +1646,93 @@ def cmd_xai_roi() -> int:
     return 0
 
 
+def cmd_xai_discovery(action: str, days: int = 30, max_topics: int = 5,
+                      apply: bool = False) -> int:
+    load_env(require=False)
+    ensure_dirs()
+    if str(SRC_DIR) not in sys.path:
+        sys.path.insert(0, str(SRC_DIR))
+    from dataclasses import asdict
+    from xai_discovery import (
+        budget_plan, cost_breakdown, coverage_report, discovery_audit,
+        discovery_status, dry_run, phase_d_optimize, roi_report,
+    )
+    if action == "status":
+        result = discovery_status()
+    elif action in {"budget_mode", "run_budget"}:
+        result = asdict(budget_plan())
+    elif action == "coverage":
+        result = coverage_report(days=days)
+    elif action == "costs":
+        result = cost_breakdown(days=days)
+    elif action == "audit":
+        result = discovery_audit()
+    elif action == "dry_run":
+        result = dry_run(max_topics=max_topics)
+    elif action == "roi":
+        result = roi_report(days=days, persist=apply)
+    elif action == "optimize":
+        result = phase_d_optimize(days=days, apply=apply)
+    else:
+        raise ValueError(f"unknown xAI discovery action: {action}")
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_xai_live_validation(runs: int, confirm: bool) -> int:
+    """Perform bounded xAI-only validation; never invokes social posting."""
+    if not confirm:
+        print("Refusing live xAI validation without --confirm")
+        return 2
+    load_env(require=False)
+    ensure_dirs()
+    if str(SRC_DIR) not in sys.path:
+        sys.path.insert(0, str(SRC_DIR))
+    from xai_radar import search
+    keys = {
+        "POST_ENABLED": "false",
+        "X_POST_ENABLED": "false",
+        "THREADS_POST_ENABLED": "false",
+        "XAI_STANDARD_MAX_TOPICS": "3",
+        "XAI_EXTENDED_RESEARCH_ENABLED": "false",
+        "XAI_IMAGE_UNDERSTANDING_DEFAULT": "false",
+        "XAI_IMAGE_UNDERSTANDING_IMPORTANT_ONLY": "false",
+        "XAI_VIDEO_UNDERSTANDING_ENABLED": "false",
+    }
+    previous = {key: os.environ.get(key) for key in keys}
+    os.environ.update(keys)
+    outcomes = []
+    candidates = [{
+        "content_id": "phase-b-official-politics",
+        "title": "国会と政府の最新公式発表",
+        "summary": "公開された一次資料に関連する議論を確認",
+        "source_url": "fixture://phase-b/official",
+        "verified": True,
+        "source_reliability_score": 9,
+        "importance_score": 6,
+    }]
+    try:
+        for index in range(max(1, min(2, runs))):
+            topics = search(
+                candidates=candidates, notify_discord=False, force_run=True)
+            outcomes.append({
+                "run": index + 1,
+                "topic_count": len(topics),
+                "external_posts": 0,
+            })
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+    print(json.dumps({
+        "phase": "B", "runs": outcomes, "external_posts": 0,
+        "image_understanding": False,
+    }, ensure_ascii=False, indent=2))
+    return 0
+
+
 def cmd_openai_usage_breakdown() -> int:
     load_env(require=False)
     if str(SRC_DIR) not in sys.path:
@@ -2771,6 +2858,32 @@ def main() -> int:
     sub.add_parser("budget-status", help="今月のOpenAI/X/合計費用を表示")
     sub.add_parser("cost-forecast", help="過去7日から月末費用を予測")
     sub.add_parser("xai-roi", help="xAI由来投稿と非xAI投稿の費用対効果を比較")
+    sub.add_parser("xai-discovery-status", help="xAI discovery status and safety state")
+    sub.add_parser("xai-budget-mode", help="Show current dynamic xAI budget mode")
+    sub.add_parser("xai-run-budget", help="Show the dynamic per-run xAI budget")
+    p_xai_coverage = sub.add_parser(
+        "xai-coverage-report", help="Report xAI search-window coverage")
+    p_xai_coverage.add_argument("--days", type=int, default=30)
+    p_xai_costs = sub.add_parser(
+        "xai-cost-breakdown", help="Report canonical xAI cost details")
+    p_xai_costs.add_argument("--days", type=int, default=30)
+    sub.add_parser("xai-discovery-audit", help="Run the local xAI operation audit")
+    p_xai_dry = sub.add_parser(
+        "xai-discovery-dry-run", help="Run fixture-only xAI acceptance checks")
+    p_xai_dry.add_argument("--max-topics", type=int, default=5)
+    p_xai_dry.add_argument("--no-api-call", action="store_true")
+    p_xai_roi_report = sub.add_parser(
+        "xai-roi-report", help="Report xAI-assisted post ROI")
+    p_xai_roi_report.add_argument("--days", type=int, default=30)
+    p_xai_roi_report.add_argument("--dry-run", action="store_true")
+    p_xai_optimize = sub.add_parser(
+        "xai-optimize", help="Phase D bounded frequency/tool-call optimizer")
+    p_xai_optimize.add_argument("--days", type=int, default=30)
+    p_xai_optimize.add_argument("--apply", action="store_true")
+    p_xai_live = sub.add_parser(
+        "xai-live-validation", help="Phase B bounded live xAI API validation")
+    p_xai_live.add_argument("--runs", type=int, choices=[1, 2], default=2)
+    p_xai_live.add_argument("--confirm", action="store_true")
     sub.add_parser("openai-usage-breakdown", help="OpenAI使用量をtask_type別に表示")
     sub.add_parser("db-status", help="SQLiteテーブル件数を表示")
     sub.add_parser("engagement-queue", help="人間承認用の引用・返信候補を保存（X送信なし）")
@@ -3297,6 +3410,31 @@ def main() -> int:
         return cmd_cost_forecast()
     if args.command == "xai-roi":
         return cmd_xai_roi()
+    if args.command == "xai-discovery-status":
+        return cmd_xai_discovery("status")
+    if args.command == "xai-budget-mode":
+        return cmd_xai_discovery("budget_mode")
+    if args.command == "xai-run-budget":
+        return cmd_xai_discovery("run_budget")
+    if args.command == "xai-coverage-report":
+        return cmd_xai_discovery("coverage", days=args.days)
+    if args.command == "xai-cost-breakdown":
+        return cmd_xai_discovery("costs", days=args.days)
+    if args.command == "xai-discovery-audit":
+        return cmd_xai_discovery("audit")
+    if args.command == "xai-discovery-dry-run":
+        if not args.no_api_call:
+            print("xai-discovery-dry-run requires --no-api-call")
+            return 2
+        return cmd_xai_discovery("dry_run", max_topics=args.max_topics)
+    if args.command == "xai-roi-report":
+        return cmd_xai_discovery(
+            "roi", days=args.days, apply=not args.dry_run)
+    if args.command == "xai-optimize":
+        return cmd_xai_discovery(
+            "optimize", days=args.days, apply=args.apply)
+    if args.command == "xai-live-validation":
+        return cmd_xai_live_validation(args.runs, args.confirm)
     if args.command == "openai-usage-breakdown":
         return cmd_openai_usage_breakdown()
     if args.command == "db-status":

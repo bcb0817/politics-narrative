@@ -47,13 +47,15 @@ class GrowthQualityV2Tests(unittest.TestCase):
             self.assertEqual(xai_radar.effective_schedule(path=self.db),
                              {"06:00", "12:00", "18:00"})
 
-    def test_02_low_volatility_reduces_xai_to_two_slots(self):
+    def test_02_low_volatility_reduces_xai_to_three_slots(self):
         with patch.dict(os.environ, {"XAI_SEARCH_SCHEDULE": "06:00,12:00,18:00",
                                       "XAI_ADAPTIVE_SCHEDULE_ENABLED": "true"}), \
              patch.object(xai_radar, "usage_totals", return_value={"xai": 0}), \
              patch.object(xai_radar, "forecast", return_value={"projected": {"xai": 0}}), \
              patch.object(xai_radar, "local_volatility_score", return_value=1):
-            self.assertEqual(xai_radar.effective_schedule(path=self.db), {"06:00", "18:00"})
+            self.assertEqual(
+                xai_radar.effective_schedule(path=self.db),
+                {"06:00", "12:00", "18:00"})
 
     def test_03_high_volatility_never_exceeds_three_slots(self):
         with patch.dict(os.environ, {"XAI_SEARCH_SCHEDULE": "06:00,12:00,18:00",
@@ -79,10 +81,13 @@ class GrowthQualityV2Tests(unittest.TestCase):
             row = conn.execute("SELECT * FROM xai_usage_events").fetchone()
         self.assertAlmostEqual(row["actual_cost_usd"], 0.01)
 
-    def test_06_xai_projection_over_180_reduces_to_two(self):
-        with patch.dict(os.environ, {"XAI_SEARCH_SCHEDULE": "06:00,12:00,18:00"}), \
-             patch.object(xai_radar, "usage_totals", return_value={"xai": 1.81}), \
-             patch.object(xai_radar, "forecast", return_value={"projected": {"xai": 1.81}}):
+    def test_06_xai_projection_over_93_percent_reduces_to_two(self):
+        with patch.dict(os.environ, {
+            "XAI_SEARCH_SCHEDULE": "06:00,12:00,18:00",
+            "XAI_MONTHLY_BUDGET_USD": "30",
+            "XAI_UNVERIFIED_EFFECTIVE_LIMIT_USD": "30",
+        }), patch.object(xai_radar, "usage_totals", return_value={"xai": 28}), \
+             patch.object(xai_radar, "forecast", return_value={"projected": {"xai": 28}}):
             self.assertEqual(xai_radar.effective_schedule(path=self.db), {"06:00", "18:00"})
 
     def test_07_xai_monthly_limit_blocks_client(self):

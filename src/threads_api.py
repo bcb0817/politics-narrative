@@ -28,6 +28,7 @@ import requests
 from api_budget import finalize, reserve
 from metrics_db import apply_additive_migrations, connect, db_path, write
 from openai_usage import calculate_cost, load_pricing, usage_from_response
+from publishing_policy import semantic_policy_signature
 from social_anger import (
     evaluate_production_candidate as evaluate_social_anger_candidate,
     production_prompt_context as social_anger_prompt_context,
@@ -1079,14 +1080,27 @@ def _candidate_query(path: Path | None = None,
     try:
         with closing(connect(path)) as conn:
             rows = [dict(row) for row in conn.execute(query, params)]
-            recent_topics = {
-                str(row["topic_key"] or "")
+            recent_rows = [
+                dict(row)
                 for row in conn.execute(
-                    """SELECT topic_key FROM threads_posts
+                    """SELECT topic_key,text FROM threads_posts
                        WHERE published_at>=? AND status='published'""",
-                    ((_now() - timedelta(
-                        hours=settings()["topic_cooldown_hours"])).isoformat(),),
+                    ((_now() - timedelta(hours=max(
+                        settings()["topic_cooldown_hours"],
+                        float(os.environ.get(
+                            "SEMANTIC_TOPIC_COOLDOWN_HOURS", "168")),
+                    ))).isoformat(),),
                 )
+            ]
+            recent_topics = {
+                str(row.get("topic_key") or "") for row in recent_rows
+            }
+            recent_semantic_families = {
+                family for family in (
+                    semantic_policy_signature(
+                        f"{row.get('topic_key', '')} {row.get('text', '')}")
+                    for row in recent_rows
+                ) if family
             }
     except sqlite3.Error:
         return None
@@ -1094,6 +1108,11 @@ def _candidate_query(path: Path | None = None,
     now = _now()
     for row in rows:
         if str(row.get("topic_key") or "") in recent_topics:
+            continue
+        semantic_family = semantic_policy_signature(
+            f"{row.get('topic_key', '')} {row.get('title', '')} "
+            f"{row.get('summary', '')} {row.get('x_text', '')}")
+        if semantic_family and semantic_family in recent_semantic_families:
             continue
         posted = _parse_datetime(row.get("posted_at"))
         if posted and (
