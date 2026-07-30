@@ -86,6 +86,7 @@ Tunnel等が別途必要です。TLS終端側から`X-Forwarded-Proto: https`を
 - `GET /threads/callback`
 - `POST /threads/deauthorize`
 - `POST /threads/data-deletion`
+- `GET /threads/privacy`
 
 解除・削除要求はMetaの`signed_request`をApp SecretによるHMAC-SHA256で
 検証します。署名不正の場合はトークンや履歴を変更しません。
