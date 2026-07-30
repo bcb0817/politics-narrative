@@ -428,6 +428,61 @@ class ThreadsFullApiTests(unittest.TestCase):
         result = full.trends(path=self.path)
         self.assertTrue(result["not_official_global_ranking"])
 
+    def test_86b_new_search_sends_one_discord_research_summary(self):
+        client = FakeFullClient()
+        client.keyword_search = Mock(return_value=[
+            {
+                "id": "r1", "text": "社会保険料 改革の議論",
+                "username": "a", "timestamp": datetime.now(
+                    threads_api.JST).isoformat(),
+                "permalink": "https://www.threads.net/@a/post/r1",
+                "media_type": "TEXT_POST", "is_verified": True,
+            },
+            {
+                "id": "r2", "text": "社会保険料 改革への意見",
+                "username": "b", "timestamp": datetime.now(
+                    threads_api.JST).isoformat(),
+                "permalink": "https://www.threads.net/@b/post/r2",
+                "media_type": "TEXT_POST",
+            },
+        ])
+        full.search("社会保険料", client=client, path=self.path)
+        with patch(
+            "discord_notify.notify_threads_research", return_value=True
+        ) as notify:
+            first = full.trends(path=self.path)
+            second = full.trends(path=self.path)
+        self.assertTrue(first["discord_sent"])
+        self.assertFalse(second["discord_sent"])
+        notify.assert_called_once()
+        report = notify.call_args.args[0]
+        self.assertEqual(report["search_run_count"], 1)
+        self.assertEqual(report["unique_post_count"], 2)
+        self.assertEqual(
+            report["representative_posts"][0]["text"],
+            "社会保険料 改革の議論",
+        )
+
+    def test_86c_threads_research_dry_run_does_not_notify(self):
+        full.search("政治", client=self.client, path=self.path)
+        with patch("discord_notify.notify_threads_research") as notify:
+            result = full.trends(dry_run=True, path=self.path)
+        self.assertFalse(result["discord_sent"])
+        notify.assert_not_called()
+
+    def test_86d_empty_research_result_is_not_notified_twice(self):
+        client = FakeFullClient()
+        client.keyword_search = Mock(return_value=[])
+        full.search("該当なし", client=client, path=self.path)
+        with patch(
+            "discord_notify.notify_threads_research", return_value=True
+        ) as notify:
+            first = full.trends(path=self.path)
+            second = full.trends(path=self.path)
+        self.assertTrue(first["discord_sent"])
+        self.assertFalse(second["discord_sent"])
+        notify.assert_called_once()
+
     def test_87_reply_analysis_does_not_treat_opposition_as_spam(self):
         result = full.analyze_reply("r1", "この政策には反対です", self.path)
         self.assertEqual(result["spam_score"], 0)

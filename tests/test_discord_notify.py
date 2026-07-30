@@ -249,6 +249,44 @@ class DiscordNotifyTests(unittest.TestCase):
         self.assertIn("ChatGPT投稿方針を更新", rendered)
         self.assertNotIn("raw prompt", rendered)
 
+    def test_threads_research_contains_public_result_and_analysis_only(self):
+        env = {
+            "DISCORD_NOTIFICATIONS_ENABLED": "true",
+            "DISCORD_NOTIFY_THREADS_RESEARCH": "true",
+            "DISCORD_WEBHOOK_URL": "https://discord.invalid/webhook",
+        }
+        report = {
+            "lookback_hours": 24,
+            "search_run_count": 1,
+            "result_count": 4,
+            "unique_post_count": 3,
+            "searches": [{"query": "政治", "result_count": 4}],
+            "representative_posts": [{
+                "text": "社会保険料をめぐる議論",
+                "permalink": "https://www.threads.net/@example/post/1",
+                "username_hash": "must-not-be-sent",
+            }],
+            "top_entities": [{
+                "entity": "社会保険料",
+                "trend_score": 72.5,
+                "state": "rising",
+                "post_count": 3,
+                "eligible_for_post": True,
+            }],
+            "eligible_entity_count": 1,
+            "access_token": "must-not-be-sent",
+        }
+        with patch.dict(os.environ, env, clear=False), patch(
+            "discord_notify.requests.post", return_value=FakeResponse()
+        ) as post:
+            self.assertTrue(discord_notify.notify_threads_research(report))
+        rendered = json.dumps(
+            post.call_args.kwargs["json"], ensure_ascii=False)
+        self.assertIn("社会保険料をめぐる議論", rendered)
+        self.assertIn("72.5点", rendered)
+        self.assertIn("公式・報道照合あり", rendered)
+        self.assertNotIn("must-not-be-sent", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()

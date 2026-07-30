@@ -119,6 +119,8 @@ def settings() -> dict:
         "search_cache_minutes": _int(
             "THREADS_SEARCH_CACHE_TTL_MINUTES", 60, 1, 1440),
         "analysis_enabled": _bool("THREADS_ANALYSIS_ENABLED", "true"),
+        "discord_research": _bool(
+            "THREADS_DISCORD_RESEARCH_ENABLED", "true"),
         "raw_retention_days": _int(
             "THREADS_RAW_RESPONSE_RETENTION_DAYS", 30, 1, 365),
         "search_retention_days": _int(
@@ -157,6 +159,16 @@ def _discord_result(title: str, fields: dict, level: str = "info") -> bool:
             "threads_report", title,
             "Threads公式APIの集計結果だけを通知します。",
             level=level, fields=fields)
+    except Exception:
+        return False
+
+
+def _discord_research(report: dict, *, dry_run: bool = False) -> bool:
+    if dry_run or not settings()["discord_research"]:
+        return False
+    try:
+        from discord_notify import notify_threads_research
+        return notify_threads_research(report)
     except Exception:
         return False
 
@@ -778,22 +790,106 @@ def _tokens(text: str) -> list[str]:
 def trends(*, hours: int = 24, dry_run: bool = False,
            path: Path | None = None) -> dict:
     apply_threads_full_migrations(path)
-    cutoff = (_now() - timedelta(hours=max(1, min(720, hours)))).isoformat()
+    hours = max(1, min(720, hours))
+    cutoff = (_now() - timedelta(hours=hours)).isoformat()
     with closing(connect(path)) as conn:
+        previous_snapshot = conn.execute(
+            """SELECT snapshot_at FROM threads_trend_snapshots
+               ORDER BY snapshot_at DESC LIMIT 1""").fetchone()
+        previous_snapshot_at = (
+            str(previous_snapshot["snapshot_at"])
+            if previous_snapshot else ""
+        )
+        query_sql = """SELECT id,query_text,result_count,status,fetched_at
+          FROM threads_search_queries
+          WHERE fetched_at>=? AND status IN ('success','empty')"""
+        query_params: list[Any] = [cutoff]
+        if previous_snapshot_at:
+            query_sql += " AND fetched_at>?"
+            query_params.append(previous_snapshot_at)
+        query_sql += " ORDER BY fetched_at DESC"
+        new_queries = [
+            dict(row) for row in conn.execute(query_sql, query_params)
+        ]
         rows = [dict(row) for row in conn.execute(
-            """SELECT text,username_hash,timestamp,topic_tag,is_verified,
-                      has_replies,is_quote_post,has_link,media_type
+            """SELECT threads_post_id,text,username_hash,timestamp,permalink,
+                      topic_tag,is_verified,has_replies,is_quote_post,has_link,
+                      media_type
                FROM threads_search_results WHERE last_seen_at>=?""", (cutoff,))]
         news_rows = [dict(row) for row in conn.execute(
             """SELECT title,summary,source_name,source_type,verified
                FROM news_candidates
                WHERE fetched_at>=?""", (cutoff,))]
+        representative_rows: list[dict] = []
+        unique_new_posts = 0
+        if new_queries:
+            placeholders = ",".join("?" for _ in new_queries)
+            query_ids = [int(row["id"]) for row in new_queries]
+            representative_rows = [
+                dict(row) for row in conn.execute(
+                    f"""SELECT DISTINCT r.threads_post_id,r.text,r.permalink,
+                               r.is_verified,m.rank
+                        FROM threads_search_result_matches m
+                        JOIN threads_search_results r ON r.id=m.result_id
+                        WHERE m.query_id IN ({placeholders})
+                        ORDER BY r.is_verified DESC,m.rank ASC LIMIT 5""",
+                    query_ids,
+                )
+            ]
+            unique_new_posts = int(conn.execute(
+                f"""SELECT COUNT(DISTINCT result_id)
+                    FROM threads_search_result_matches
+                    WHERE query_id IN ({placeholders})""",
+                query_ids,
+            ).fetchone()[0] or 0)
+    research_base = {
+        "lookback_hours": hours,
+        "search_run_count": len(new_queries),
+        "result_count": sum(
+            int(row.get("result_count") or 0) for row in new_queries),
+        "unique_post_count": unique_new_posts,
+        "searches": [
+            {
+                "query": row.get("query_text"),
+                "result_count": row.get("result_count"),
+                "status": row.get("status"),
+            }
+            for row in new_queries
+        ],
+        "representative_posts": [
+            {
+                "text": row.get("text"),
+                "permalink": row.get("permalink"),
+                "is_verified": bool(row.get("is_verified")),
+            }
+            for row in representative_rows
+        ],
+    }
     if not rows:
-        return {
+        result = {
             "status": "insufficient_data", "sample_size": 0,
             "scope": "locally collected API search sample",
             "dry_run": dry_run,
+            "research": research_base,
         }
+        if not dry_run:
+            now = _now_text()
+            write("""INSERT INTO threads_trend_snapshots
+              (snapshot_at,lookback_hours,status,summary_json,created_at,
+               updated_at,source,api_version,raw_response_hash)
+              VALUES (?,?,?,?,?,?,?,?,?)""", (
+                now, hours, result["status"], _json(result), now, now,
+                "local_analysis", base_settings()["api_version"],
+                _hash_payload(result),
+            ), path)
+        result["discord_sent"] = bool(
+            new_queries and _discord_research({
+                **research_base,
+                "top_entities": [],
+                "eligible_entity_count": 0,
+            }, dry_run=dry_run)
+        )
+        return result
     entities: dict[str, list[dict]] = defaultdict(list)
     for row in rows:
         keys = set(_tokens(row.get("text", ""))[:30])
@@ -955,6 +1051,7 @@ def trends(*, hours: int = 24, dry_run: bool = False,
         ],
         "top_recent_difference": "requires paired TOP and RECENT query samples",
         "dry_run": dry_run,
+        "research": research_base,
     }
     if not dry_run:
         now = _now_text()
@@ -986,6 +1083,16 @@ def trends(*, hours: int = 24, dry_run: bool = False,
                 entity["verification_reason"], now, now,
                 "local_analysis", base_settings()["api_version"], "",
             ), path)
+    research_report = {
+        **research_base,
+        "top_entities": ranked[:5],
+        "eligible_entity_count": sum(
+            bool(row.get("eligible_for_post")) for row in ranked),
+    }
+    result["discord_sent"] = bool(
+        new_queries and _discord_research(
+            research_report, dry_run=dry_run)
+    )
     return result
 
 

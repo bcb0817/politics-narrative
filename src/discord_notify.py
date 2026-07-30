@@ -221,6 +221,94 @@ def notify_crosspost_result(result: dict[str, Any], *, dry_run: bool = False) ->
     )
 
 
+def notify_threads_research(report: dict[str, Any], *,
+                            dry_run: bool = False) -> bool:
+    """Send one concise Threads research and local-analysis result."""
+    if dry_run:
+        return False
+
+    searches = report.get("searches") or []
+    query_names = list(dict.fromkeys(
+        _clean(row.get("query"), 80)
+        for row in searches
+        if isinstance(row, dict) and row.get("query")
+    ))[:8]
+    representatives = report.get("representative_posts") or []
+    content_lines = []
+    for index, row in enumerate(representatives[:3], 1):
+        if not isinstance(row, dict):
+            continue
+        excerpt = _clean(row.get("text"), 220)
+        permalink = str(row.get("permalink") or "").strip()
+        if permalink.startswith("https://"):
+            content_lines.append(f"{index}. {excerpt}\n{permalink}")
+        elif excerpt:
+            content_lines.append(f"{index}. {excerpt}")
+
+    entities = report.get("top_entities") or []
+    analysis_lines = []
+    for row in entities[:5]:
+        if not isinstance(row, dict):
+            continue
+        name = _clean(row.get("entity"), 60)
+        score = row.get("trend_score")
+        state = _clean(row.get("state"), 30)
+        posts = int(row.get("post_count") or 0)
+        verification = (
+            "公式・報道照合あり"
+            if row.get("eligible_for_post")
+            else "Threads内の未検証シグナル"
+        )
+        analysis_lines.append(
+            f"• **{name}**: {score}点 / {state} / {posts}件 / {verification}"
+        )
+
+    searched_count = int(report.get("search_run_count") or len(searches))
+    result_count = int(report.get("result_count") or 0)
+    unique_posts = int(report.get("unique_post_count") or 0)
+    eligible_count = int(report.get("eligible_entity_count") or 0)
+    level = (
+        "success" if eligible_count
+        else "warning" if searched_count and not unique_posts
+        else "info"
+    )
+    return notify(
+        "threads_research",
+        "🔎 Threadsリサーチ・分析結果",
+        (
+            "Threads公式APIで取得した公開投稿の標本をローカル分析しました。"
+            "Threadsの反応だけを事実認定や投稿根拠には使用しません。"
+        ),
+        level=level,
+        fields={
+            "検索条件": (
+                f"対象: 直近{int(report.get('lookback_hours') or 24)}時間\n"
+                f"検索語: {', '.join(query_names) or '記録なし'}"
+            ),
+            "取得結果": (
+                f"検索実行: {searched_count}回\n"
+                f"API結果: {result_count}件\n"
+                f"重複除外後: {unique_posts}件"
+            ),
+            "リサーチ内容": (
+                "\n".join(content_lines) or "該当する公開投稿はありませんでした。"
+            ),
+            "分析結果": (
+                "\n".join(analysis_lines)
+                or "比較可能なトレンド標本が不足しています。"
+            ),
+            "投稿判断": (
+                f"公式・報道との照合条件を満たす話題: {eligible_count}件\n"
+                "未照合のThreads情報は投稿候補に採用しません。"
+            ),
+            "注意点": (
+                "取得結果はThreads全体の順位ではなく、"
+                "指定検索語で収集できた範囲の相対分析です。"
+            ),
+        },
+    )
+
+
 def _note_webhook_settings() -> tuple[bool, str, str]:
     enabled_raw = os.environ.get(
         "DISCORD_NOTE_ENABLED",

@@ -514,12 +514,23 @@ DISCORD_NOTIFY_POST_SUCCESS=true
 DISCORD_NOTIFY_ERROR=true
 DISCORD_NOTIFY_RUN_LOG=true
 DISCORD_NOTIFY_SKIP=false
+DISCORD_NOTIFY_THREADS_RESEARCH=true
 DISCORD_LOG_MODE=result_only
 ```
 
 通知は「投稿完了」「今回は投稿なし」「処理失敗」「ログ確認結果」に整理されます。
 投稿成功は重複通知せず、`discord-log`もログ本文ではなく、エラー・警告件数と
 正常／異常の結果だけを送ります。
+
+Threads公式API検索後の相対トレンド分析は、検索語、取得件数、
+代表的な公開投稿（最大3件）、上位トピック、公式・報道との照合結果を
+1件のDiscord通知にまとめます。アクセストークン、ユーザー識別ハッシュ、
+生レスポンス、内部ログは送信しません。同じ検索結果の再分析だけでは
+再通知せず、新しい検索実行が保存された場合だけ通知します。
+
+```dotenv
+THREADS_DISCORD_RESEARCH_ENABLED=true
+```
 
 Send a manual connection test:
 

@@ -117,6 +117,25 @@ XとThreadsは指標定義が異なるため単純な勝者判定は行わず、
 ```
 
 政治キーワードは `config\threads_political_keywords.yaml`、トレンド重みは `config\threads_trend_weights.json` で変更できます。Threads検索結果は一次資料として扱わず、既存の公式資料・RSS・報道と照合します。
+
+## Discordへのリサーチ結果通知 🔎
+
+`threads-search` の後に `threads-trends` を実行すると、新しい検索結果が
+保存されている場合だけ、次の結果を1件にまとめてDiscordへ通知します。
+
+- 検索語、検索回数、API取得件数、重複除外後の件数
+- 代表的な公開投稿（最大3件）
+- 相対トレンド上位5件と状態・スコア
+- 公式資料・報道との照合を満たした話題数
+- 標本分析でありThreads全体順位ではないという注意書き
+
+```dotenv
+THREADS_DISCORD_RESEARCH_ENABLED=true
+DISCORD_NOTIFY_THREADS_RESEARCH=true
+```
+
+アクセストークン、ユーザー識別ハッシュ、生APIレスポンス、内部ログは
+Discordへ送信しません。定期タスクの `search` モードでも同じ通知が行われます。
 - callback停止: 公開トンネルを停止後、`run_threads_oauth_server.ps1`のプロセスを停止します。
 - callback自動起動登録: `.\production\register_threads_oauth_task.ps1`
 - callbackタスク確認: `.\production\threads_oauth_status.ps1`
