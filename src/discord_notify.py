@@ -309,6 +309,114 @@ def notify_threads_research(report: dict[str, Any], *,
     )
 
 
+def notify_x_research(report: dict[str, Any], *,
+                      dry_run: bool = False) -> bool:
+    """Send one bounded X Search research and analysis summary."""
+    if dry_run:
+        return False
+
+    provider = _clean(report.get("provider"), 80) or "X Search"
+    queries = list(dict.fromkeys(
+        _clean(value, 80) for value in (report.get("queries") or []) if value
+    ))[:8]
+    representatives = report.get("representative_posts") or []
+    content_lines = []
+    for index, row in enumerate(representatives[:3], 1):
+        if not isinstance(row, dict):
+            continue
+        text = _clean(row.get("text"), 220)
+        post_id = re.sub(r"\D", "", str(row.get("post_id") or ""))
+        if text:
+            content_lines.append(f"{index}. {text}")
+        if post_id:
+            content_lines.append(f"https://x.com/i/web/status/{post_id}")
+
+    topics = report.get("topics") or []
+    analysis_lines = []
+    claim_lines = []
+    for row in topics[:5]:
+        if not isinstance(row, dict):
+            continue
+        key = _clean(row.get("topic_key"), 80)
+        attention = row.get("attention_score")
+        velocity = row.get("velocity_score")
+        posts = int(row.get("post_count") or 0)
+        accounts = int(row.get("unique_accounts") or 0)
+        verified = (
+            "RSS・公式情報と照合あり"
+            if row.get("externally_corroborated")
+            else "X内の未検証シグナル"
+        )
+        details = [f"注目度 {attention}", f"速度 {velocity}"]
+        if posts:
+            details.append(f"{posts}投稿")
+        if accounts:
+            details.append(f"{accounts}アカウント")
+        analysis_lines.append(
+            f"• **{key}**: {' / '.join(details)} / {verified}"
+        )
+        main_claims = [
+            _clean(value, 150) for value in (row.get("main_claims") or [])
+            if value
+        ][:2]
+        counter_claims = [
+            _clean(value, 150) for value in (row.get("counter_claims") or [])
+            if value
+        ][:2]
+        if main_claims:
+            claim_lines.append(
+                f"• **{key}・主な見方:** {' / '.join(main_claims)}")
+        if counter_claims:
+            claim_lines.append(
+                f"• **{key}・異なる見方:** {' / '.join(counter_claims)}")
+        for post_id in (row.get("representative_post_ids") or [])[:2]:
+            digits = re.sub(r"\D", "", str(post_id or ""))
+            if digits:
+                content_lines.append(
+                    f"https://x.com/i/web/status/{digits}")
+
+    corroborated = int(report.get("corroborated_topic_count") or 0)
+    query_count = int(report.get("query_count") or len(queries))
+    resource_count = int(report.get("resource_count") or 0)
+    topic_count = int(report.get("topic_count") or len(topics))
+    return notify(
+        "x_research",
+        "🔎 X Searchリサーチ・分析結果",
+        (
+            f"{provider}で取得した公開情報を注目度レーダーとして分析しました。"
+            "X上の反応だけを事実認定や投稿根拠には使用しません。"
+        ),
+        level="success" if corroborated else "info",
+        fields={
+            "検索条件": (
+                f"対象: 直近{int(report.get('lookback_minutes') or 360)}分\n"
+                f"検索テーマ: {', '.join(queries) or '候補ニュース連動'}"
+            ),
+            "取得結果": (
+                f"検索実行: {query_count}件\n"
+                f"取得・検索呼出: {resource_count}件\n"
+                f"分析対象トピック: {topic_count}件"
+            ),
+            "リサーチ内容": (
+                "\n".join((claim_lines + content_lines)[:8])
+                or "該当する公開投稿・主張はありませんでした。"
+            ),
+            "分析結果": (
+                "\n".join(analysis_lines)
+                or "比較可能な注目度標本が不足しています。"
+            ),
+            "投稿判断": (
+                f"RSS・公式情報との照合あり: {corroborated}件\n"
+                "未照合のX情報は投稿候補に採用しません。"
+            ),
+            "注意点": (
+                "取得結果はX全体の順位ではなく、指定テーマで"
+                "収集できた範囲の相対的な注目度分析です。"
+            ),
+        },
+    )
+
+
 def _note_webhook_settings() -> tuple[bool, str, str]:
     enabled_raw = os.environ.get(
         "DISCORD_NOTE_ENABLED",

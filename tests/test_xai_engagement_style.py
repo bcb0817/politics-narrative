@@ -99,6 +99,34 @@ class NewRequirementsTests(unittest.TestCase):
             xai_radar.search(datetime(2026, 7, 21, 6, 0, tzinfo=JST), FakeXAIClient, path)
             self.assertAlmostEqual(api_budget.usage_totals(path)["xai"], .001, places=6)
 
+    def test_05b_xai_research_notifies_only_when_explicitly_enabled(self):
+        with tempfile.TemporaryDirectory() as td, patch.dict(os.environ, {
+            "XAI_ENABLED": "true", "X_TOPIC_DISCOVERY_PROVIDER": "xai",
+            "XAI_API_KEY": "dummy", "XAI_SEARCH_SCHEDULE": "06:00",
+            "XAI_ADAPTIVE_SCHEDULE_ENABLED": "false",
+            "XAI_MONTHLY_BUDGET_USD": "2", "XAI_BUDGET_RESERVE_USD": "0",
+            "X_DISCORD_RESEARCH_ENABLED": "true",
+        }), patch.object(
+            xai_radar, "_state_dir", return_value=Path(td)
+        ), patch(
+            "discord_notify.notify_x_research", return_value=True
+        ) as notify:
+            xai_radar.search(
+                datetime(2026, 7, 21, 6, 0, tzinfo=JST),
+                FakeXAIClient,
+                Path(td) / "db.sqlite",
+                candidates=[{
+                    "title": "防衛予算",
+                    "topic_key": "防衛予算",
+                    "summary": "政府が公式資料を公表",
+                }],
+                notify_discord=True,
+            )
+        notify.assert_called_once()
+        report = notify.call_args.args[0]
+        self.assertEqual(report["provider"], "xAI X Search")
+        self.assertEqual(report["corroborated_topic_count"], 1)
+
     def test_06_xai_budget_two_dollars_stops_search(self):
         with tempfile.TemporaryDirectory() as td, patch.dict(os.environ, {
             "XAI_MONTHLY_BUDGET_USD": "2", "XAI_BUDGET_RESERVE_USD": "0"}):

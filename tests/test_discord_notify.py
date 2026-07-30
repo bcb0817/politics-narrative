@@ -287,6 +287,44 @@ class DiscordNotifyTests(unittest.TestCase):
         self.assertIn("公式・報道照合あり", rendered)
         self.assertNotIn("must-not-be-sent", rendered)
 
+    def test_x_research_contains_analysis_but_not_internal_data(self):
+        env = {
+            "DISCORD_NOTIFICATIONS_ENABLED": "true",
+            "DISCORD_NOTIFY_X_RESEARCH": "true",
+            "DISCORD_WEBHOOK_URL": "https://discord.invalid/webhook",
+        }
+        report = {
+            "provider": "xAI X Search",
+            "lookback_minutes": 360,
+            "query_count": 1,
+            "resource_count": 1,
+            "topic_count": 1,
+            "queries": ["社会保険料"],
+            "topics": [{
+                "topic_key": "社会保険料",
+                "attention_score": 8.2,
+                "velocity_score": 7.1,
+                "main_claims": ["負担が重い"],
+                "counter_claims": ["財源も確認すべき"],
+                "representative_post_ids": ["1234567890"],
+                "externally_corroborated": True,
+                "author_id": "must-not-be-sent",
+            }],
+            "corroborated_topic_count": 1,
+            "api_key": "must-not-be-sent",
+        }
+        with patch.dict(os.environ, env, clear=False), patch(
+            "discord_notify.requests.post", return_value=FakeResponse()
+        ) as post:
+            self.assertTrue(discord_notify.notify_x_research(report))
+        rendered = json.dumps(
+            post.call_args.kwargs["json"], ensure_ascii=False)
+        self.assertIn("負担が重い", rendered)
+        self.assertIn("財源も確認すべき", rendered)
+        self.assertIn("8.2", rendered)
+        self.assertIn("https://x.com/i/web/status/1234567890", rendered)
+        self.assertNotIn("must-not-be-sent", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()

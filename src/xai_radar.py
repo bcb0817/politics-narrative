@@ -272,7 +272,8 @@ def _tool_call_count(response) -> int:
     return max(output_count, usage_count)
 
 
-def _save_cache(payload: dict, now_jst: datetime) -> list[dict]:
+def _save_cache(payload: dict, now_jst: datetime, *,
+                notify_discord: bool = False) -> list[dict]:
     ttl = int(os.environ.get("XAI_SEARCH_CACHE_TTL_MINUTES", "360"))
     payload["expires_at"] = (datetime.now(timezone.utc) + timedelta(minutes=ttl)).isoformat()
     payload["provider"] = "xai"
@@ -282,11 +283,46 @@ def _save_cache(payload: dict, now_jst: datetime) -> list[dict]:
     history_dir.mkdir(parents=True, exist_ok=True)
     with open(history_dir / f"{now_jst.date().isoformat()}.jsonl", "a", encoding="utf-8") as handle:
         handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    if notify_discord and os.environ.get(
+        "X_DISCORD_RESEARCH_ENABLED", "false"
+    ).strip().lower() in {"1", "true", "yes", "on"}:
+        try:
+            from discord_notify import notify_x_research
+            topics = payload.get("topics") or []
+            notify_x_research({
+                "provider": "xAI X Search",
+                "lookback_minutes": int(os.environ.get(
+                    "XAI_SEARCH_LOOKBACK_MINUTES", "360")),
+                "query_count": 1,
+                "resource_count": 1,
+                "topic_count": len(topics),
+                "queries": [
+                    str(topic.get("topic_key") or "")
+                    for topic in topics[:5]
+                ],
+                "topics": [{
+                    "topic_key": topic.get("topic_key"),
+                    "attention_score": topic.get("attention_score"),
+                    "velocity_score": topic.get("velocity_score"),
+                    "main_claims": topic.get("main_claims") or [],
+                    "counter_claims": topic.get("counter_claims") or [],
+                    "representative_post_ids": (
+                        topic.get("representative_post_ids") or []),
+                    "externally_corroborated": bool(
+                        topic.get("externally_corroborated")),
+                } for topic in topics[:5]],
+                "corroborated_topic_count": sum(
+                    bool(topic.get("externally_corroborated"))
+                    for topic in topics),
+            })
+        except Exception:
+            pass
     return payload["topics"]
 
 
 def search(now_jst: datetime | None = None, client_factory=None,
-           path: Path | None = None, candidates: list[dict] | None = None) -> list[dict]:
+           path: Path | None = None, candidates: list[dict] | None = None,
+           notify_discord: bool = False) -> list[dict]:
     """Run one xAI request at configured slots; failures degrade to cache/RSS."""
     now_jst = now_jst or datetime.now(JST)
     path = path or db_path()
@@ -378,6 +414,19 @@ def search(now_jst: datetime | None = None, client_factory=None,
                     store=False,
                 )
                 payload = _sanitize(json.loads(response.output_text), max_topics, max_posts)
+                candidate_keys = {
+                    str(row.get("topic_key") or "").lower()
+                    for row in compact_candidates
+                    if row.get("topic_key")
+                }
+                for topic in payload["topics"]:
+                    key = str(topic.get("topic_key") or "").lower()
+                    topic["externally_corroborated"] = any(
+                        key == candidate
+                        or key in candidate
+                        or candidate in key
+                        for candidate in candidate_keys
+                    )
                 usage = response.usage
                 ticks = int(getattr(usage, "cost_in_usd_ticks", 0) or 0)
                 inp = int(getattr(usage, "input_tokens", 0) or 0)
@@ -423,7 +472,9 @@ def search(now_jst: datetime | None = None, client_factory=None,
                     continue
                 last_payload = payload
                 if payload["topics"]:
-                    return _save_cache(payload, now_jst)
+                    return _save_cache(
+                        payload, now_jst,
+                        notify_discord=notify_discord)
                 if attempt + 1 < max_attempts:
                     print("xAI X Search returned no topics; retrying once")
             except Exception as exc:
@@ -434,7 +485,9 @@ def search(now_jst: datetime | None = None, client_factory=None,
                               estimated_cost_usd=0.0)
                 raise
         if last_payload is not None:
-            return _save_cache(last_payload, now_jst)
+            return _save_cache(
+                last_payload, now_jst,
+                notify_discord=notify_discord)
         return load_cache()
     except Exception as exc:
         print(f"xAI X Search unavailable -> continuing with RSS and official sources ({type(exc).__name__})")

@@ -108,8 +108,15 @@ def _env_bool(name, default="false"):
     return os.environ.get(name, default).strip().lower() in ("true", "1", "yes")
 
 
-def _save_x_search_results(topics: list[dict], queries: list[dict], resources: int = 0,
-                           estimated_cost: float = 0.0) -> None:
+def _save_x_search_results(
+    topics: list[dict],
+    queries: list[dict],
+    resources: int = 0,
+    estimated_cost: float = 0.0,
+    *,
+    representative_posts: list[dict] | None = None,
+    notify_discord: bool = False,
+) -> None:
     state = _state_dir()
     now = datetime.now(timezone.utc)
     payload = {
@@ -131,6 +138,36 @@ def _save_x_search_results(topics: list[dict], queries: list[dict], resources: i
     history_file = history_dir / f"{now.astimezone(ZoneInfo('Asia/Tokyo')).date().isoformat()}.jsonl"
     with open(history_file, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    if notify_discord and _env_bool("X_DISCORD_RESEARCH_ENABLED", "false"):
+        try:
+            from discord_notify import notify_x_research
+            notify_x_research({
+                "provider": "X API Recent Search",
+                "lookback_minutes": env_int(
+                    os.environ.get("X_SEARCH_LOOKBACK_MINUTES"), 240, 10, 1440),
+                "query_count": len(queries),
+                "resource_count": resources,
+                "topic_count": len(topics),
+                "queries": [
+                    query.get("label", "") for query in queries
+                    if query.get("label")
+                ],
+                "representative_posts": representative_posts or [],
+                "topics": [{
+                    "topic_key": topic.get("topic_key"),
+                    "attention_score": topic.get("x_attention_score"),
+                    "velocity_score": topic.get("velocity_score"),
+                    "post_count": topic.get("x_post_count"),
+                    "unique_accounts": topic.get("unique_accounts"),
+                    "externally_corroborated": bool(
+                        topic.get("externally_corroborated")),
+                } for topic in topics[:5]],
+                "corroborated_topic_count": sum(
+                    bool(topic.get("externally_corroborated"))
+                    for topic in topics),
+            })
+        except Exception:
+            pass
 
 
 def load_x_search_cache(now: datetime | None = None) -> list[dict]:
@@ -254,6 +291,7 @@ def fetch_x_search_topics(rss_items: list[dict]) -> list[dict]:
     resources_read = 0
     seen_tweet_ids = _load_seen_x_post_ids()
     newly_seen_tweet_ids = set()
+    representative_candidates = []
     start_time = datetime.now(timezone.utc) - timedelta(minutes=lookback_minutes)
     for query in queries:
         try:
@@ -299,6 +337,16 @@ def fetch_x_search_topics(rss_items: list[dict]) -> list[dict]:
                 "replies": int(metrics.get("reply_count", 0) or 0),
                 "quotes": int(metrics.get("quote_count", 0) or 0),
             })
+        representative_candidates.extend({
+            "post_id": post.get("tweet_id"),
+            "text": post.get("text"),
+            "engagement": (
+                int(post.get("likes") or 0)
+                + int(post.get("reposts") or 0) * 2
+                + int(post.get("replies") or 0)
+                + int(post.get("quotes") or 0) * 2
+            ),
+        } for post in posts)
         all_topics.extend(aggregate_attention(
             posts, query, min_unique_accounts=min_accounts, min_post_count=min_posts
         ))
@@ -315,11 +363,31 @@ def fetch_x_search_topics(rss_items: list[dict]) -> list[dict]:
         if current is None or topic["x_attention_score"] > current["x_attention_score"]:
             merged[key] = topic
     topics = sorted(merged.values(), key=lambda row: row["x_attention_score"], reverse=True)[:max_topics]
+    corroborated_rows = match_topics_to_rss(rss_items, topics)
+    corroborated_keys = {
+        str(row.get("x_topic_key") or "")
+        for row in corroborated_rows
+        if "x_search" in set(row.get("discovered_via") or [])
+    }
+    topics = [{
+        **topic,
+        "externally_corroborated": (
+            str(topic.get("topic_key") or "") in corroborated_keys),
+    } for topic in topics]
+    representative_posts = sorted(
+        representative_candidates,
+        key=lambda row: int(row.get("engagement") or 0),
+        reverse=True,
+    )[:3]
     actual_cost = estimate_x("post_read_per_resource", resources_read) or 0
     finalize_budget(reservation, actual_cost, success=True, resource_count=resources_read)
     if newly_seen_tweet_ids:
         _save_seen_x_post_ids(seen_tweet_ids)
-    _save_x_search_results(topics, queries, resources_read, actual_cost)
+    _save_x_search_results(
+        topics, queries, resources_read, actual_cost,
+        representative_posts=representative_posts,
+        notify_discord=True,
+    )
     print(f"X Search topics found: {len(all_topics)}")
     print(f"X Search qualified topics: {len(topics)}")
     for topic in topics[:5]:
@@ -414,7 +482,8 @@ def fetch_all_items(include_x=True):
         try:
             if provider == "xai" and _env_bool("XAI_ENABLED", "true"):
                 all_items = apply_verified_attention(
-                    all_items, fetch_xai_radar(candidates=all_items))
+                    all_items, fetch_xai_radar(
+                        candidates=all_items, notify_discord=True))
             elif provider == "native_x" and _env_bool("X_NATIVE_SEARCH_ENABLED", "false") \
                     and _env_bool("X_SEARCH_ENABLED"):
                 all_items = match_topics_to_rss(all_items, fetch_x_search_topics(all_items))

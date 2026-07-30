@@ -515,6 +515,7 @@ DISCORD_NOTIFY_ERROR=true
 DISCORD_NOTIFY_RUN_LOG=true
 DISCORD_NOTIFY_SKIP=false
 DISCORD_NOTIFY_THREADS_RESEARCH=true
+DISCORD_NOTIFY_X_RESEARCH=true
 DISCORD_LOG_MODE=result_only
 ```
 
@@ -530,6 +531,15 @@ Threads公式API検索後の相対トレンド分析は、検索語、取得件�
 
 ```dotenv
 THREADS_DISCORD_RESEARCH_ENABLED=true
+```
+
+X API Recent SearchまたはxAI X Searchの実行後も、検索テーマ、取得件数、
+代表投稿または主な賛否、注目度・速度、RSS・公式情報との照合結果を
+1件のDiscord通知にまとめます。X上の情報だけで事実認定せず、
+同一スケジュール枠のキャッシュ再利用では再通知しません。
+
+```dotenv
+X_DISCORD_RESEARCH_ENABLED=true
 ```
 
 Send a manual connection test:
