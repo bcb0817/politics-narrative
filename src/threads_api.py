@@ -1088,7 +1088,7 @@ def _candidate_query(path: Path | None = None,
                     ((_now() - timedelta(hours=max(
                         settings()["topic_cooldown_hours"],
                         float(os.environ.get(
-                            "SEMANTIC_TOPIC_COOLDOWN_HOURS", "168")),
+                            "SEMANTIC_TOPIC_COOLDOWN_HOURS", "72")),
                     ))).isoformat(),),
                 )
             ]

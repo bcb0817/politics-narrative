@@ -2495,7 +2495,7 @@ def main():
             enriched["topic_key"], enriched.get("title", ""), recent_topics,
             now_jst, TOPIC_COOLDOWN_HOURS,
             semantic_cooldown_hours=_env_float(
-                "SEMANTIC_TOPIC_COOLDOWN_HOURS", 168.0),
+                "SEMANTIC_TOPIC_COOLDOWN_HOURS", 72.0),
         )
         # Silence rescue may relax quality thresholds, but never topic
         # duplication. Repeating the same policy is not a valid rescue post.

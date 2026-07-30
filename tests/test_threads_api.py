@@ -548,10 +548,10 @@ class ThreadsApiTests(unittest.TestCase):
                VALUES ('old-semantic','different-key',
                        '食料品の消費税を1%にする方針を解説',
                        'published',?,?)""",
-            ((now - timedelta(days=3)).isoformat(), now.isoformat()),
+            ((now - timedelta(days=2)).isoformat(), now.isoformat()),
             self.path)
         with patch.dict(os.environ, {
-            "SEMANTIC_TOPIC_COOLDOWN_HOURS": "168",
+            "SEMANTIC_TOPIC_COOLDOWN_HOURS": "72",
         }):
             self.assertEqual(
                 threads_api.generate(dry_run=True, path=self.path)["reason"],

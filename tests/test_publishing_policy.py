@@ -187,10 +187,10 @@ class PublishingPolicyTests(unittest.TestCase):
             normalize_topic_key("食品への消費税1％案を表明"),
         )
 
-    def test_semantic_policy_cooldown_is_seven_days(self):
+    def test_semantic_policy_cooldown_is_three_days(self):
         rows = [{
             "topic_key": "食料品消費税案",
-            "last_posted_at": (self.now - timedelta(hours=120)).isoformat(),
+            "last_posted_at": (self.now - timedelta(hours=48)).isoformat(),
             "news_title": "食料品の消費税を1%へ引き下げる方針",
         }]
         self.assertEqual(
@@ -200,10 +200,25 @@ class PublishingPolicyTests(unittest.TestCase):
                 rows,
                 self.now,
                 4,
-                semantic_cooldown_hours=168,
+                semantic_cooldown_hours=72,
             ),
             "semantic_topic_cooldown",
         )
+
+    def test_semantic_policy_cooldown_expires_after_three_days(self):
+        rows = [{
+            "topic_key": "food-consumption-tax",
+            "last_posted_at": (self.now - timedelta(hours=73)).isoformat(),
+            "news_title": "食料品の消費税を1%へ引き下げる方針",
+        }]
+        self.assertIsNone(topic_cooldown_skip_reason(
+            "another-headline",
+            "消費税1%について食料品の負担を説明",
+            rows,
+            self.now,
+            4,
+            semantic_cooldown_hours=72,
+        ))
 
     def test_material_status_change_can_bypass_semantic_cooldown(self):
         rows = [{
@@ -217,7 +232,7 @@ class PublishingPolicyTests(unittest.TestCase):
             rows,
             self.now,
             4,
-            semantic_cooldown_hours=168,
+            semantic_cooldown_hours=72,
         ))
         self.assertTrue(has_material_policy_update(
             "食料品の消費税1％法案が成立",
