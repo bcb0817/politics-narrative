@@ -3415,6 +3415,80 @@ def main() -> int:
     sub.add_parser(
         "crosspost-emergency-stop", help="クロス投稿を緊急停止")
 
+    # Integrated research -> short-video factory. Publishing is still blocked
+    # unless every Phase-D safety gate and explicit confirmation is satisfied.
+    sub.add_parser("short-video-status", help="Short動画工場の安全状態と件数を表示")
+    p_sv_candidates = sub.add_parser(
+        "short-video-candidates", help="統合リサーチから動画候補を採点")
+    p_sv_candidates.add_argument("--limit", type=int, default=20)
+    p_sv_candidates.add_argument("--dry-run", action="store_true")
+    p_sv_create = sub.add_parser(
+        "short-video-project-create", help="動画プロジェクトを重複なく作成")
+    p_sv_create.add_argument("--topic-id", type=int, required=True)
+    p_sv_create.add_argument("--angle", default="")
+    p_sv_create.add_argument("--force", action="store_true")
+    for command, help_text in (
+        ("short-video-script-generate", "45〜60秒台本を生成"),
+        ("short-video-script-check", "台本の根拠・数字・安全性を検査"),
+        ("short-video-audio-generate", "ローカルのモック音声を生成"),
+        ("short-video-caption-generate", "SRT/VTT字幕を生成"),
+        ("short-video-visual-plan", "縦型シーン画像と構成を生成"),
+        ("short-video-quality-check", "動画の最終品質ゲートを検査"),
+        ("short-video-platform-variants", "X・Threads等の派生情報を生成"),
+        ("short-video-publish-plan", "外部書込なしで公開計画を表示"),
+    ):
+        item = sub.add_parser(command, help=help_text)
+        item.add_argument("--video-id", required=True)
+    p_sv_render = sub.add_parser(
+        "short-video-render", help="FFmpegで1080x1920 MP4を生成")
+    p_sv_render.add_argument("--video-id", required=True)
+    p_sv_render.add_argument(
+        "--platform", choices=["all", "x", "threads", "youtube", "instagram"],
+        default="all")
+    p_sv_render.add_argument("--dry-run", action="store_true")
+    p_sv_queue = sub.add_parser(
+        "short-video-queue", help="冪等なX・Threads公開キューへ登録")
+    p_sv_queue.add_argument("--video-id", required=True)
+    p_sv_queue.add_argument(
+        "--platforms", nargs="+",
+        choices=["x", "threads", "youtube", "instagram"],
+        default=["x", "threads"])
+    p_sv_queue.add_argument("--scheduled-at", default="")
+    p_sv_publish = sub.add_parser(
+        "short-video-publish", help="全安全ゲート通過後だけ公式APIへ動画投稿")
+    p_sv_publish.add_argument("--video-id", required=True)
+    p_sv_publish.add_argument(
+        "--platform", choices=["x", "threads", "youtube", "instagram"],
+        required=True)
+    p_sv_publish.add_argument("--public-url", default="")
+    p_sv_publish.add_argument("--confirm", action="store_true")
+    p_sv_publish.add_argument("--live", action="store_true")
+    p_sv_metrics = sub.add_parser(
+        "short-video-metrics-sync", help="公開済み動画の計測対象を確認")
+    p_sv_metrics.add_argument("--video-id", default="")
+    p_sv_metrics.add_argument("--live", action="store_true")
+    p_sv_worker = sub.add_parser(
+        "short-video-queue-run",
+        help="期限到来済みの動画公開キューとメトリクス回収を処理")
+    p_sv_worker.add_argument("--limit", type=int, default=10)
+    p_sv_worker.add_argument("--live", action="store_true")
+    p_sv_scheduled = sub.add_parser(
+        "short-video-scheduled-run",
+        help="候補生成・レンダリング・公開キュー・メトリクスを定期処理")
+    p_sv_scheduled.add_argument("--live", action="store_true")
+    sub.add_parser(
+        "short-video-experiment-report", help="Short動画A/B実験を集計")
+    sub.add_parser("short-video-daily-report", help="Short動画の日次結果を集計")
+    sub.add_parser("short-video-weekly-report", help="Short動画の週次結果を集計")
+    p_sv_cycle = sub.add_parser(
+        "short-video-full-cycle", help="統合リサーチから公開計画まで一括dry-run")
+    p_sv_cycle.add_argument("--topic-id", type=int, required=True)
+    p_sv_cycle.add_argument("--dry-run", action="store_true")
+    sub.add_parser("short-video-emergency-stop", help="Short動画公開を緊急停止")
+    p_sv_resume = sub.add_parser(
+        "short-video-emergency-resume", help="明示確認付きで緊急停止を解除")
+    p_sv_resume.add_argument("--confirm", action="store_true")
+
     sub.add_parser(
         "instagram-auth-url", help="Instagram Login公式OAuth URLを生成")
     p_instagram_exchange = sub.add_parser(
@@ -3975,6 +4049,18 @@ def main() -> int:
             dry_run=args.dry_run)
     if args.command == "crosspost-emergency-stop":
         return _crosspost_output("emergency_stop")
+    if args.command.startswith("short-video-"):
+        load_env()
+        ensure_dirs()
+        from short_video_factory.cli import run as run_short_video
+        action = args.command.removeprefix("short-video-")
+        kwargs = vars(args).copy()
+        kwargs.pop("command", None)
+        if action == "publish":
+            kwargs["dry_run"] = not kwargs.pop("live")
+        elif action == "metrics-sync":
+            kwargs["dry_run"] = not kwargs.pop("live")
+        return run_short_video(action, **kwargs)
     if args.command == "instagram-auth-url":
         return _crosspost_output("instagram_auth_url")
     if args.command == "instagram-exchange-code":

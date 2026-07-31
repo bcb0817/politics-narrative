@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "master": {
+    "width": 1080,
+    "height": 1920,
+    "fps": 30,
+    "duration_seconds": 55,
+    "video_codec": "h264",
+    "audio_codec": "aac",
+    "audio_sample_rate": 48000
+  },
+  "candidate": {
+    "minimum_score": 7.0,
+    "minimum_source_families": 2,
+    "minimum_evidence": 2,
+    "minimum_confidence": 0.7
+  },
+  "publish": {
+    "initial_phase": "A",
+    "quality_minimum": 8.0,
+    "safety_minimum": 9.0,
+    "phase_d_minimum_samples": 30,
+    "phase_d_recent_safe_samples": 10,
+    "default_platforms": ["x", "threads"],
+    "auto_publish_default": false
+  }
+}

@@ -17,6 +17,13 @@ if (-not (Test-Path $Python)) {
 }
 
 Write-SupervisorLog "[情報] 監視処理を開始しました。"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File (
+    Join-Path $Root "production\short_video_media_start.ps1")
+if ($LASTEXITCODE -eq 0) {
+    Write-SupervisorLog "[情報] Short動画メディアサーバーを確認しました。"
+} else {
+    Write-SupervisorLog "[警告] Short動画メディアサーバーを開始できませんでした。"
+}
 while ($true) {
     try {
         & $Python (Join-Path $Root "local_bot.py") daemon

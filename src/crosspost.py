@@ -753,6 +753,17 @@ class InstagramClient:
         response.raise_for_status()
         return str(response.json().get("id") or "")
 
+    def insights(self, media_id: str) -> dict:
+        response = self.session.get(
+            self._url(f"{media_id}/insights"), params={
+                "metric": os.environ.get(
+                    "INSTAGRAM_REELS_METRICS",
+                    "views,likes,comments,shares,total_interactions"),
+                "access_token": self.token,
+            }, timeout=30)
+        response.raise_for_status()
+        return response.json()
+
 
 class YouTubeClient:
     """Official YouTube Data API resumable videos.insert workflow."""
@@ -813,6 +824,15 @@ class YouTubeClient:
         response = self.session.get(
             f"{self.api_url}/videos", params={
                 "part": "status,processingDetails", "id": video_id,
+            }, headers=self._headers(), timeout=30)
+        response.raise_for_status()
+        items = response.json().get("items") or []
+        return items[0] if items else {}
+
+    def metrics(self, video_id: str) -> dict:
+        response = self.session.get(
+            f"{self.api_url}/videos", params={
+                "part": "statistics,contentDetails,status", "id": video_id,
             }, headers=self._headers(), timeout=30)
         response.raise_for_status()
         items = response.json().get("items") or []
