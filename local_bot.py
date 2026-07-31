@@ -2266,6 +2266,10 @@ def cmd_status() -> int:
     print(f"attempted_slots.json : {len(attempted)} 件（トライ済みslot・catch-up基準）")
     print(f"posted_urls.json     : {len(history)} 件（投稿履歴）")
     print(f"POST_ENABLED         : {os.environ.get('POST_ENABLED', '(未設定→false扱い)')}")
+    print(
+        "AUTONOMOUS_POSTING_ENABLED: "
+        f"{os.environ.get('AUTONOMOUS_POSTING_ENABLED', '(未設定→true扱い)')}"
+    )
     print(f"X_SEARCH_ENABLED     : {os.environ.get('X_SEARCH_ENABLED', '(未設定→false扱い)')}")
     print(f"X_SEARCH_QUERY       : {os.environ.get('X_SEARCH_QUERY', '(未設定)')}")
     print(f"SOURCE_SCHEDULE_SPLIT: {os.environ.get('SOURCE_SCHEDULE_SPLIT', '(未設定→true扱い)')}")

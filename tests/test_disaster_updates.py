@@ -488,6 +488,8 @@ class DisasterUpdatesTest(unittest.TestCase):
         disaster.approve_candidate(
             result["snapshot_id"], "x", decision="rejected", path=self.db)
         with patch.dict(os.environ, {
+            "AUTONOMOUS_POSTING_ENABLED": "false",
+            "KUMAMOTO_DISASTER_HUMAN_APPROVAL_REQUIRED": "true",
             "KUMAMOTO_DISASTER_PHASE": "B",
             "KUMAMOTO_DISASTER_PUBLISH_ENABLED": "true",
             "KUMAMOTO_DISASTER_X_POST_ENABLED": "true",

@@ -522,8 +522,12 @@ class ThreadsFullApiTests(unittest.TestCase):
 
     def test_95_action_without_confirm_is_blocked(self):
         draft = full.reply_draft("r1", path=self.path)
-        result = full.apply_action(
-            draft["draft_id"], client=self.client, path=self.path)
+        with patch.dict(os.environ, {
+            "AUTONOMOUS_POSTING_ENABLED": "false",
+            "THREADS_REQUIRE_APPROVAL_FOR_REPLY": "true",
+        }):
+            result = full.apply_action(
+                draft["draft_id"], client=self.client, path=self.path)
         self.assertEqual(result["reason"], "confirm_required")
 
     def test_96_confirm_still_requires_feature_flag(self):
@@ -542,6 +546,19 @@ class ThreadsFullApiTests(unittest.TestCase):
             result = full.apply_action(
                 draft["draft_id"], confirm=True,
                 client=self.client, path=self.path)
+        self.assertEqual((result["status"], result["external_writes"]),
+                         ("success", 2))
+
+    def test_97b_autonomous_mode_does_not_require_human_confirm(self):
+        draft = full.reply_draft("r1", path=self.path)
+        with patch.dict(os.environ, {
+            "AUTONOMOUS_POSTING_ENABLED": "true",
+            "THREADS_POST_ENABLED": "true",
+            "THREADS_AUTO_REPLY_ENABLED": "true",
+            "THREADS_REQUIRE_APPROVAL_FOR_REPLY": "false",
+        }):
+            result = full.apply_action(
+                draft["draft_id"], client=self.client, path=self.path)
         self.assertEqual((result["status"], result["external_writes"]),
                          ("success", 2))
 

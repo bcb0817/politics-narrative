@@ -1,8 +1,8 @@
-"""Read-first Threads analytics and human-approved official API actions.
+"""Read-first Threads analytics and autonomous official API actions.
 
 Only Meta's graph.threads.net API is used.  Read/sync operations may be
-scheduled; every external write requires both an opt-in environment flag and
-an explicit ``confirm=True`` call.
+scheduled.  External writes always require an action-specific opt-in flag.
+Interactive confirmation is required only when autonomous posting is disabled.
 """
 
 from __future__ import annotations
@@ -1445,7 +1445,12 @@ def apply_action(draft_id: int, *, confirm: bool = False,
                  path: Path | None = None) -> dict:
     draft = _load_action_draft(draft_id, path)
     action = str(draft["action_type"])
-    if not confirm:
+    autonomous = _bool("AUTONOMOUS_POSTING_ENABLED", "true")
+    approval_required = (
+        _bool(ACTION_APPROVAL_ENV.get(action, ""), "false")
+        and not autonomous
+    )
+    if approval_required and not confirm:
         return {"status": "blocked", "reason": "confirm_required",
                 "external_writes": 0}
     if draft["status"] != "pending":
@@ -1456,9 +1461,6 @@ def apply_action(draft_id: int, *, confirm: bool = False,
                 "external_writes": 0}
     if not _bool(ACTION_ENV.get(action, ""), "false"):
         return {"status": "blocked", "reason": "action_disabled",
-                "external_writes": 0}
-    if not _bool(ACTION_APPROVAL_ENV.get(action, ""), "true"):
-        return {"status": "blocked", "reason": "approval_policy_invalid",
                 "external_writes": 0}
     if not _quota_allows_write(path):
         return {"status": "blocked", "reason": "quota_safety_stop",
@@ -1527,7 +1529,9 @@ def apply_action(draft_id: int, *, confirm: bool = False,
           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""", (
             draft_id, action, draft["target_id"], "success",
             str(result.get("id") or result.get("deleted_id") or ""),
-            0, now, now, now, "human_confirmed_official_api",
+            0, now, now, now,
+            "autonomous_official_api" if autonomous
+            else "human_confirmed_official_api",
             base_settings()["api_version"], _hash_payload(result),
         ), path)
         return {
@@ -1544,7 +1548,9 @@ def apply_action(draft_id: int, *, confirm: bool = False,
           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""", (
             draft_id, action, draft["target_id"],
             "ambiguous" if ambiguous else "failed", type(exc).__name__,
-            int(ambiguous), now, now, now, "human_confirmed_official_api",
+            int(ambiguous), now, now, now,
+            "autonomous_official_api" if autonomous
+            else "human_confirmed_official_api",
             base_settings()["api_version"], "",
         ), path)
         return {

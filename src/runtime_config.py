@@ -29,6 +29,13 @@ class ConfigSpec:
 
 
 SPECS = (
+    ConfigSpec(
+        "AUTONOMOUS_POSTING_ENABLED",
+        True,
+        bool,
+        "external publishing pipelines",
+        "品質・安全・重複・予算ゲート通過後は人間承認なしで投稿",
+    ),
     ConfigSpec("POST_ENABLED", False, bool, "src/post.py", "Phase Aでは現行値を維持"),
     ConfigSpec("THREADS_POST_ENABLED", False, bool, "src/threads_api.py", "定期公開の唯一の書込スイッチ"),
     ConfigSpec(

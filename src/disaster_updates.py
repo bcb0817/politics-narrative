@@ -180,6 +180,7 @@ def _bool(name: str, default: str) -> bool:
 
 
 def settings() -> dict[str, Any]:
+    autonomous_posting = _bool("AUTONOMOUS_POSTING_ENABLED", "true")
     return {
         "enabled": _bool("KUMAMOTO_DISASTER_UPDATES_ENABLED", "true"),
         "phase": os.environ.get("KUMAMOTO_DISASTER_PHASE", "A").strip().upper(),
@@ -192,8 +193,11 @@ def settings() -> dict[str, Any]:
             "KUMAMOTO_DISASTER_X_POST_ENABLED", "false"),
         "threads_post_enabled": _bool(
             "KUMAMOTO_DISASTER_THREADS_POST_ENABLED", "false"),
-        "human_approval_required": _bool(
-            "KUMAMOTO_DISASTER_HUMAN_APPROVAL_REQUIRED", "true"),
+        "autonomous_posting": autonomous_posting,
+        "human_approval_required": (
+            False if autonomous_posting else _bool(
+                "KUMAMOTO_DISASTER_HUMAN_APPROVAL_REQUIRED", "false")
+        ),
         "verified_only": _bool(
             "KUMAMOTO_DISASTER_AUTO_PUBLISH_VERIFIED_ONLY", "true"),
         "closure_summary_enabled": _bool(
@@ -1850,6 +1854,7 @@ def status(incident_id: str = INCIDENT_ID,
     return {
         "incident_id": incident_id, "enabled": cfg["enabled"],
         "phase": cfg["phase"], "auto_post_enabled": cfg["auto_post"],
+        "autonomous_posting": cfg["autonomous_posting"],
         "publish_enabled": cfg["publish_enabled"],
         "x_post_enabled": cfg["x_post_enabled"],
         "threads_post_enabled": cfg["threads_post_enabled"],

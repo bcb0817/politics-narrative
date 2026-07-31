@@ -9,6 +9,7 @@ if (-not (Test-Path -LiteralPath $EnvPath)) {
 }
 
 $Required = [ordered]@{
+    AUTONOMOUS_POSTING_ENABLED = "true"
     KUMAMOTO_DISASTER_UPDATES_ENABLED = "true"
     KUMAMOTO_DISASTER_PHASE = "C"
     KUMAMOTO_DISASTER_PUBLISH_ENABLED = "true"
@@ -17,6 +18,7 @@ $Required = [ordered]@{
     KUMAMOTO_DISASTER_THREADS_ENABLED = "true"
     KUMAMOTO_DISASTER_X_POST_ENABLED = "true"
     KUMAMOTO_DISASTER_THREADS_POST_ENABLED = "true"
+    KUMAMOTO_DISASTER_HUMAN_APPROVAL_REQUIRED = "false"
     KUMAMOTO_DISASTER_AUTO_PUBLISH_VERIFIED_ONLY = "true"
     KUMAMOTO_DISASTER_CORRECTION_ENABLED = "true"
     KUMAMOTO_DISASTER_CORRECTION_AUTO_POST = "true"
@@ -48,7 +50,7 @@ foreach ($Entry in $Required.GetEnumerator()) {
 }
 
 if ($Changed.Count -gt 0 -and $PSCmdlet.ShouldProcess(
-        $EnvPath, "Enable verified Kumamoto disaster production gates")) {
+        $EnvPath, "Enable autonomous verified Kumamoto disaster publishing")) {
     $Encoding = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllLines($EnvPath, $Lines, $Encoding)
 }
