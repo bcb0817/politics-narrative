@@ -147,6 +147,76 @@ def notify(
         return False
 
 
+def _notify_embed_report(
+    event: str,
+    embeds: list[dict[str, Any]],
+    *,
+    attachment_name: str = "",
+    attachment_text: str = "",
+    force: bool = False,
+    timeout: float | None = None,
+) -> bool:
+    """Send a readable multi-embed report with an optional Markdown detail."""
+    if not force and (not _enabled() or not _event_enabled(event)):
+        return False
+    webhook_url = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
+    if not webhook_url or not embeds:
+        return False
+
+    safe_embeds = []
+    for source in embeds[:10]:
+        embed = {
+            "title": _clean(source.get("title"), 256),
+            "description": _clean(source.get("description"), 3900),
+            "color": source.get("color", _COLORS["info"]),
+        }
+        fields = []
+        for field in (source.get("fields") or [])[:25]:
+            if not isinstance(field, dict):
+                continue
+            fields.append({
+                "name": _clean(field.get("name"), 256),
+                "value": _clean(field.get("value"), 1000) or "-",
+                "inline": bool(field.get("inline", False)),
+            })
+        if fields:
+            embed["fields"] = fields
+        safe_embeds.append(embed)
+    safe_embeds[-1]["timestamp"] = datetime.now(JST).isoformat()
+    safe_embeds[-1]["footer"] = {
+        "text": "久世ゆい・X Searchリサーチ"
+    }
+    payload = {
+        "username": os.environ.get(
+            "DISCORD_WEBHOOK_USERNAME", "久世ゆい Bot"),
+        "allowed_mentions": {"parse": []},
+        "embeds": safe_embeds,
+    }
+    try:
+        request_kwargs: dict[str, Any] = {
+            "timeout": timeout or float(os.environ.get(
+                "DISCORD_WEBHOOK_TIMEOUT_SECONDS", "10")),
+        }
+        safe_attachment = sanitize(attachment_text)
+        if attachment_name and safe_attachment:
+            request_kwargs["data"] = {
+                "payload_json": json.dumps(payload, ensure_ascii=False)
+            }
+            request_kwargs["files"] = {
+                "files[0]": (
+                    _clean(attachment_name, 120),
+                    safe_attachment.encode("utf-8"),
+                    "text/markdown; charset=utf-8",
+                )
+            }
+        else:
+            request_kwargs["json"] = payload
+        response = requests.post(webhook_url, **request_kwargs)
+        return 200 <= response.status_code < 300
+    except (requests.RequestException, ValueError):
+        return False
+
+
 def notify_note_draft_ready(draft: dict[str, Any], *, test: bool = False) -> bool:
     """Send a note-draft notification to its dedicated Discord channel."""
     enabled = os.environ.get(
@@ -311,7 +381,7 @@ def notify_threads_research(report: dict[str, Any], *,
 
 def notify_x_research(report: dict[str, Any], *,
                       dry_run: bool = False) -> bool:
-    """Send one bounded X Search research and analysis summary."""
+    """Send a scan-friendly X Search report plus a full Markdown attachment."""
     if dry_run:
         return False
 
@@ -319,101 +389,172 @@ def notify_x_research(report: dict[str, Any], *,
     queries = list(dict.fromkeys(
         _clean(value, 80) for value in (report.get("queries") or []) if value
     ))[:8]
-    representatives = report.get("representative_posts") or []
-    content_lines = []
-    for index, row in enumerate(representatives[:3], 1):
-        if not isinstance(row, dict):
-            continue
-        text = _clean(row.get("text"), 220)
-        post_id = re.sub(r"\D", "", str(row.get("post_id") or ""))
-        if text:
-            content_lines.append(f"{index}. {text}")
-        if post_id:
-            content_lines.append(f"https://x.com/i/web/status/{post_id}")
-
-    topics = report.get("topics") or []
-    analysis_lines = []
-    claim_lines = []
-    for row in topics[:5]:
-        if not isinstance(row, dict):
-            continue
-        key = _clean(row.get("topic_key"), 80)
-        attention = row.get("attention_score")
-        velocity = row.get("velocity_score")
-        posts = int(row.get("post_count") or 0)
-        accounts = int(row.get("unique_accounts") or 0)
-        verified = (
-            "RSS・公式情報と照合あり"
-            if row.get("externally_corroborated")
-            else "X内の未検証シグナル"
-        )
-        details = [f"注目度 {attention}", f"速度 {velocity}"]
-        if posts:
-            details.append(f"{posts}投稿")
-        if accounts:
-            details.append(f"{accounts}アカウント")
-        analysis_lines.append(
-            f"• **{key}**: {' / '.join(details)} / {verified}"
-        )
-        main_claims = [
-            _clean(value, 150) for value in (row.get("main_claims") or [])
-            if value
-        ][:2]
-        counter_claims = [
-            _clean(value, 150) for value in (row.get("counter_claims") or [])
-            if value
-        ][:2]
-        if main_claims:
-            claim_lines.append(
-                f"• **{key}・主な見方:** {' / '.join(main_claims)}")
-        if counter_claims:
-            claim_lines.append(
-                f"• **{key}・異なる見方:** {' / '.join(counter_claims)}")
-        for post_id in (row.get("representative_post_ids") or [])[:2]:
-            digits = re.sub(r"\D", "", str(post_id or ""))
-            if digits:
-                content_lines.append(
-                    f"https://x.com/i/web/status/{digits}")
+    topics = sorted(
+        (row for row in (report.get("topics") or [])
+         if isinstance(row, dict)),
+        key=lambda row: (
+            float(row.get("attention_score") or 0),
+            float(row.get("velocity_score") or 0),
+        ),
+        reverse=True,
+    )
 
     corroborated = int(report.get("corroborated_topic_count") or 0)
     query_count = int(report.get("query_count") or len(queries))
     resource_count = int(report.get("resource_count") or 0)
     topic_count = int(report.get("topic_count") or len(topics))
-    return notify(
-        "x_research",
-        "🔎 X Searchリサーチ・分析結果",
-        (
-            f"{provider}で取得した公開情報を注目度レーダーとして分析しました。"
-            "X上の反応だけを事実認定や投稿根拠には使用しません。"
+    lookback = int(report.get("lookback_minutes") or 360)
+    if corroborated:
+        conclusion = (
+            f"**今回の結論：公式情報と照合できた話題が{corroborated}件あります。**\n"
+            "投稿候補にする場合は、下記の根拠と反対意見を確認します。"
+        )
+    else:
+        conclusion = (
+            "**今回の結論：現時点で、そのまま投稿根拠にできる話題はありません。**\n"
+            "X上の反応は注目テーマの発見だけに使用します。"
+        )
+    color = _COLORS["success"] if corroborated else _COLORS["info"]
+    embeds: list[dict[str, Any]] = [{
+        "title": "🔎 X Search リサーチレポート",
+        "description": (
+            f"{conclusion}\n\n"
+            f"調査元：{provider}\n"
+            f"対象期間：直近{lookback}分\n"
+            f"検索テーマ：{', '.join(queries) or '候補ニュース連動'}"
         ),
-        level="success" if corroborated else "info",
-        fields={
-            "検索条件": (
-                f"対象: 直近{int(report.get('lookback_minutes') or 360)}分\n"
-                f"検索テーマ: {', '.join(queries) or '候補ニュース連動'}"
-            ),
-            "取得結果": (
-                f"検索実行: {query_count}件\n"
-                f"取得・検索呼出: {resource_count}件\n"
-                f"分析対象トピック: {topic_count}件"
-            ),
-            "リサーチ内容": (
-                "\n".join((claim_lines + content_lines)[:8])
-                or "該当する公開投稿・主張はありませんでした。"
-            ),
-            "分析結果": (
-                "\n".join(analysis_lines)
-                or "比較可能な注目度標本が不足しています。"
-            ),
-            "投稿判断": (
-                f"RSS・公式情報との照合あり: {corroborated}件\n"
-                "未照合のX情報は投稿候補に採用しません。"
-            ),
-            "注意点": (
-                "取得結果はX全体の順位ではなく、指定テーマで"
-                "収集できた範囲の相対的な注目度分析です。"
-            ),
-        },
+        "color": color,
+        "fields": [
+            {"name": "検索", "value": f"**{query_count}** 回",
+             "inline": True},
+            {"name": "分析対象", "value": f"**{topic_count}** 件",
+             "inline": True},
+            {"name": "公式照合済み", "value": f"**{corroborated}** 件",
+             "inline": True},
+        ],
+    }]
+
+    number_icons = ("1️⃣", "2️⃣", "3️⃣", "4️⃣")
+    for index, row in enumerate(topics[:4]):
+        key = _clean(row.get("topic_key"), 110) or "名称未設定"
+        main_claims = [
+            _clean(value, 210) for value in (row.get("main_claims") or [])
+            if value
+        ][:2]
+        counter_claims = [
+            _clean(value, 210)
+            for value in (row.get("counter_claims") or [])
+            if value
+        ][:2]
+        links = []
+        for post_id in (row.get("representative_post_ids") or [])[:3]:
+            digits = re.sub(r"\D", "", str(post_id or ""))
+            if digits:
+                links.append(
+                    f"[X投稿を確認]("
+                    f"https://x.com/i/web/status/{digits})")
+        verified = bool(row.get("externally_corroborated"))
+        description_parts = [
+            "**主な見方**\n" + (
+                "\n".join(f"• {claim}" for claim in main_claims)
+                if main_claims else "• 明確な主張を抽出できませんでした。"),
+            "**反対・補足の見方**\n" + (
+                "\n".join(f"• {claim}" for claim in counter_claims)
+                if counter_claims else "• 比較できる反対意見が不足しています。"),
+        ]
+        embeds.append({
+            "title": f"{number_icons[index]} {key}",
+            "description": "\n\n".join(description_parts),
+            "color": _COLORS["success"] if verified else _COLORS["warning"],
+            "fields": [
+                {"name": "注目度",
+                 "value": f"{row.get('attention_score', 0)}点",
+                 "inline": True},
+                {"name": "拡散速度",
+                 "value": f"{row.get('velocity_score', 0)}点",
+                 "inline": True},
+                {"name": "確認状態",
+                 "value": "✅ 公式・報道照合あり"
+                 if verified else "⚠️ X内のみ・未検証",
+                 "inline": True},
+                {"name": "根拠リンク",
+                 "value": " ｜ ".join(links) if links else "代表投稿なし",
+                 "inline": False},
+            ],
+        })
+
+    embeds.append({
+        "title": "🧭 Botの投稿判断",
+        "description": (
+            f"✅ 公式情報と照合できた話題：**{corroborated}件**\n"
+            "⛔ 未照合のX情報：投稿の事実根拠には使用しません\n"
+            "📌 X Searchの役割：世論全体の順位ではなく、"
+            "指定テーマ内の注目論点を見つけること"
+        ),
+        "color": color,
+        "fields": [{
+            "name": "データ量",
+            "value": f"検索・取得呼び出し：{resource_count}件",
+            "inline": False,
+        }],
+    })
+
+    markdown = [
+        "# X Search リサーチ・分析結果",
+        "",
+        f"- 調査元: {provider}",
+        f"- 対象期間: 直近{lookback}分",
+        f"- 検索テーマ: {', '.join(queries) or '候補ニュース連動'}",
+        f"- 分析対象: {topic_count}件",
+        f"- 公式・報道照合済み: {corroborated}件",
+        "",
+        "## トピック詳細",
+    ]
+    for index, row in enumerate(topics, 1):
+        markdown.extend([
+            "",
+            f"### {index}. {_clean(row.get('topic_key'), 180)}",
+            "",
+            f"- 注目度: {row.get('attention_score', 0)}",
+            f"- 拡散速度: {row.get('velocity_score', 0)}",
+            "- 確認状態: " + (
+                "公式・報道照合あり"
+                if row.get("externally_corroborated")
+                else "X内のみ・未検証"),
+            "",
+            "#### 主な見方",
+        ])
+        markdown.extend(
+            f"- {_clean(value, 500)}"
+            for value in (row.get("main_claims") or [])
+            if value)
+        markdown.extend(["", "#### 反対・補足の見方"])
+        markdown.extend(
+            f"- {_clean(value, 500)}"
+            for value in (row.get("counter_claims") or [])
+            if value)
+        post_ids = [
+            re.sub(r"\D", "", str(value or ""))
+            for value in (row.get("representative_post_ids") or [])
+        ]
+        post_ids = [value for value in post_ids if value]
+        if post_ids:
+            markdown.extend(["", "#### 代表投稿"])
+            markdown.extend(
+                f"- https://x.com/i/web/status/{post_id}"
+                for post_id in post_ids[:5])
+    markdown.extend([
+        "",
+        "## 注意",
+        "",
+        "X Searchの結果は、指定テーマで取得できた範囲の相対分析です。",
+        "未照合のX情報だけを事実認定や投稿根拠には使用しません。",
+    ])
+    return _notify_embed_report(
+        "x_research",
+        embeds,
+        attachment_name="x-search-research-report.md",
+        attachment_text="\n".join(markdown),
     )
 
 

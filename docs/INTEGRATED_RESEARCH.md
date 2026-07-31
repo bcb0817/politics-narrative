@@ -103,7 +103,15 @@ INTEGRATED_RESEARCH_BACKFILL_AUTO=false
 
 ## 可視化と再利用
 
-- Discordには内部プロンプトやトークンを含めず、分析件数・候補件数・主要テーマだけ通知する。
+- X SearchのDiscord通知は、次の順序で表示する。
+  1. 今回の結論
+  2. 検索回数・分析対象・公式照合済み件数
+  3. 注目度順のトピックカード
+  4. 主な見方・反対または補足の見方・代表X投稿
+  5. Botの投稿判断
+- Discordで一覧性を優先し、上位4トピックをカード表示する。
+  全トピックは`x-search-research-report.md`として同じ通知へ添付する。
+- Discordには内部プロンプト、トークン、APIキー、内部ユーザー識別子を含めない。
 - 日次レビューには統合テーマ、判断理由、平均信頼度、平均投稿価値、成果指標を追加する。
 - JSON、CSV、Markdownは `outputs/integrated_research/` に保存する。
 - HTMLダッシュボードはローカル専用で、GitHubには保存しない。

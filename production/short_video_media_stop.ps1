@@ -5,10 +5,16 @@ if (-not (Test-Path -LiteralPath $pidPath)) {
     Write-Host "Short-video media server is already stopped."
     exit 0
 }
-$serverPid = [int](Get-Content -LiteralPath $pidPath -Raw)
-$running = Get-Process -Id $serverPid -ErrorAction SilentlyContinue
-if ($running) {
-    Stop-Process -Id $serverPid
-    Write-Host "Stopped short-video media server PID=$serverPid"
+$pidText = (Get-Content -LiteralPath $pidPath -Raw).Trim()
+$parsedPid = 0
+if (-not [int]::TryParse($pidText, [ref]$parsedPid) -or $parsedPid -le 0) {
+    Write-Warning "Invalid short-video media server PID file. Removing it."
+    Remove-Item -LiteralPath $pidPath -Force
+    exit 0
+}
+$running = Get-Process -Id $parsedPid -ErrorAction SilentlyContinue
+if ($null -ne $running) {
+    $running | Stop-Process -Force
+    Write-Host "Stopped short-video media server PID=$parsedPid"
 }
 Remove-Item -LiteralPath $pidPath -Force
