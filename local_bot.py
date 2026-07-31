@@ -280,6 +280,16 @@ def next_auxiliary_event(now: datetime) -> tuple[datetime, str]:
             if value > now:
                 candidates.append((value, "follower_snapshot"))
                 break
+    if env_flag("X_RESEARCH_ANALYSIS_ENABLED", "false"):
+        for clock in _parse_clock_list(os.environ.get(
+            "X_RESEARCH_ANALYSIS_SCHEDULE", "12:25,18:25")):
+            for day_offset in (0, 1):
+                value = (now + timedelta(days=day_offset)).replace(
+                    hour=clock.hour, minute=clock.minute,
+                    second=0, microsecond=0)
+                if value > now:
+                    candidates.append((value, "x_research_analysis"))
+                    break
     if os.environ.get(
         "STORAGE_CLEANUP_ENABLED", "true"
     ).strip().lower() in {"1", "true", "yes", "on"}:
@@ -335,6 +345,18 @@ def _run_auxiliary_event(event_name: str, scheduled_at: datetime) -> None:
             cmd_batch_collect()
         elif event_name == "storage_cleanup":
             cmd_storage_cleanup(apply=True)
+        elif event_name == "x_research_analysis":
+            if str(SRC_DIR) not in sys.path:
+                sys.path.insert(0, str(SRC_DIR))
+            from x_research_analysis import publish
+            result = publish(
+                automatic=True, dry_run=False,
+                path=ROOT_DIR / "data" / "bot_metrics.db")
+            log(
+                "[INFO] X research analysis: "
+                f"status={result.get('status')} "
+                f"reason={result.get('reason', '')} "
+                f"external_writes={result.get('external_writes', 0)}")
     finally:
         state[event_key] = datetime.now(JST).isoformat()
         state = dict(list(state.items())[-100:])
@@ -3070,6 +3092,17 @@ def main() -> int:
         "xai-live-validation", help="Phase B bounded live xAI API validation")
     p_xai_live.add_argument("--runs", type=int, choices=[1, 2], default=2)
     p_xai_live.add_argument("--confirm", action="store_true")
+    sub.add_parser(
+        "x-research-analysis-status",
+        help="X Search分析投稿の設定・投稿状態を表示")
+    sub.add_parser(
+        "x-research-analysis-preview",
+        help="公式照合済みX Search分析の長文投稿をプレビュー")
+    p_x_research_publish = sub.add_parser(
+        "x-research-analysis-publish",
+        help="X Search分析をPremium長文またはスレッドで投稿")
+    p_x_research_publish.add_argument("--confirm", action="store_true")
+    p_x_research_publish.add_argument("--live", action="store_true")
     sub.add_parser("openai-usage-breakdown", help="OpenAI使用量をtask_type別に表示")
     sub.add_parser("db-status", help="SQLiteテーブル件数を表示")
     sub.add_parser("engagement-queue", help="人間承認用の引用・返信候補を保存（X送信なし）")
@@ -3733,6 +3766,31 @@ def main() -> int:
             "optimize", days=args.days, apply=args.apply)
     if args.command == "xai-live-validation":
         return cmd_xai_live_validation(args.runs, args.confirm)
+    if args.command.startswith("x-research-analysis-"):
+        load_env()
+        ensure_dirs()
+        if str(SRC_DIR) not in sys.path:
+            sys.path.insert(0, str(SRC_DIR))
+        from x_research_analysis import (
+            prepare as prepare_x_research_analysis,
+            publish as publish_x_research_analysis,
+            status as x_research_analysis_status,
+        )
+        analysis_db = ROOT_DIR / "data" / "bot_metrics.db"
+        if args.command == "x-research-analysis-status":
+            result = x_research_analysis_status(analysis_db)
+        elif args.command == "x-research-analysis-preview":
+            result = prepare_x_research_analysis(
+                analysis_db, ignore_timing=True)
+            result["external_writes"] = 0
+        else:
+            result = publish_x_research_analysis(
+                confirm=args.confirm,
+                dry_run=not args.live,
+                path=analysis_db)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result.get("status") not in {
+            "failed", "partial", "unknown"} else 1
     if args.command == "openai-usage-breakdown":
         return cmd_openai_usage_breakdown()
     if args.command == "db-status":

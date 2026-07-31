@@ -44,6 +44,31 @@ Threads Search・Insightsを反応シグナルとして統合する。
 
 統合処理は投稿枠を追加しない。通常投稿上限の内数として扱う。
 
+## X Search分析の長文投稿 🧵
+
+公式資料・報道と照合できたX Search分析は、通常ニュース投稿とは別の
+「定点リサーチ投稿」としてXへ公開できる。
+
+- 投稿時刻は12:25、18:25 JST
+- 1日最大2回
+- 最後のX投稿から180分以上空ける
+- 同じ統合リサーチ実行は1回だけ
+- 信頼度0.65以上、根拠2件以上、投稿価値6点以上
+- 一次資料が保存されているテーマだけを使用
+- X上の主張は「反応・意見」と明記し、確認済み事実と分離
+- 同一内容は72時間再投稿しない
+- X API予算と1日のPost Create上限を共通で消費
+
+Premium長文を最初に1回試し、APIが明確に長文を拒否した場合だけ、
+最大8投稿の番号付きスレッドへ切り替える。通信エラーのように投稿成否が
+不明な場合は、重複防止のため自動再投稿しない。
+
+```powershell
+.\.venv\Scripts\python.exe .\local_bot.py x-research-analysis-status
+.\.venv\Scripts\python.exe .\local_bot.py x-research-analysis-preview
+.\.venv\Scripts\python.exe .\local_bot.py x-research-analysis-publish --live --confirm
+```
+
 ## 投稿ゲート
 
 既定値:
