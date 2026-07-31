@@ -31,6 +31,7 @@ class CleanupItem:
 
 POLICIES = (
     ("data/politics_analysis_cache", "STORAGE_POLITICS_CACHE_DAYS", 2),
+    ("data/politics_candidate_cache", "STORAGE_POLITICS_CACHE_DAYS", 2),
     ("data/article_content_cache", "STORAGE_ARTICLE_CACHE_DAYS", 2),
     ("data/x_search_history", "STORAGE_SEARCH_HISTORY_DAYS", 45),
     ("data/xai_search_history", "STORAGE_SEARCH_HISTORY_DAYS", 45),

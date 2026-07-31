@@ -67,6 +67,13 @@ class StorageCleanupTests(unittest.TestCase):
         self.assertTrue(recent.exists())
         self.assertEqual(result["deleted_files"], 1)
 
+    def test_expired_candidate_cache_is_deleted(self):
+        old = self.make_file(
+            "data/politics_candidate_cache/old.json", age_days=3)
+        result = run_cleanup(self.root, dry_run=False, now=self.now)
+        self.assertFalse(old.exists())
+        self.assertEqual(result["deleted_files"], 1)
+
     def test_state_database_and_backups_are_never_deleted(self):
         protected = [
             self.make_file("data/bot_metrics.db", age_days=400),

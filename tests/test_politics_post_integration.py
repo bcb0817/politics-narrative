@@ -1,5 +1,6 @@
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -59,7 +60,7 @@ class PoliticsPostIntegrationTests(unittest.TestCase):
         self.assertEqual(result[0]["tweet_text"], "legacy")
         legacy.assert_called_once()
 
-    def test_api_limit_skips_without_legacy_overrun(self):
+    def test_api_limit_preserves_one_call_for_legacy_fallback(self):
         def consumes_budget(news, history, **kwargs):
             budget = kwargs["call_budget"]
             budget["count"] = budget["max"]
@@ -69,14 +70,32 @@ class PoliticsPostIntegrationTests(unittest.TestCase):
             "POLITICS_ENABLE_MULTI_STAGE_GENERATION": "true",
             "POLITICS_FALLBACK_TO_LEGACY": "true",
             "POLITICS_MAX_API_CALLS_PER_ARTICLE": "2",
+            "POLITICS_LEGACY_FALLBACK_RESERVE_CALLS": "1",
         }, clear=False), patch.object(
             post, "_multistage_candidate", side_effect=consumes_budget
         ), patch.object(
             post, "_generate_candidates_legacy",
+            return_value=[{"tweet_text": "legacy"}],
         ) as legacy, patch.object(post, "load_post_history", return_value=[]):
             result = post.generate_candidates(self.news)
-        self.assertEqual(result, [])
-        legacy.assert_not_called()
+        self.assertEqual(result[0]["tweet_text"], "legacy")
+        legacy.assert_called_once()
+
+    def test_candidate_cache_reuses_only_matching_article_content(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.object(
+            post, "STATE_DIR", Path(temp_dir)
+        ), patch.dict(os.environ, {
+            "POLITICS_CANDIDATE_CACHE_ENABLED": "true",
+            "POLITICS_CANDIDATE_CACHE_TTL_HOURS": "4",
+        }, clear=False):
+            candidate = {"tweet_text": "cached", "overall": 8}
+            post._save_cached_candidates(self.news, [candidate])
+            self.assertEqual(
+                post._load_cached_candidates(self.news)[0]["tweet_text"],
+                "cached",
+            )
+            changed = dict(self.news, summary="updated source content")
+            self.assertEqual(post._load_cached_candidates(changed), [])
 
 
 if __name__ == "__main__":

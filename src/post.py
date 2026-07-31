@@ -31,6 +31,7 @@ import sys
 import json
 import re
 import shutil
+import hashlib
 from difflib import SequenceMatcher
 from pathlib import Path
 from datetime import datetime, time, timedelta
@@ -1468,6 +1469,62 @@ def _candidate_quality_violations(candidate: dict, news_item: dict) -> list[str]
 
 
 LAST_GENERATION_FAILURE_REASON = ""
+LAST_GENERATION_API_CALLS = 0
+
+
+def _candidate_cache_path(news_item: dict) -> Path:
+    """Return a content-addressed cache path for an unpublished candidate."""
+    identity = "|".join((
+        str(news_item.get("url") or ""),
+        str(news_item.get("title") or ""),
+        str(news_item.get("pub_date") or ""),
+        str(news_item.get("summary") or ""),
+        os.environ.get("PROMPT_VERSION", "x-growth-quality-v2"),
+    ))
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    return STATE_DIR / "politics_candidate_cache" / f"{digest}.json"
+
+
+def _load_cached_candidates(news_item: dict) -> list[dict]:
+    if not _env_bool("POLITICS_CANDIDATE_CACHE_ENABLED", "true"):
+        return []
+    path = _candidate_cache_path(news_item)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        created_at = datetime.fromisoformat(str(payload.get("created_at") or ""))
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=JST)
+        ttl_hours = max(
+            0.25, _env_float("POLITICS_CANDIDATE_CACHE_TTL_HOURS", 4.0))
+        if datetime.now(JST) - created_at > timedelta(hours=ttl_hours):
+            return []
+        candidates = payload.get("candidates") or []
+        if not isinstance(candidates, list):
+            return []
+        return [row for row in candidates if isinstance(row, dict)]
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return []
+
+
+def _save_cached_candidates(news_item: dict, candidates: list[dict]) -> None:
+    if (
+        not candidates
+        or not _env_bool("POLITICS_CANDIDATE_CACHE_ENABLED", "true")
+    ):
+        return
+    path = _candidate_cache_path(news_item)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _save_json(path, {
+        "created_at": datetime.now(JST).isoformat(),
+        "source_url": str(news_item.get("url") or ""),
+        "candidates": candidates,
+    })
+
+
+def _reset_generation_diagnostics() -> None:
+    global LAST_GENERATION_FAILURE_REASON, LAST_GENERATION_API_CALLS
+    LAST_GENERATION_FAILURE_REASON = ""
+    LAST_GENERATION_API_CALLS = 0
 
 
 def _generate_candidates_legacy(news_item: dict, regeneration_attempt: int = 0, retries_used: int = 0) -> list:
@@ -1969,14 +2026,22 @@ def generate_candidates(
     news_item: dict, regeneration_attempt: int = 0, retries_used: int = 0
 ) -> list:
     """Prefer multi-stage generation and safely fall back to the legacy path."""
+    global LAST_GENERATION_API_CALLS
     enabled = os.environ.get(
         "POLITICS_ENABLE_MULTI_STAGE_GENERATION", "true"
     ).strip().lower() in {"1", "true", "yes", "on"}
+    hard_max_calls = max(1, _env_int(
+        "POLITICS_MAX_API_CALLS_PER_ARTICLE", 12))
+    reserve_calls = min(
+        max(0, _env_int("POLITICS_LEGACY_FALLBACK_RESERVE_CALLS", 1)),
+        max(0, hard_max_calls - 1),
+    )
     call_budget = {
         "count": 0,
-        "max": max(1, _env_int(
-            "POLITICS_MAX_API_CALLS_PER_ARTICLE", 12)),
+        "max": max(1, hard_max_calls - reserve_calls),
+        "hard_max": hard_max_calls,
     }
+    LAST_GENERATION_API_CALLS = 0
     if enabled:
         history = load_post_history()
         attempts = (
@@ -1991,28 +2056,43 @@ def generate_candidates(
             try:
                 if label != "full":
                     log(f"[INFO] Politics fallback stage: {label}")
-                return _multistage_candidate(
+                result = _multistage_candidate(
                     news_item, history, candidate_count=count,
                     minimum_mode=minimum, call_budget=call_budget)
+                LAST_GENERATION_API_CALLS = call_budget["count"]
+                return result
             except Exception as exc:
                 global LAST_GENERATION_FAILURE_REASON
                 LAST_GENERATION_FAILURE_REASON = str(exc)[:240]
                 log(
                     f"[WARN] Multi-stage {label} failed: "
-                    f"{type(exc).__name__}")
-        if call_budget["count"] >= call_budget["max"]:
+                    f"{type(exc).__name__}; api_calls={call_budget['count']}/"
+                    f"{hard_max_calls}")
+                # A minimum retry normally needs analysis plus five bounded
+                # stages. Preserve the compact one-call fallback rather than
+                # starting a retry that cannot finish.
+                if call_budget["max"] - call_budget["count"] < 6:
+                    break
+        if call_budget["count"] >= hard_max_calls or reserve_calls <= 0:
             LAST_GENERATION_FAILURE_REASON = "politics_api_call_limit"
+            LAST_GENERATION_API_CALLS = call_budget["count"]
             return []
         if os.environ.get(
             "POLITICS_FALLBACK_TO_LEGACY", "true"
         ).strip().lower() not in {"1", "true", "yes", "on"}:
             return []
-        log("[INFO] Politics fallback stage: legacy")
+        log(
+            "[INFO] Politics fallback stage: legacy "
+            f"(reserved call; used={call_budget['count']}/{hard_max_calls})")
         call_budget["count"] += 1
-        return _generate_candidates_legacy(
+        result = _generate_candidates_legacy(
             news_item, regeneration_attempt, retries_used=1)
-    return _generate_candidates_legacy(
+        LAST_GENERATION_API_CALLS = call_budget["count"]
+        return result
+    result = _generate_candidates_legacy(
         news_item, regeneration_attempt, retries_used)
+    LAST_GENERATION_API_CALLS = 1
+    return result
 
 # 実効スコアの加重（合計で割って 0〜10 相当に正規化する）
 EFFECTIVE_WEIGHTS = {
@@ -2546,6 +2626,7 @@ def main():
         return
 
     # --- 候補生成・採点（複数ニュースからベスト1を選ぶ） ---
+    _reset_generation_diagnostics()
     best = None
     best_score = -1.0
     politics_max_articles_raw = os.environ.get(
@@ -2558,7 +2639,16 @@ def main():
     else:
         politics_max_articles = len(eligible_news)
     for item in eligible_news[:politics_max_articles]:
-        for c in generate_candidates(item):
+        generated = _load_cached_candidates(item)
+        if generated:
+            log(
+                "[INFO] Politics candidate cache hit: "
+                f"{len(generated)} candidate(s); OpenAI calls avoided")
+        else:
+            generated = generate_candidates(item)
+            if generated:
+                _save_cached_candidates(item, generated)
+        for c in generated:
             c["integrated_research_topic_id"] = item.get(
                 "integrated_research_topic_id")
             c["integrated_research_run_id"] = item.get(
@@ -2571,7 +2661,12 @@ def main():
 
     if best is None:
         reason = LAST_GENERATION_FAILURE_REASON or "candidate_generation_failed"
-        finalize_skip(reason, mark_attempted=True)
+        finalize_skip(reason, mark_attempted=True, extra={
+            "generation_api_calls": LAST_GENERATION_API_CALLS,
+            "eligible_news_count": len(eligible_news),
+            "candidate_cache_enabled": _env_bool(
+                "POLITICS_CANDIDATE_CACHE_ENABLED", "true"),
+        })
         return
 
     scores = best.get("scores") or {}
