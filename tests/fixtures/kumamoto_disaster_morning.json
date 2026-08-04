@@ -1,0 +1,110 @@
+{
+  "date": "2026-07-29",
+  "casualties": {
+    "dead": null,
+    "injured": 24,
+    "missing": null,
+    "source": "熊本県災害対策本部",
+    "source_id": "kumamoto_pref_20260729_0700",
+    "as_of": "2026-07-29T07:00:00+09:00"
+  },
+  "rescue": {
+    "rescue_requests": 18,
+    "rescued_people": 12,
+    "transported_people": 8,
+    "searching_areas": ["嘉島町", "八代市"],
+    "isolated_areas": 6,
+    "isolated_areas_resolved": 0,
+    "responding_agencies": ["消防", "警察", "自衛隊"],
+    "source": "消防庁・熊本県統合資料",
+    "source_id": "fdma_kumamoto_integrated_20260729_0700",
+    "as_of": "2026-07-29T07:00:00+09:00"
+  },
+  "evacuation": {
+    "open_shelters": 42,
+    "evacuees": 1850,
+    "shelter_areas": ["熊本市", "宇城市", "氷川町", "八代市"],
+    "source": "熊本県災害対策本部",
+    "source_id": "kumamoto_pref_20260729_0700",
+    "as_of": "2026-07-29T07:00:00+09:00"
+  },
+  "infrastructure": {
+    "power_outage_households": 48280,
+    "water_outage_households": 71000,
+    "gas_outage_households": 500,
+    "telecom_impact": ["熊本県の一部で音声・データ通信に影響"],
+    "source": "熊本県・事業者公式集計",
+    "source_id": "kumamoto_infra_integrated_20260729_0700",
+    "as_of": "2026-07-29T07:00:00+09:00"
+  },
+  "transport": {
+    "rail": ["九州新幹線: 全線運転見合わせ", "在来線: 12路線運転見合わせ"],
+    "roads": ["高速道路: 29区間通行止め"],
+    "airport": ["熊本空港: 一部便欠航"],
+    "public_transport": ["熊本市電: 運転見合わせ"],
+    "source": "国土交通省・交通事業者",
+    "source_id": "mlit_transport_20260729_0700",
+    "as_of": "2026-07-29T07:00:00+09:00"
+  },
+  "facilities": {
+    "medical": ["災害拠点病院の受入状況を確認中"],
+    "schools": ["熊本県内の休校状況を確認中"],
+    "childcare": ["熊本市内の休園状況を確認中"],
+    "commercial": ["イオンモール熊本: 営業停止、救助活動中"],
+    "public_facilities": ["熊本市内の一部公共施設を休館"]
+  },
+  "aftershocks": [
+    {
+      "occurred_at": "2026-07-29T05:42:00+09:00",
+      "maximum_intensity": "4",
+      "source_id": "jma_20260729_0542",
+      "as_of": "2026-07-29T05:50:00+09:00"
+    }
+  ],
+  "official_advice": [
+    "強い揺れ、倒壊の恐れがある建物、崖や斜面に注意",
+    "停電・断水・交通情報は自治体と事業者の公式発表を確認"
+  ],
+  "sources": [
+    {
+      "source_id": "kumamoto_pref_20260729_0700",
+      "name": "熊本県災害対策本部",
+      "url": "https://www.pref.kumamoto.jp/",
+      "source_class": "official",
+      "priority": 1,
+      "published_at": "2026-07-29T07:00:00+09:00",
+      "as_of": "2026-07-29T07:00:00+09:00",
+      "status": "confirmed"
+    },
+    {
+      "source_id": "fdma_kumamoto_integrated_20260729_0700",
+      "name": "総務省消防庁",
+      "url": "https://www.fdma.go.jp/disaster/",
+      "source_class": "official",
+      "priority": 1,
+      "published_at": "2026-07-29T07:00:00+09:00",
+      "as_of": "2026-07-29T07:00:00+09:00",
+      "status": "confirmed"
+    },
+    {
+      "source_id": "mlit_transport_20260729_0700",
+      "name": "国土交通省",
+      "url": "https://www.mlit.go.jp/saigai/saigai_260728.html",
+      "source_class": "official",
+      "priority": 1,
+      "published_at": "2026-07-29T07:00:00+09:00",
+      "as_of": "2026-07-29T07:00:00+09:00",
+      "status": "confirmed"
+    }
+  ],
+  "metadata": {
+    "metric_notes": {
+      "rescue.rescued_people": "消防庁・熊本県の統合値。機関別数値を合算していない"
+    },
+    "scope_changes": {},
+    "definition_changes": {},
+    "corrections": {},
+    "resolved_metrics": [],
+    "recovered_metrics": []
+  }
+}

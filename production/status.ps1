@@ -12,6 +12,8 @@ if (Test-Path $Python) {
 Write-Host "`n=== スケジュールタスク ===" -ForegroundColor Cyan
 Get-ScheduledTask -TaskName "PoliticsNarrativeBot" -ErrorAction SilentlyContinue | Format-List TaskName, State
 Write-Host "日次レビュー: Bot本体へ統合済み" -ForegroundColor Cyan
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File (
+    Join-Path $PSScriptRoot "short_video_media_status.ps1")
 $Legacy = Get-ScheduledTask -TaskName "PoliticsNarrativeDailyReview" -ErrorAction SilentlyContinue
 if ($Legacy) {
     Write-Host "旧日次レビュータスク: $($Legacy.State)" -ForegroundColor DarkGray

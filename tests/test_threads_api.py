@@ -43,6 +43,27 @@ class FakeThreadsClient:
 
 
 class ThreadsApiTests(unittest.TestCase):
+    def test_multistage_threads_text_is_reused_without_api_call(self):
+        text = (
+            "政府が法案を提出した。X版を切り詰めた文章ではなく、"
+            "Threads向けに制度の対象、負担、検証責任を独立して説明する。"
+        )
+        factory = Mock(side_effect=AssertionError("OpenAI should not be called"))
+        payload, usage = threads_api._openai_text({
+            "politics_threads_text": text,
+        }, client_factory=factory)
+        self.assertEqual(payload["text"], text)
+        self.assertEqual(usage["estimated_cost_usd"], 0.0)
+        factory.assert_not_called()
+
+    def test_generated_posts_has_independent_threads_text_column(self):
+        with closing(sqlite3.connect(self.path)) as conn:
+            columns = {
+                row[1] for row in conn.execute(
+                    "PRAGMA table_info(generated_posts)")
+            }
+        self.assertIn("threads_text", columns)
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.path = Path(self.tmp.name) / "metrics.sqlite3"
@@ -73,6 +94,13 @@ class ThreadsApiTests(unittest.TestCase):
             "summary": "対象者と費用負担、実施時期について公式資料が公表されました。",
             "topic_key": "policy-a",
         }
+
+    def test_local_text_does_not_repeat_removed_fixed_closing(self):
+        text = threads_api._local_text(self.source(), question=True)
+        self.assertNotIn(
+            "この制度で、先に明確にしてほしい条件は何でしょうか？",
+            text,
+        )
 
     def add_x_source(self, tweet_id="x1", verified=1, hours_ago=2):
         now = datetime.now(threads_api.JST)
@@ -114,12 +142,13 @@ class ThreadsApiTests(unittest.TestCase):
         with patch.dict(os.environ, {"THREADS_PLATFORM_LIMIT_CHARS": "999"}):
             self.assertEqual(threads_api.settings()["platform_limit"], 500)
 
-    def test_05_only_initial_scopes_are_accepted(self):
+    def test_05_only_official_known_scopes_are_accepted(self):
         with patch.dict(os.environ, {
             "THREADS_OAUTH_SCOPES":
                 "threads_basic,threads_manage_replies,threads_content_publish"}):
             self.assertEqual(threads_api.settings()["scopes"], (
-                "threads_basic", "threads_content_publish"))
+                "threads_basic", "threads_manage_replies",
+                "threads_content_publish"))
 
     def test_06_auto_reply_is_off(self):
         with patch.dict(os.environ, {"THREADS_AUTO_REPLY_ENABLED": "true"}):
@@ -165,6 +194,13 @@ class ThreadsApiTests(unittest.TestCase):
     def test_18_question_variant_ends_with_question(self):
         self.assertTrue(threads_api._local_text(
             self.source(), question=True).endswith("？"))
+
+    def test_18b_repeated_pro_con_closing_is_removed(self):
+        forbidden = "賛成・反対の結論より先に、どの条件なら制度が続くのかを確認したいです。"
+        self.assertNotIn(forbidden, threads_api._local_text(self.source()))
+        self.assertNotIn(
+            forbidden, threads_api._local_text(self.source(), question=True)
+        )
 
     def test_19_similarity_identical_is_one(self):
         self.assertEqual(threads_api.similarity_to_x("同じ", "同じ"), 1.0)
@@ -213,6 +249,24 @@ class ThreadsApiTests(unittest.TestCase):
             result = threads_api.authorization_url(self.path)
         self.assertEqual(result["requested_scopes"], list(
             threads_api.INITIAL_SCOPES))
+
+    def test_27b_keyword_search_profile_requests_least_privilege(self):
+        with patch.dict(os.environ, {
+            "THREADS_APP_ID": "app",
+            "THREADS_REDIRECT_URI":
+                "https://localhost/threads/callback",
+            "THREADS_PUBLIC_BASE_URL": "https://localhost",
+        }):
+            result = threads_api.authorization_url(
+                self.path, scope_profile="keyword-search")
+        self.assertEqual(result["requested_scopes"], [
+            "threads_basic", "threads_content_publish",
+            "threads_manage_insights", "threads_keyword_search",
+        ])
+        self.assertNotIn(
+            "threads_delete", result["requested_scopes"])
+        self.assertNotIn(
+            "threads_manage_replies", result["requested_scopes"])
 
     def test_28_token_status_hides_token(self):
         with patch.dict(os.environ, {"THREADS_ACCESS_TOKEN": "secret"}):
@@ -474,7 +528,36 @@ class ThreadsApiTests(unittest.TestCase):
             threads_api.generate(dry_run=True, path=self.path)["reason"],
             "no_eligible_verified_source")
 
-    def test_58_three_metric_windows_are_unique(self):
+    def test_57b_semantic_topic_cooldown_blocks_paraphrase(self):
+        self.add_x_source()
+        now = datetime.now(threads_api.JST)
+        metrics_db.write(
+            """UPDATE news_candidates SET
+               title='食料品の消費税を1%へ引き下げる方針',
+               summary='対象と期間を公式資料で説明',
+               topic_key='new-headline-key'""",
+            (), self.path)
+        metrics_db.write(
+            """UPDATE published_posts SET
+               text='食品への消費税1％案を検証',
+               topic_key='new-headline-key'""",
+            (), self.path)
+        metrics_db.write(
+            """INSERT INTO threads_posts
+               (client_post_key,topic_key,text,status,published_at,created_at)
+               VALUES ('old-semantic','different-key',
+                       '食料品の消費税を1%にする方針を解説',
+                       'published',?,?)""",
+            ((now - timedelta(days=2)).isoformat(), now.isoformat()),
+            self.path)
+        with patch.dict(os.environ, {
+            "SEMANTIC_TOPIC_COOLDOWN_HOURS": "72",
+        }):
+            self.assertEqual(
+                threads_api.generate(dry_run=True, path=self.path)["reason"],
+                "no_eligible_verified_source")
+
+    def test_58_five_metric_windows_are_unique(self):
         now = datetime.now(threads_api.JST)
         metrics_db.write(
             """INSERT INTO threads_posts
@@ -487,7 +570,7 @@ class ThreadsApiTests(unittest.TestCase):
                 FakeThreadsClient(), self.path, now)
             second = threads_api.collect_metrics(
                 FakeThreadsClient(), self.path, now)
-        self.assertEqual(first["collected"], 3)
+        self.assertEqual(first["collected"], 5)
         self.assertEqual(second["collected"], 0)
 
     def test_59_phase_a_run_saves_preview_not_post(self):

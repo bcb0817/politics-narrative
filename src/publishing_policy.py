@@ -12,10 +12,12 @@ import os
 import unicodedata
 from datetime import datetime, timedelta
 from difflib import SequenceMatcher
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 
 JST = ZoneInfo("Asia/Tokyo")
+ROOT_DIR = Path(__file__).resolve().parent.parent
 
 POST_TYPES = (
     "breaking_news",
@@ -28,8 +30,8 @@ POST_TYPES = (
 )
 POST_TYPE_DAILY_LIMITS = {
     "breaking_news": 2,
-    "issue_diagram": 4, "strong_opinion": 4, "comparison_factcheck": 3,
-    "steelman_counterargument": 1, "evergreen_explainer": 1,
+    "issue_diagram": 5, "strong_opinion": 5, "comparison_factcheck": 4,
+    "steelman_counterargument": 1, "evergreen_explainer": 2,
     "morning_evening_digest": 2,
 }
 POST_STYLE_TARGETS = {
@@ -142,8 +144,62 @@ def pre_generation_skip_reason(
     return None
 
 
+def semantic_policy_signature(text: str) -> str:
+    """Return a stable policy-family key across headline paraphrases.
+
+    This deliberately covers only high-confidence policy families.  It is
+    preferable to miss an unknown family than to merge unrelated stories.
+    """
+    normalized = unicodedata.normalize("NFKC", text or "").lower()
+    compact = re.sub(r"[\s\u3000、。・「」『』（）()【】\[\]:：]+", "", normalized)
+    consumption_tax = "\u6d88\u8cbb\u7a0e" in compact
+    food = any(term in compact for term in (
+        "\u98df\u6599\u54c1",  # 食料品
+        "\u98df\u54c1",        # 食品
+        "\u98df\u6599",        # 食料
+    ))
+    one_percent = any(term in compact for term in (
+        "1%", "1\uff05", "\u4e00\u30d1\u30fc\u30bb\u30f3\u30c8",
+    ))
+    if consumption_tax and food and one_percent:
+        return "policy:consumption_tax:food:1_percent"
+    if consumption_tax and food and any(term in compact for term in (
+        "\u6e1b\u7a0e", "\u5f15\u304d\u4e0b\u3052", "\u5f15\u4e0b\u3052",
+        "\u7121\u7a0e", "\u30bc\u30ed", "0%",
+    )):
+        return "policy:consumption_tax:food:reduction"
+    return ""
+
+
+def has_material_policy_update(new_text: str, previous_text: str = "") -> bool:
+    """Allow a repeated policy family only for an explicit status change."""
+    new_normalized = unicodedata.normalize("NFKC", new_text or "")
+    old_normalized = unicodedata.normalize("NFKC", previous_text or "")
+    material_terms = (
+        "\u6210\u7acb",      # 成立
+        "\u53ef\u6c7a",      # 可決
+        "\u5426\u6c7a",      # 否決
+        "\u64a4\u56de",      # 撤回
+        "\u5ec3\u6b62",      # 廃止
+        "\u65bd\u884c",      # 施行
+        "\u958b\u59cb",      # 開始
+        "\u7d42\u4e86",      # 終了
+        "\u5ef6\u671f",      # 延期
+        "\u51cd\u7d50",      # 凍結
+        "\u65b9\u91dd\u8ee2\u63db",  # 方針転換
+    )
+    return any(
+        term in new_normalized and term not in old_normalized
+        for term in material_terms
+    )
+
+
 def normalize_topic_key(title: str, keywords: list[str] | None = None) -> str:
     text = unicodedata.normalize("NFKC", title or "")
+    semantic = semantic_policy_signature(
+        f"{text} {' '.join(keywords or [])}")
+    if semantic:
+        return semantic
     text = re.sub(r"https?://\S+", "", text)
     text = re.sub(r"[【】\[\]（）()「」『』〈〉《》!?！？…・:：|｜]", " ", text)
     text = re.sub(r"\b(?:20\d{2}|\d{1,2})[年/月日時分]\b", " ", text)
@@ -180,9 +236,26 @@ def topic_cooldown_skip_reason(
     recent_topics: list[dict],
     now_jst: datetime,
     cooldown_hours: float,
+    semantic_cooldown_hours: float | None = None,
 ) -> str | None:
+    semantic_cooldown = (
+        max(cooldown_hours, semantic_cooldown_hours)
+        if semantic_cooldown_hours is not None else cooldown_hours
+    )
+    new_family = semantic_policy_signature(f"{topic_key} {news_title}")
     for row in reversed(recent_topics):
         old_key = str(row.get("topic_key") or "")
+        old_title = str(row.get("news_title") or "")
+        old_family = semantic_policy_signature(f"{old_key} {old_title}")
+        if new_family and old_family == new_family:
+            posted_at = parse_jst(row.get("last_posted_at"))
+            if (
+                posted_at
+                and now_jst - posted_at < timedelta(hours=semantic_cooldown)
+                and not has_material_policy_update(news_title, old_title)
+            ):
+                return "semantic_topic_cooldown"
+            continue
         similarity = SequenceMatcher(None, topic_key, old_key).ratio() if old_key else 0.0
         if old_key != topic_key and similarity < 0.82:
             continue
@@ -252,15 +325,34 @@ def choose_post_style(news: dict, history: list[dict], now_jst: datetime) -> tup
     if steelman_count < 3 and (exploration or news.get("has_counter_claims")):
         candidates.append("steelman_counterargument")
     total = max(1, len(last24))
-    selected = min(candidates, key=lambda style: last24.count(style) / total - targets.get(style, .15))
+    active_strategy = {}
+    if news.get("review_strategy_variant") != "control":
+        try:
+            from review_strategy import load_active_strategy
+            active_strategy = load_active_strategy(ROOT_DIR, now=now_jst)
+        except Exception:
+            active_strategy = {}
+    priorities = active_strategy.get("post_type_priority") or []
+    priority_bonus = {
+        value: max(0.02, 0.10 - index * 0.02)
+        for index, value in enumerate(priorities)
+    }
+    selected = min(
+        candidates,
+        key=lambda style: (
+            last24.count(style) / total
+            - targets.get(style, .15)
+            - priority_bonus.get(style, 0.0)
+        ),
+    )
     if len(recent) >= 2 and recent[-1] == recent[-2] == selected:
         selected = next(style for style in candidates if style != selected)
     return selected, exploration
 
 
 def phase_daily_limit_reached(history: list[dict], now_jst: datetime, is_breaking: bool,
-                              normal_limit: int = 8, breaking_limit: int = 2,
-                              total_limit: int = 10) -> bool:
+                              normal_limit: int = 20, breaking_limit: int = 2,
+                              total_limit: int = 20) -> bool:
     today = successful_posts_today(history, now_jst)
     if len(today) >= total_limit:
         return True
@@ -300,6 +392,28 @@ def classify_hook_type(news: dict, history: list[dict]) -> str:
         preferred = "question"
     else:
         preferred = "conclusion_first"
+    priorities = []
+    if news.get("review_strategy_variant") != "control":
+        try:
+            from review_strategy import load_active_strategy
+            priorities = load_active_strategy(ROOT_DIR).get(
+                "hook_type_priority") or []
+        except Exception:
+            priorities = []
+    compatible = {
+        "number": bool(re.search(r"\d", text)),
+        "contrast": any(
+            term in text for term in (
+                "一方", "対し", "改正前", "改正後", "vs", "ＶＳ")),
+        "fact_reversal": any(
+            term in text for term in (
+                "実は", "誤解", "事実", "公式", "発表")),
+        "issue_redefinition": True,
+        "question": True,
+        "conclusion_first": True,
+    }
+    preferred = next(
+        (value for value in priorities if compatible.get(value)), preferred)
     recent = [row.get("hook_type") for row in history if row.get("hook_type")][-2:]
     if len(recent) == 2 and recent[0] == recent[1] == preferred:
         return next(hook for hook in HOOK_TYPES if hook != preferred and hook not in recent)

@@ -223,6 +223,183 @@ class DiscordNotifyTests(unittest.TestCase):
         self.assertNotIn("private detailed diagnostic", rendered)
         self.assertNotIn("stack trace detail", rendered)
 
+    def test_strategy_notification_contains_result_only(self):
+        env = {
+            "DISCORD_NOTIFICATIONS_ENABLED": "true",
+            "DISCORD_WEBHOOK_URL": "https://discord.invalid/webhook",
+        }
+        with patch.dict(os.environ, env, clear=False), patch(
+            "discord_notify.requests.post", return_value=FakeResponse()
+        ) as post:
+            sent = discord_notify.notify_review_strategy_result(
+                {
+                    "activated": True,
+                    "reason": "validated_strategy_activated",
+                    "policy": {"experiment_name": "number_hook"},
+                },
+                prior_evaluation={
+                    "status": "insufficient_data",
+                    "treatment_count": 2,
+                    "control_count": 1,
+                },
+            )
+        self.assertTrue(sent)
+        rendered = json.dumps(
+            post.call_args.kwargs["json"], ensure_ascii=False)
+        self.assertIn("ChatGPT投稿方針を更新", rendered)
+        self.assertNotIn("raw prompt", rendered)
+
+    def test_threads_research_contains_public_result_and_analysis_only(self):
+        env = {
+            "DISCORD_NOTIFICATIONS_ENABLED": "true",
+            "DISCORD_NOTIFY_THREADS_RESEARCH": "true",
+            "DISCORD_WEBHOOK_URL": "https://discord.invalid/webhook",
+        }
+        report = {
+            "lookback_hours": 24,
+            "search_run_count": 1,
+            "result_count": 4,
+            "unique_post_count": 3,
+            "searches": [{"query": "政治", "result_count": 4}],
+            "representative_posts": [{
+                "text": "社会保険料をめぐる議論",
+                "permalink": "https://www.threads.net/@example/post/1",
+                "username_hash": "must-not-be-sent",
+            }],
+            "top_entities": [{
+                "entity": "社会保険料",
+                "trend_score": 72.5,
+                "state": "rising",
+                "post_count": 3,
+                "eligible_for_post": True,
+            }],
+            "eligible_entity_count": 1,
+            "access_token": "must-not-be-sent",
+        }
+        with patch.dict(os.environ, env, clear=False), patch(
+            "discord_notify.requests.post", return_value=FakeResponse()
+        ) as post:
+            self.assertTrue(discord_notify.notify_threads_research(report))
+        rendered = json.dumps(
+            post.call_args.kwargs["json"], ensure_ascii=False)
+        self.assertIn("社会保険料をめぐる議論", rendered)
+        self.assertIn("72.5点", rendered)
+        self.assertIn("公式・報道照合あり", rendered)
+        self.assertNotIn("must-not-be-sent", rendered)
+
+    def test_x_research_contains_analysis_but_not_internal_data(self):
+        env = {
+            "DISCORD_NOTIFICATIONS_ENABLED": "true",
+            "DISCORD_NOTIFY_X_RESEARCH": "true",
+            "DISCORD_WEBHOOK_URL": "https://discord.invalid/webhook",
+        }
+        report = {
+            "provider": "xAI X Search",
+            "lookback_minutes": 360,
+            "query_count": 1,
+            "resource_count": 1,
+            "topic_count": 1,
+            "queries": ["社会保険料"],
+            "topics": [{
+                "topic_key": "社会保険料",
+                "attention_score": 8.2,
+                "velocity_score": 7.1,
+                "main_claims": ["負担が重い"],
+                "counter_claims": ["財源も確認すべき"],
+                "representative_post_ids": ["1234567890"],
+                "externally_corroborated": True,
+                "author_id": "must-not-be-sent",
+            }],
+            "corroborated_topic_count": 1,
+            "api_key": "must-not-be-sent",
+        }
+        with patch.dict(os.environ, env, clear=False), patch(
+            "discord_notify.requests.post", return_value=FakeResponse()
+        ) as post:
+            self.assertTrue(discord_notify.notify_x_research(report))
+        payload = json.loads(post.call_args.kwargs["data"]["payload_json"])
+        rendered = json.dumps(payload, ensure_ascii=False)
+        self.assertIn("負担が重い", rendered)
+        self.assertIn("財源も確認すべき", rendered)
+        self.assertIn("8.2", rendered)
+        self.assertIn("https://x.com/i/web/status/1234567890", rendered)
+        self.assertIn("今回の結論", rendered)
+        self.assertIn("Botの投稿判断", rendered)
+        self.assertGreaterEqual(len(payload["embeds"]), 3)
+        self.assertEqual(
+            payload["embeds"][0]["fields"][0]["inline"], True)
+        self.assertEqual(
+            payload["embeds"][1]["fields"][-1]["inline"], False)
+        attachment = post.call_args.kwargs["files"]["files[0]"]
+        self.assertEqual(attachment[0], "x-search-research-report.md")
+        self.assertIn(
+            "X Search リサーチ・分析結果",
+            attachment[1].decode("utf-8"))
+        self.assertNotIn("must-not-be-sent", rendered)
+        self.assertNotIn("must-not-be-sent", attachment[1].decode("utf-8"))
+
+    def test_x_research_orders_topics_by_attention_and_limits_cards(self):
+        env = {
+            "DISCORD_NOTIFICATIONS_ENABLED": "true",
+            "DISCORD_NOTIFY_X_RESEARCH": "true",
+            "DISCORD_WEBHOOK_URL": "https://discord.invalid/webhook",
+        }
+        report = {
+            "topic_count": 6,
+            "topics": [
+                {
+                    "topic_key": f"話題{i}",
+                    "attention_score": i,
+                    "velocity_score": i,
+                    "main_claims": [f"主張{i}"],
+                    "counter_claims": [f"補足{i}"],
+                }
+                for i in range(1, 7)
+            ],
+        }
+        with patch.dict(os.environ, env, clear=False), patch(
+            "discord_notify.requests.post", return_value=FakeResponse()
+        ) as post:
+            self.assertTrue(discord_notify.notify_x_research(report))
+        payload = json.loads(post.call_args.kwargs["data"]["payload_json"])
+        self.assertEqual(len(payload["embeds"]), 6)
+        self.assertIn("話題6", payload["embeds"][1]["title"])
+        self.assertIn("話題3", payload["embeds"][4]["title"])
+        rendered = json.dumps(payload, ensure_ascii=False)
+        self.assertNotIn("話題2", rendered)
+        detail = post.call_args.kwargs["files"]["files[0]"][1].decode("utf-8")
+        self.assertIn("話題1", detail)
+
+    def test_integrated_research_sends_only_bounded_result(self):
+        env = {
+            "DISCORD_NOTIFICATIONS_ENABLED": "true",
+            "DISCORD_NOTIFY_INTEGRATED_RESEARCH": "true",
+            "DISCORD_WEBHOOK_URL": "https://discord.invalid/webhook",
+        }
+        report = {
+            "topic_count": 1,
+            "eligible_count": 1,
+            "skipped_count": 0,
+            "topics": [{
+                "title": "子育て支援制度",
+                "confidence": 0.82,
+                "posting_value_score": 8.1,
+                "post_eligible": True,
+                "raw_prompt": "must-not-be-sent",
+            }],
+            "access_token": "must-not-be-sent",
+        }
+        with patch.dict(os.environ, env, clear=False), patch(
+            "discord_notify.requests.post", return_value=FakeResponse()
+        ) as post:
+            self.assertTrue(
+                discord_notify.notify_integrated_research(report))
+        rendered = json.dumps(
+            post.call_args.kwargs["json"], ensure_ascii=False)
+        self.assertIn("子育て支援制度", rendered)
+        self.assertIn("投稿候補: 1件", rendered)
+        self.assertNotIn("must-not-be-sent", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()

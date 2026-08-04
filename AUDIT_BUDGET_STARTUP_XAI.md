@@ -117,5 +117,5 @@
 
 ## バックアップ
 
-`D:\SNS Bot\politics-narrative-backup-20260724-013738`
+`D:\SNS Bot\politics-narrative\backups\politics-narrative-backup-20260724-013738`
 

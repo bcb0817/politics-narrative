@@ -362,7 +362,11 @@ def _sources(selection: dict) -> tuple[list[dict], list[dict]]:
         }
         if source["url"] not in {item["url"] for item in primary}:
             primary.append(source)
-    return primary[:2], secondary
+    maximum = max(
+        _int("FREE_NOTE_MIN_PRIMARY_SOURCES", 2),
+        min(5, _int("FREE_NOTE_MAX_PRIMARY_SOURCES", 5)),
+    )
+    return primary[:maximum], secondary
 
 
 def _three_line_summary(selection: dict) -> list[str]:
@@ -466,14 +470,14 @@ def _local_article(selection: dict, primary: list[dict],
         amazon_items,
         bool(amazon_items) and associate_settings()["disclosure_enabled"],
     )
-    minimum = _int("FREE_NOTE_MIN_CHARS", 1800)
+    minimum = _int("FREE_NOTE_MIN_CHARS", 2000)
     if len(article) < minimum:
         article += (
             "\n\n## 補足\n\n制度を追うときは、決定文書、議案情報、法令本文を別々に"
             "確認してください。文書が見つからない主張は断定せず、確認待ちとして扱います。"
             "更新履歴を残すことで、後から説明が変わった場合にも検証できます。\n"
         ) * 3
-    maximum = _int("FREE_NOTE_MAX_CHARS", 3200)
+    maximum = _int("FREE_NOTE_MAX_CHARS", 5000)
     if len(article) > maximum:
         # Preserve every required section and source link. Remove prose from
         # the longest non-heading blocks until the document fits instead of
@@ -547,7 +551,7 @@ REVIEW_MARKDOWN = """# 公開前チェック
 - [ ] 法案名・制度名は正しい
 - [ ] 数字と単位は正しい
 - [ ] 一次資料と本文が一致している
-- [ ] 一次資料リンクが正確に2件ある
+- [ ] 一次資料リンクが最低2件、最大5件ある
 - [ ] 未確認情報を断定していない
 
 ## 編集品質
@@ -606,14 +610,14 @@ def quality_check(article: str, title: str, primary: list[dict],
     reasons = []
     warnings = []
     length = len(article)
-    if length < _int("FREE_NOTE_MIN_CHARS", 1800):
+    if length < _int("FREE_NOTE_MIN_CHARS", 2000):
         reasons.append("too_short")
-    if length > _int("FREE_NOTE_MAX_CHARS", 3200):
+    if length > _int("FREE_NOTE_MAX_CHARS", 5000):
         reasons.append("too_long")
     if len(primary) < _int("FREE_NOTE_MIN_PRIMARY_SOURCES", 2):
         reasons.append("insufficient_primary_sources")
-    if len(primary) != 2:
-        reasons.append("primary_source_count_not_two")
+    if len(primary) > _int("FREE_NOTE_MAX_PRIMARY_SOURCES", 5):
+        reasons.append("too_many_primary_sources")
     if title not in article:
         reasons.append("title_body_mismatch")
     first_line = next(
@@ -670,11 +674,11 @@ def quality_check(article: str, title: str, primary: list[dict],
     if len(amazon_urls) != expected_ready:
         reasons.append("amazon_ready_link_count_mismatch")
     if (
-        len([url for url in article_urls if url in primary_urls]) != 2
+        len([url for url in article_urls if url in primary_urls]) != len(primary_urls)
         or any(url not in article_urls for url in primary_urls)
     ):
-        reasons.append("primary_link_count_not_two")
-    if len(article_urls) != 2 + expected_ready:
+        reasons.append("primary_link_count_mismatch")
+    if len(article_urls) != len(primary_urls) + expected_ready:
         reasons.append("reference_link_count_mismatch")
     from amazon_associate import validate_amazon_url
     if any(not validate_amazon_url(url) for url in amazon_urls):
@@ -860,9 +864,9 @@ def _openai_article(selection: dict, primary: list[dict], secondary: list[dict],
         "topic": selection["topic"],
         "required_title_heading": f"# {selection['topic']}",
         "required_headings": list(REQUIRED_HEADINGS),
-        "minimum_characters": _int("FREE_NOTE_MIN_CHARS", 1800),
-        "target_characters": _int("FREE_NOTE_TARGET_CHARS", 2400),
-        "maximum_characters": _int("FREE_NOTE_MAX_CHARS", 3200),
+        "minimum_characters": _int("FREE_NOTE_MIN_CHARS", 2000),
+        "target_characters": _int("FREE_NOTE_TARGET_CHARS", 3200),
+        "maximum_characters": _int("FREE_NOTE_MAX_CHARS", 5000),
         "primary_sources": primary,
         "secondary_sources": secondary,
         "amazon_candidates": [
@@ -1318,7 +1322,7 @@ def schedule_slots(now: datetime | None = None,
     now = now or datetime.now(JST)
     week_start = now.date() - timedelta(days=now.weekday())
     slots = []
-    posts = max(1, min(2, _int("FREE_NOTE_POSTS_PER_WEEK", 2)))
+    posts = max(1, min(3, _int("FREE_NOTE_POSTS_PER_WEEK", 2)))
     remaining = (
         _float("FREE_NOTE_MONTHLY_BUDGET_USD", 1.5)
         - _free_note_monthly_cost(now, path)
@@ -1328,13 +1332,17 @@ def schedule_slots(now: datetime | None = None,
         7000,
         _int("OPENAI_MAX_OUTPUT_TOKENS_FREE_NOTE", 6000),
     )
-    if posts == 2 and luna_cost is not None and remaining < luna_cost * 2:
+    if posts >= 2 and luna_cost is not None and remaining < luna_cost * posts:
         posts = 1
     specs = []
-    if posts == 2:
+    if posts >= 2:
         specs.append((2, "wed", os.environ.get(
             "FREE_NOTE_SCHEDULE_WED", "20:30"), os.environ.get(
             "FREE_NOTE_WED_TYPE", "evergreen_institutional_explainer")))
+    if posts == 3:
+        specs.append((4, "strong_win", os.environ.get(
+            "FREE_NOTE_SCHEDULE_STRONG_WIN", "20:30"), os.environ.get(
+            "FREE_NOTE_STRONG_WIN_TYPE", "weekly_deep_dive")))
     specs.append((6, "sun", os.environ.get(
         "FREE_NOTE_SCHEDULE_SUN", "20:30"), os.environ.get(
         "FREE_NOTE_SUN_TYPE", "weekly_top5")))

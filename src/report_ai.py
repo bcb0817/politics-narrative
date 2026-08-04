@@ -25,8 +25,100 @@ ANALYSIS_SCHEMA = {
         "weaknesses": {"type": "array", "items": {"type": "string"}},
         "recommendations": {"type": "array", "items": {"type": "string"}},
         "timing_findings": {"type": "array", "items": {"type": "string"}},
+        "operational_findings": {
+            "type": "array", "items": {"type": "string"},
+        },
+        "impression_strategy": {
+            "type": "object",
+            "properties": {
+                "summary": {"type": "string"},
+                "evidence": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "finding": {"type": "string"},
+                            "tweet_ids": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                            "metric": {"type": "string"},
+                            "confidence": {"type": "number"},
+                        },
+                        "required": [
+                            "finding", "tweet_ids", "metric", "confidence",
+                        ],
+                        "additionalProperties": False,
+                    },
+                },
+                "next_day_policy": {
+                    "type": "object",
+                    "properties": {
+                        "post_type_priority": {
+                            "type": "array",
+                            "items": {
+                                "type": "string",
+                                "enum": [
+                                    "issue_diagram", "strong_opinion",
+                                    "comparison_factcheck",
+                                    "steelman_counterargument",
+                                ],
+                            },
+                        },
+                        "hook_type_priority": {
+                            "type": "array",
+                            "items": {
+                                "type": "string",
+                                "enum": [
+                                    "fact_reversal", "issue_redefinition",
+                                    "number", "contrast", "question",
+                                    "conclusion_first",
+                                ],
+                            },
+                        },
+                        "preferred_hours_jst": {
+                            "type": "array",
+                            "items": {"type": "integer"},
+                        },
+                        "target_text_min": {"type": "integer"},
+                        "target_text_max": {"type": "integer"},
+                        "body_structure": {
+                            "type": "string",
+                            "enum": [
+                                "fact_impact_accountability_improvement",
+                                "claim_evidence_conclusion",
+                                "before_after_comparison",
+                                "timeline_cause_response",
+                            ],
+                        },
+                        "cta_style": {
+                            "type": "string",
+                            "enum": [
+                                "specific_accountability_question",
+                                "improvement_request", "source_check",
+                                "no_question",
+                            ],
+                        },
+                        "experiment_name": {"type": "string"},
+                    },
+                    "required": [
+                        "post_type_priority", "hook_type_priority",
+                        "preferred_hours_jst", "target_text_min",
+                        "target_text_max", "body_structure", "cta_style",
+                        "experiment_name",
+                    ],
+                    "additionalProperties": False,
+                },
+            },
+            "required": ["summary", "evidence", "next_day_policy"],
+            "additionalProperties": False,
+        },
     },
-    "required": ["summary", "strengths", "weaknesses", "recommendations", "timing_findings"],
+    "required": [
+        "summary", "strengths", "weaknesses", "recommendations",
+        "timing_findings", "operational_findings",
+        "impression_strategy",
+    ],
     "additionalProperties": False,
 }
 
@@ -49,10 +141,27 @@ def compact_daily_payload(payload: dict) -> dict:
                 "post_type": row.get("post_type", ""),
                 "hook_type": row.get("hook_type", ""),
                 "critique_axis": row.get("critique_axis", ""),
+                "review_strategy_experiment": row.get(
+                    "review_strategy_experiment", ""),
+                "review_strategy_id": row.get("review_strategy_id", ""),
+                "review_strategy_variant": row.get(
+                    "review_strategy_variant", "inactive"),
                 "impressions": row.get("impressions", 0),
                 "growth_score": row.get("growth_score", 0),
                 "posted_hour_jst": row.get("posted_hour_jst", 0),
+                "text_length": row.get("text_length", 0),
+                "impressions_per_hour": row.get(
+                    "impressions_per_hour", 0),
+                "engagement_rate": row.get("engagement_rate", 0),
+                "likes": row.get("likes", 0),
+                "reposts": row.get("reposts", 0),
+                "replies": row.get("replies", 0),
+                "quotes": row.get("quotes", 0),
+                "bookmarks": row.get("bookmarks", 0),
+                "profile_clicks": row.get("profile_clicks"),
+                "four_axes": row.get("four_axes", {}),
             })
+    daily_goal = payload.get("daily_post_goal") or {}
     return {
         "reviewed_count": payload.get("reviewed_count", 0),
         "samples": samples[:12],
@@ -60,6 +169,32 @@ def compact_daily_payload(payload: dict) -> dict:
         "performance_breakdown": payload.get("performance_breakdown", {}),
         "x_timing_analysis": payload.get("x_timing_analysis", {}),
         "repeated_structures": payload.get("repeated_structures", [])[:5],
+        "operational_log_summary": payload.get(
+            "operational_log_summary", {}),
+        "current_active_strategy": payload.get(
+            "current_active_strategy", {}),
+        "prior_strategy_evaluation": payload.get(
+            "prior_strategy_evaluation", {}),
+        "daily_post_goal": {
+            "report_date": daily_goal.get("report_date"),
+            "target": daily_goal.get("target", {}),
+            "actual": daily_goal.get("actual", {}),
+            "achievement": daily_goal.get("achievement", {}),
+            "analysis": daily_goal.get("analysis", {}),
+            "remediation": (daily_goal.get("remediation") or [])[:4],
+            "safety": daily_goal.get("safety", {}),
+        },
+        "daily_post_goal_remediation": payload.get(
+            "daily_post_goal_remediation", {}),
+        "integrated_research": {
+            key: (payload.get("integrated_research") or {}).get(key)
+            for key in (
+                "topics", "eligible_topics", "x_posts", "threads_posts",
+                "average_confidence", "average_posting_value",
+                "decisions", "outcomes", "top_topics",
+                "interpretation_limit",
+            )
+        },
     }
 
 
@@ -143,7 +278,15 @@ def analyze_report(*, task_type: str, payload: dict, root_dir: Path, state_dir: 
         )
         system = (
             "You analyze performance data for a Japanese political-news X bot. "
-            "Use only supplied metrics. Separate observations from recommendations. "
+            "Your goal is to maximize next-day impressions without weakening "
+            "factuality, safety, trust, or account health. Use only supplied metrics "
+            "and operational counts. Separate observations from recommendations. "
+            "Every strategy finding must cite supplied tweet IDs and a measured "
+            "metric; use confidence 0 to 1 and lower it for small samples. "
+            "Recommend presentation choices only: post type, hook type, posting "
+            "hour, text length, body structure, and closing style. Never propose "
+            "changes to political positions, factual standards, safety thresholds, "
+            "budgets, posting limits, credentials, or external publishing controls. "
             "Do not invent political facts, model details, prices, or credentials."
         )
         user = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))

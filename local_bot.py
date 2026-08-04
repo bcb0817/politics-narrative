@@ -29,6 +29,7 @@ import time as time_mod
 import signal
 import argparse
 import subprocess
+import atexit
 from pathlib import Path
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
@@ -38,16 +39,16 @@ SRC_DIR = ROOT_DIR / "src"
 ENV_FILE = ROOT_DIR / ".env"
 JST = ZoneInfo("Asia/Tokyo")
 
-# 監視間隔（分）。MONITOR_INTERVAL_MINUTESを優先し、既定60分。
+# 監視間隔（分）。MONITOR_INTERVAL_MINUTESを優先し、既定45分。
 # 互換用にSLOT_INTERVAL_MINUTESも読み込む。1440を割り切る値のみ有効。
 def _slot_interval_minutes() -> int:
     try:
         v = int(os.environ.get("MONITOR_INTERVAL_MINUTES",
-                               os.environ.get("SLOT_INTERVAL_MINUTES", "60")))
+                               os.environ.get("SLOT_INTERVAL_MINUTES", "45")))
     except (TypeError, ValueError):
-        return 60
+        return 45
     if v < 1 or 1440 % v != 0:
-        return 60
+        return 45
     return v
 
 
@@ -59,6 +60,7 @@ def _monitor_schedule_minute() -> int:
 
 # 実行が重ならないようにするロックファイル
 LOCK_STALE_SECONDS = 30 * 60  # 30分以上残っている lock は stale とみなす
+_DAEMON_LOCK_HANDLE = None
 
 # Windowsコンソール(cp932)対策
 try:
@@ -278,6 +280,28 @@ def next_auxiliary_event(now: datetime) -> tuple[datetime, str]:
             if value > now:
                 candidates.append((value, "follower_snapshot"))
                 break
+    if env_flag("X_RESEARCH_ANALYSIS_ENABLED", "false"):
+        for clock in _parse_clock_list(os.environ.get(
+            "X_RESEARCH_ANALYSIS_SCHEDULE", "12:25,18:25")):
+            for day_offset in (0, 1):
+                value = (now + timedelta(days=day_offset)).replace(
+                    hour=clock.hour, minute=clock.minute,
+                    second=0, microsecond=0)
+                if value > now:
+                    candidates.append((value, "x_research_analysis"))
+                    break
+    if os.environ.get(
+        "STORAGE_CLEANUP_ENABLED", "true"
+    ).strip().lower() in {"1", "true", "yes", "on"}:
+        for clock in _parse_clock_list(os.environ.get(
+            "STORAGE_CLEANUP_SCHEDULE", "03:30")):
+            for day_offset in (0, 1):
+                value = (now + timedelta(days=day_offset)).replace(
+                    hour=clock.hour, minute=clock.minute,
+                    second=0, microsecond=0)
+                if value > now:
+                    candidates.append((value, "storage_cleanup"))
+                    break
     weekday = {"MON": 0, "TUE": 1, "WED": 2, "THU": 3,
                "FRI": 4, "SAT": 5, "SUN": 6}
     weekly_specs = (
@@ -319,10 +343,39 @@ def _run_auxiliary_event(event_name: str, scheduled_at: datetime) -> None:
             cmd_weekly_report()
         elif event_name == "weekly_batch_collect":
             cmd_batch_collect()
+        elif event_name == "storage_cleanup":
+            cmd_storage_cleanup(apply=True)
+        elif event_name == "x_research_analysis":
+            if str(SRC_DIR) not in sys.path:
+                sys.path.insert(0, str(SRC_DIR))
+            from x_research_analysis import publish
+            result = publish(
+                automatic=True, dry_run=False,
+                path=ROOT_DIR / "data" / "bot_metrics.db")
+            log(
+                "[INFO] X research analysis: "
+                f"status={result.get('status')} "
+                f"reason={result.get('reason', '')} "
+                f"external_writes={result.get('external_writes', 0)}")
     finally:
         state[event_key] = datetime.now(JST).isoformat()
         state = dict(list(state.items())[-100:])
         state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def cmd_storage_cleanup(*, apply: bool = False) -> int:
+    """Preview or apply the allowlisted runtime-artifact retention policy."""
+    if str(SRC_DIR) not in sys.path:
+        sys.path.insert(0, str(SRC_DIR))
+    from storage_cleanup import compact_summary, run_cleanup, save_report
+
+    result = run_cleanup(ROOT_DIR, dry_run=not apply)
+    report_path = save_report(ROOT_DIR, result)
+    summary = compact_summary(result)
+    summary["report"] = str(report_path)
+    summary["mode"] = "apply" if apply else "dry-run"
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    return 0
 
 
 def _run_due_review_after_start(now: datetime) -> None:
@@ -378,6 +431,67 @@ def release_lock() -> None:
         lock_path().unlink(missing_ok=True)
     except OSError:
         pass
+
+
+def daemon_lock_path() -> Path:
+    return resolve_dir("STATE_DIR", "data") / "daemon.lock"
+
+
+def acquire_daemon_lock() -> bool:
+    """Hold an OS lock for the daemon lifetime, including orphan processes."""
+    global _DAEMON_LOCK_HANDLE
+    if _DAEMON_LOCK_HANDLE is not None:
+        return True
+    path = daemon_lock_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(path, "a+b")
+    try:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"0")
+            handle.flush()
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        handle.seek(0)
+        handle.truncate()
+        handle.write(json.dumps({
+            "pid": os.getpid(),
+            "started_at_jst": datetime.now(JST).isoformat(),
+        }).encode("utf-8"))
+        handle.flush()
+        _DAEMON_LOCK_HANDLE = handle
+        return True
+    except (OSError, IOError):
+        handle.close()
+        return False
+
+
+def release_daemon_lock() -> None:
+    global _DAEMON_LOCK_HANDLE
+    handle = _DAEMON_LOCK_HANDLE
+    if handle is None:
+        return
+    try:
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except (OSError, IOError):
+        pass
+    finally:
+        handle.close()
+        _DAEMON_LOCK_HANDLE = None
+
+
+atexit.register(release_daemon_lock)
 
 
 # ---------------------------------------------------------------------------
@@ -442,6 +556,9 @@ def cmd_daemon() -> int:
     load_env()
     ensure_dirs()
     check_api_keys()
+    if not acquire_daemon_lock():
+        log("[WARN] daemon: another daemon process already holds daemon.lock; exit")
+        return 0
 
     stop = {"flag": False}
 
@@ -554,6 +671,7 @@ def cmd_daemon() -> int:
             time_mod.sleep(1.0)
 
     log("[INFO] daemon: stopped")
+    release_daemon_lock()
     return 0
 
 
@@ -651,6 +769,43 @@ def cmd_report() -> int:
         log(f"[INFO] report: already completed for {review_date}; skip (set FORCE_REPORT=true to rerun)")
         return 0
 
+    # The 04:40 review evaluates the completed previous JST calendar day.
+    # This runs even when the rolling 24-hour performance sample is empty, so
+    # a low-output day still creates a report and a bounded remediation policy.
+    daily_goal_report = {}
+    daily_goal_policy = {}
+    daily_goal_notified = False
+    try:
+        from daily_post_goal import (  # noqa: E402
+            apply_remediation,
+            build_report as build_daily_goal_report,
+            save_report as save_daily_goal_report,
+        )
+        previous_date = (now_jst - timedelta(days=1)).date()
+        daily_goal_report = build_daily_goal_report(
+            path=dirs["state"] / "bot_metrics.db",
+            log_dir=dirs["log"],
+            now=now_jst,
+            report_date=previous_date,
+        )
+        goal_dir = dirs["state"] / "daily_post_goal"
+        save_daily_goal_report(daily_goal_report, goal_dir)
+        daily_goal_policy = apply_remediation(
+            daily_goal_report, goal_dir, now=now_jst)
+        from discord_notify import notify_daily_post_goal  # noqa: E402
+        daily_goal_notified = notify_daily_post_goal(daily_goal_report)
+        log(
+            "[INFO] report: previous-day posting goal "
+            f"{daily_goal_report.get('actual', {}).get('x', 0)}/"
+            f"{daily_goal_report.get('target', {}).get('posts', 20)}; "
+            f"remediation_active={str(bool(daily_goal_policy.get('active'))).lower()}"
+        )
+    except Exception as exc:
+        log(
+            "[WARN] report: daily posting goal analysis unavailable; "
+            f"performance review continues ({type(exc).__name__})"
+        )
+
     history = post_mod._load_json(post_mod.POSTED_URLS_FILE, [])
     if not isinstance(history, list):
         history = []
@@ -682,10 +837,32 @@ def cmd_report() -> int:
 
     if not recent:
         log(f"[INFO] report: no bot posts in latest {window_hours} hours")
+        reviews_dir = dirs["state"] / "daily_reviews"
+        reviews_dir.mkdir(parents=True, exist_ok=True)
+        minimal_review = {
+            "reviewed_at_jst": now_jst.isoformat(),
+            "window_start_jst": start_jst.isoformat(),
+            "window_end_jst": now_jst.isoformat(),
+            "reviewed_count": 0,
+            "local_only": True,
+            "reason": "no_posts_in_review_window",
+            "daily_post_goal": daily_goal_report,
+            "daily_post_goal_remediation": daily_goal_policy,
+            "daily_post_goal_discord_sent": daily_goal_notified,
+        }
+        payload_text = json.dumps(minimal_review, ensure_ascii=False, indent=2)
+        dated_file = reviews_dir / f"{now_jst:%Y-%m-%d}.json"
+        latest_file = dirs["state"] / "daily_review_latest.json"
+        atomic_write_text(dated_file, payload_text)
+        atomic_write_text(latest_file, payload_text)
         state.update({
             "last_review_date_jst": review_date,
             "last_reviewed_at_jst": now_jst.isoformat(),
             "reviewed_count": 0,
+            "latest_file": str(latest_file),
+            "daily_post_goal": daily_goal_report.get("achievement", {}),
+            "daily_post_goal_remediation_active": bool(
+                daily_goal_policy.get("active")),
         })
         atomic_write_text(state_file, json.dumps(state, ensure_ascii=False, indent=2))
         return 0
@@ -719,12 +896,15 @@ def cmd_report() -> int:
                 encoding="utf-8",
             )
 
+        from post_metrics import (  # noqa: E402
+            TWEET_METRIC_FIELDS, extract_tweet_metrics,
+        )
         resp = client.get_users_tweets(
             id=user_id,
             start_time=start_jst.astimezone(ZoneInfo("UTC")),
             end_time=now_jst.astimezone(ZoneInfo("UTC")),
             max_results=100,
-            tweet_fields=["public_metrics", "created_at"],
+            tweet_fields=TWEET_METRIC_FIELDS,
             user_auth=True,
         )
     except KeyError as e:
@@ -741,17 +921,7 @@ def cmd_report() -> int:
         tid = str(t.id)
         if tid not in local_by_id:
             continue
-        pm = t.public_metrics or {}
-        metrics[tid] = {
-            "impressions": int(pm.get("impression_count", 0) or 0),
-            "likes": int(pm.get("like_count", 0) or 0),
-            "reposts": int(pm.get("retweet_count", 0) or 0),
-            "replies": int(pm.get("reply_count", 0) or 0),
-            "quotes": int(pm.get("quote_count", 0) or 0),
-            "bookmarks": int(pm.get("bookmark_count", 0) or 0),
-            "profile_clicks": int(pm.get("user_profile_clicks", 0) or 0),
-            "url_clicks": int(pm.get("url_link_clicks", 0) or 0),
-        }
+        metrics[tid] = extract_tweet_metrics(t)
 
     missing_tweet_errors = [
         {"reason": "missing_from_x_timeline", "tweet_id": tid,
@@ -768,29 +938,51 @@ def cmd_report() -> int:
                     row = conn.execute("""SELECT * FROM post_metrics WHERE tweet_id=?
                       ORDER BY measured_at DESC LIMIT 1""", (tid,)).fetchone()
                     if row:
+                        def optional_int(name):
+                            value = row[name]
+                            return int(value) if value is not None else None
+
                         metrics[tid] = {
-                            "impressions": int(row["impressions"] or 0),
-                            "likes": int(row["likes"] or 0),
-                            "reposts": int(row["reposts"] or 0),
-                            "replies": int(row["replies"] or 0),
-                            "quotes": int(row["quotes"] or 0),
-                            "bookmarks": int(row["bookmarks"] or 0),
-                            "profile_clicks": (
-                                int(row["profile_clicks"]) if row["profile_clicks"] is not None else None
-                            ),
-                            "url_clicks": (
-                                int(row["url_clicks"]) if row["url_clicks"] is not None else None
-                            ),
+                            "impressions": optional_int("impressions"),
+                            "likes": optional_int("likes"),
+                            "reposts": optional_int("reposts"),
+                            "replies": optional_int("replies"),
+                            "quotes": optional_int("quotes"),
+                            "bookmarks": optional_int("bookmarks"),
+                            "profile_clicks": optional_int("profile_clicks"),
+                            "url_clicks": optional_int("url_clicks"),
                         }
         except Exception:
             pass
     if not metrics:
         log("[WARN] report: no current or stored metrics; local empty review retained")
+        reviews_dir = dirs["state"] / "daily_reviews"
+        reviews_dir.mkdir(parents=True, exist_ok=True)
+        minimal_review = {
+            "reviewed_at_jst": now_jst.isoformat(),
+            "window_start_jst": start_jst.isoformat(),
+            "window_end_jst": now_jst.isoformat(),
+            "reviewed_count": 0,
+            "local_only": True,
+            "reason": "no_current_or_stored_metrics",
+            "daily_post_goal": daily_goal_report,
+            "daily_post_goal_remediation": daily_goal_policy,
+            "daily_post_goal_discord_sent": daily_goal_notified,
+        }
+        payload_text = json.dumps(minimal_review, ensure_ascii=False, indent=2)
+        dated_file = reviews_dir / f"{now_jst:%Y-%m-%d}.json"
+        latest_file = dirs["state"] / "daily_review_latest.json"
+        atomic_write_text(dated_file, payload_text)
+        atomic_write_text(latest_file, payload_text)
         state.update({
             "last_review_date_jst": review_date,
             "last_reviewed_at_jst": now_jst.isoformat(),
             "reviewed_count": 0,
             "local_only": True,
+            "latest_file": str(latest_file),
+            "daily_post_goal": daily_goal_report.get("achievement", {}),
+            "daily_post_goal_remediation_active": bool(
+                daily_goal_policy.get("active")),
         })
         atomic_write_text(state_file, json.dumps(state, ensure_ascii=False, indent=2))
         return 0
@@ -823,10 +1015,20 @@ def cmd_report() -> int:
         m = metrics[tid]
         posted_dt = h["_posted_dt"]
         age_hours = max((now_jst - posted_dt).total_seconds() / 3600.0, 0.25)
-        engagement_total = m["likes"] + m["reposts"] + m["replies"] + m["quotes"] + m["bookmarks"]
+        engagement_values = [
+            m.get(name) for name in (
+                "likes", "reposts", "replies", "quotes", "bookmarks")
+            if m.get(name) is not None
+        ]
+        engagement_total = (
+            sum(engagement_values) if engagement_values else None)
         impressions = m["impressions"]
-        impressions_per_hour = round(impressions / age_hours, 2)
-        engagement_rate = round((engagement_total / impressions), 6) if impressions else 0.0
+        impressions_per_hour = (
+            round(impressions / age_hours, 2)
+            if impressions is not None else None)
+        engagement_rate = (
+            round((engagement_total / impressions), 6)
+            if engagement_total is not None and impressions else None)
         row = {
             "tweet_id": tid,
             "text": h.get("tweet_text", ""),
@@ -836,6 +1038,13 @@ def cmd_report() -> int:
             "critique_axis": h.get("critique_axis", ""),
             "model": h.get("openai_model", ""),
             "prompt_version": h.get("prompt_version", "v1"),
+            "review_strategy_active": bool(
+                h.get("review_strategy_active")),
+            "review_strategy_experiment": h.get(
+                "review_strategy_experiment", ""),
+            "review_strategy_id": h.get("review_strategy_id", ""),
+            "review_strategy_variant": h.get(
+                "review_strategy_variant", "inactive"),
             "posted_at": h.get("posted_at_jst", ""),
             "posted_hour_jst": posted_dt.hour,
             "text_length": len(h.get("tweet_text", "") or ""),
@@ -866,7 +1075,12 @@ def cmd_report() -> int:
         row["winner_types"] = winner_types(row)
         rows.append(row)
 
-    by_impressions = sorted(rows, key=lambda r: (r["impressions"], r["impressions_per_hour"]), reverse=True)
+    by_impressions = sorted(
+        rows, key=lambda r: (
+            r["impressions"] if r["impressions"] is not None else -1,
+            r["impressions_per_hour"]
+            if r["impressions_per_hour"] is not None else -1),
+        reverse=True)
     by_growth = sorted(rows, key=lambda r: r["growth_score"], reverse=True)
     top3 = by_impressions[:3]
     eligible_rows = [row for row in rows if row["eligible_winning_example"]]
@@ -887,8 +1101,18 @@ def cmd_report() -> int:
             key: {
                 "count": len(values),
                 "avg_growth_score": round(sum(v["growth_score"] for v in values) / len(values), 4),
-                "avg_impressions": round(sum(v["impressions"] for v in values) / len(values), 2),
-                "avg_profile_clicks": round(sum(v["profile_clicks"] for v in values) / len(values), 2),
+                "avg_impressions": (
+                    round(sum(v["impressions"] for v in values
+                              if v["impressions"] is not None) /
+                          sum(v["impressions"] is not None for v in values), 2)
+                    if any(v["impressions"] is not None for v in values)
+                    else None),
+                "avg_profile_clicks": (
+                    round(sum(v["profile_clicks"] for v in values
+                              if v["profile_clicks"] is not None) /
+                          sum(v["profile_clicks"] is not None for v in values), 2)
+                    if any(v["profile_clicks"] is not None for v in values)
+                    else None),
             }
             for key, values in sorted(grouped.items())
         }
@@ -1020,6 +1244,10 @@ def cmd_report() -> int:
             "critique_axis": performance_breakdown("critique_axis"),
             "posted_hour_jst": performance_breakdown("posted_hour_jst"),
             "prompt_version": performance_breakdown("prompt_version"),
+            "review_strategy_experiment": performance_breakdown(
+                "review_strategy_experiment"),
+            "review_strategy_variant": performance_breakdown(
+                "review_strategy_variant"),
         },
         "repeated_structures": repeated_structures,
         "all_posts": rows,
@@ -1029,12 +1257,50 @@ def cmd_report() -> int:
                            "conversation_winner", "conversion_winner")
         },
         "prompt_version_comparison": prompt_version_comparison,
+        "daily_post_goal": daily_goal_report,
+        "daily_post_goal_remediation": daily_goal_policy,
+        "daily_post_goal_discord_sent": daily_goal_notified,
     }
     from usage_reports import xai_roi  # noqa: E402
     review_payload["xai_attribution_daily"] = xai_roi(days=1)
     review_payload["xai_attribution_weekly"] = xai_roi(days=7)
     from threads_api import daily_review_summary  # noqa: E402
     review_payload["threads"] = daily_review_summary()
+    from integrated_research import (  # noqa: E402
+        daily_review_summary as integrated_daily_review_summary,
+    )
+    review_payload["integrated_research"] = (
+        integrated_daily_review_summary(days=1, path=review_db)
+    )
+    from review_strategy import (  # noqa: E402
+        activate_strategy,
+        deactivate_strategy,
+        evaluate_strategy_performance,
+        strategy_status,
+        summarize_operational_logs,
+    )
+    review_payload["operational_log_summary"] = summarize_operational_logs(
+        dirs["log"], start_jst, now_jst)
+    current_strategy = strategy_status(ROOT_DIR)
+    prior_strategy = current_strategy.get("strategy", {})
+    prior_evaluation = evaluate_strategy_performance(
+        review_payload,
+        prior_strategy,
+        root_dir=ROOT_DIR,
+        now=now_jst,
+    )
+    review_payload["prior_strategy_evaluation"] = prior_evaluation
+    if prior_evaluation.get("status") == "rollback":
+        review_payload["prior_strategy_rollback"] = deactivate_strategy(
+            ROOT_DIR,
+            reason=str(prior_evaluation.get("reason") or "automatic_rollback"),
+            now=now_jst,
+        )
+    review_payload["current_active_strategy"] = {
+        "active": bool(prior_strategy) and (
+            prior_evaluation.get("status") != "rollback"),
+        "strategy": prior_strategy,
+    }
     # Local aggregation is authoritative; one bounded LLM call adds trend analysis.
     # Failure is recorded but never makes the daily review fail or blocks posting.
     from report_ai import analyze_report, compact_daily_payload  # noqa: E402
@@ -1054,8 +1320,35 @@ def cmd_report() -> int:
     review_payload["llm_usage"] = llm_result.get("usage_event", {})
     review_payload["llm_pending"] = bool(llm_result.get("pending"))
     review_payload["llm_batch_job"] = llm_result.get("batch_job", {})
+    review_payload["chatgpt_strategy_activation"] = activate_strategy(
+        review_payload["llm_analysis"],
+        review_payload,
+        root_dir=ROOT_DIR,
+        now=now_jst,
+    )
     if review_payload["llm_error"]:
         log(f"[WARN] report: LLM analysis unavailable; local review retained ({review_payload['llm_error']})")
+    strategy_activation = review_payload["chatgpt_strategy_activation"]
+    if strategy_activation.get("activated"):
+        log(
+            "[INFO] report: ChatGPT impression strategy activated "
+            f"until {strategy_activation.get('expires_at', '')}"
+        )
+    else:
+        log(
+            "[INFO] report: ChatGPT impression strategy not activated "
+            f"({strategy_activation.get('reason', '')})"
+        )
+    try:
+        from discord_notify import notify_review_strategy_result  # noqa: E402
+        review_payload["chatgpt_strategy_discord_sent"] = (
+            notify_review_strategy_result(
+                strategy_activation,
+                prior_evaluation=prior_evaluation,
+            )
+        )
+    except Exception:
+        review_payload["chatgpt_strategy_discord_sent"] = False
     latest_file = dirs["state"] / "daily_review_latest.json"
     payload_text = json.dumps(review_payload, ensure_ascii=False, indent=2)
     atomic_write_text(dated_file, payload_text)
@@ -1067,6 +1360,18 @@ def cmd_report() -> int:
         report_lines.append(review_payload["llm_analysis"].get("summary", ""))
         report_lines.extend(["", "## Recommendations", ""])
         report_lines.extend(f"- {item}" for item in review_payload["llm_analysis"].get("recommendations", []))
+        strategy = review_payload["llm_analysis"].get(
+            "impression_strategy") or {}
+        report_lines.extend(["", "## Impression Strategy", ""])
+        report_lines.append(str(strategy.get("summary") or ""))
+        policy = strategy.get("next_day_policy") or {}
+        report_lines.extend([
+            "",
+            f"- Post types: {', '.join(policy.get('post_type_priority', []))}",
+            f"- Hooks: {', '.join(policy.get('hook_type_priority', []))}",
+            f"- Hours JST: {', '.join(str(v) for v in policy.get('preferred_hours_jst', []))}",
+            f"- Activation: {review_payload['chatgpt_strategy_activation'].get('reason', '')}",
+        ])
     (reports_dir / f"{review_date}.md").write_text("\n".join(report_lines).strip() + "\n", encoding="utf-8")
     from metrics_db import (apply_additive_migrations, db_path as metrics_db_path,
                             write as db_write)  # noqa: E402
@@ -1178,6 +1483,13 @@ def cmd_report() -> int:
         "reviewed_count": len(rows),
         "top3_tweet_ids": [r["tweet_id"] for r in top3],
         "latest_file": str(latest_file),
+        "chatgpt_strategy_activated": bool(
+            review_payload["chatgpt_strategy_activation"].get("activated")),
+        "chatgpt_strategy_reason": review_payload[
+            "chatgpt_strategy_activation"].get("reason", ""),
+        "daily_post_goal": daily_goal_report.get("achievement", {}),
+        "daily_post_goal_remediation_active": bool(
+            daily_goal_policy.get("active")),
     })
     atomic_write_text(state_file, json.dumps(state, ensure_ascii=False, indent=2))
 
@@ -1513,6 +1825,154 @@ def cmd_xai_roi() -> int:
         sys.path.insert(0, str(SRC_DIR))
     from usage_reports import xai_roi  # noqa: E402
     print(json.dumps(xai_roi(), ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_integrated_research_status() -> int:
+    load_env(require=False)
+    ensure_dirs()
+    if str(SRC_DIR) not in sys.path:
+        sys.path.insert(0, str(SRC_DIR))
+    from integrated_research import status  # noqa: E402
+    print(json.dumps(status(), ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_integrated_research(action: str, **kwargs) -> int:
+    load_env(require=False)
+    ensure_dirs()
+    if str(SRC_DIR) not in sys.path:
+        sys.path.insert(0, str(SRC_DIR))
+    import integrated_research as research  # noqa: E402
+
+    if action == "history":
+        result = research.history(
+            kwargs.get("topic_key", ""), kwargs.get("limit", 20))
+    elif action == "outcomes":
+        result = research.outcomes(kwargs.get("days", 30))
+    elif action == "sources":
+        result = research.source_contribution(kwargs.get("days", 30))
+    elif action == "export":
+        output = Path(kwargs["output"]) if kwargs.get("output") else None
+        result = research.export_results(
+            kwargs.get("format", "json"), kwargs.get("days", 30), output)
+    elif action == "dashboard":
+        output = Path(kwargs["output"]) if kwargs.get("output") else None
+        result = research.render_dashboard(
+            kwargs.get("days", 30), output)
+    elif action == "audit":
+        output = Path(kwargs["output"]) if kwargs.get("output") else None
+        result = research.audit(output)
+    elif action == "backfill":
+        result = research.backfill(
+            kwargs.get("limit", 500), kwargs.get("apply", False))
+    elif action == "retention":
+        result = research.retention(
+            kwargs.get("days"), kwargs.get("apply", False))
+    elif action == "backup_check":
+        result = research.validate_backup_restore()
+    elif action == "correction":
+        result = research.record_correction(
+            kwargs["topic_id"], kwargs["fact_summary"], kwargs["reason"],
+            kwargs.get("apply", False))
+    elif action == "source_delete":
+        result = research.mark_source_deleted(
+            kwargs["provider"], kwargs["source_id"],
+            kwargs.get("apply", False))
+    elif action == "reuse":
+        result = research.reuse_topic(kwargs["topic_id"])
+    elif action == "mitigations":
+        result = research.mitigation_report()
+    else:
+        raise ValueError(f"unknown integrated research action: {action}")
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_xai_discovery(action: str, days: int = 30, max_topics: int = 5,
+                      apply: bool = False) -> int:
+    load_env(require=False)
+    ensure_dirs()
+    if str(SRC_DIR) not in sys.path:
+        sys.path.insert(0, str(SRC_DIR))
+    from dataclasses import asdict
+    from xai_discovery import (
+        budget_plan, cost_breakdown, coverage_report, discovery_audit,
+        discovery_status, dry_run, phase_d_optimize, roi_report,
+    )
+    if action == "status":
+        result = discovery_status()
+    elif action in {"budget_mode", "run_budget"}:
+        result = asdict(budget_plan())
+    elif action == "coverage":
+        result = coverage_report(days=days)
+    elif action == "costs":
+        result = cost_breakdown(days=days)
+    elif action == "audit":
+        result = discovery_audit()
+    elif action == "dry_run":
+        result = dry_run(max_topics=max_topics)
+    elif action == "roi":
+        result = roi_report(days=days, persist=apply)
+    elif action == "optimize":
+        result = phase_d_optimize(days=days, apply=apply)
+    else:
+        raise ValueError(f"unknown xAI discovery action: {action}")
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_xai_live_validation(runs: int, confirm: bool) -> int:
+    """Perform bounded xAI-only validation; never invokes social posting."""
+    if not confirm:
+        print("Refusing live xAI validation without --confirm")
+        return 2
+    load_env(require=False)
+    ensure_dirs()
+    if str(SRC_DIR) not in sys.path:
+        sys.path.insert(0, str(SRC_DIR))
+    from xai_radar import search
+    keys = {
+        "POST_ENABLED": "false",
+        "X_POST_ENABLED": "false",
+        "THREADS_POST_ENABLED": "false",
+        "XAI_STANDARD_MAX_TOPICS": "3",
+        "XAI_EXTENDED_RESEARCH_ENABLED": "false",
+        "XAI_IMAGE_UNDERSTANDING_DEFAULT": "false",
+        "XAI_IMAGE_UNDERSTANDING_IMPORTANT_ONLY": "false",
+        "XAI_VIDEO_UNDERSTANDING_ENABLED": "false",
+    }
+    previous = {key: os.environ.get(key) for key in keys}
+    os.environ.update(keys)
+    outcomes = []
+    candidates = [{
+        "content_id": "phase-b-official-politics",
+        "title": "国会と政府の最新公式発表",
+        "summary": "公開された一次資料に関連する議論を確認",
+        "source_url": "fixture://phase-b/official",
+        "verified": True,
+        "source_reliability_score": 9,
+        "importance_score": 6,
+    }]
+    try:
+        for index in range(max(1, min(2, runs))):
+            topics = search(
+                candidates=candidates, notify_discord=False, force_run=True)
+            outcomes.append({
+                "run": index + 1,
+                "topic_count": len(topics),
+                "external_posts": 0,
+            })
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+    print(json.dumps({
+        "phase": "B", "runs": outcomes, "external_posts": 0,
+        "image_understanding": False,
+    }, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -1893,11 +2353,15 @@ def cmd_status() -> int:
     print(f"attempted_slots.json : {len(attempted)} 件（トライ済みslot・catch-up基準）")
     print(f"posted_urls.json     : {len(history)} 件（投稿履歴）")
     print(f"POST_ENABLED         : {os.environ.get('POST_ENABLED', '(未設定→false扱い)')}")
+    print(
+        "AUTONOMOUS_POSTING_ENABLED: "
+        f"{os.environ.get('AUTONOMOUS_POSTING_ENABLED', '(未設定→true扱い)')}"
+    )
     print(f"X_SEARCH_ENABLED     : {os.environ.get('X_SEARCH_ENABLED', '(未設定→false扱い)')}")
     print(f"X_SEARCH_QUERY       : {os.environ.get('X_SEARCH_QUERY', '(未設定)')}")
     print(f"SOURCE_SCHEDULE_SPLIT: {os.environ.get('SOURCE_SCHEDULE_SPLIT', '(未設定→true扱い)')}")
     print(f"MIN_POST_SCORE       : {os.environ.get('MIN_POST_SCORE', '(未設定→6.3)')}")
-    print(f"MAX_DAILY_POSTS      : {os.environ.get('MAX_DAILY_POSTS', '(未設定→16)')}")
+    print(f"MAX_DAILY_POSTS      : {os.environ.get('MAX_DAILY_POSTS', '(未設定→20)')}")
     print(f"MIN_POST_INTERVAL_MINUTES: {os.environ.get('MIN_POST_INTERVAL_MINUTES', '(未設定→45)')}")
     print(f"TOPIC_COOLDOWN_HOURS : {os.environ.get('TOPIC_COOLDOWN_HOURS', '(未設定→4)')}")
     print(f"CATCH_UP_HOURS       : {os.environ.get('CATCH_UP_HOURS', '(未設定→24)')}")
@@ -2012,7 +2476,8 @@ def _threads_output(action: str, **kwargs) -> int:
     import threads_api
 
     actions = {
-        "auth_url": lambda: threads_api.authorization_url(),
+        "auth_url": lambda: threads_api.authorization_url(
+            scope_profile=kwargs.get("scope_profile", "basic")),
         "exchange_code": lambda: threads_api.exchange_code(kwargs["code"]),
         "token_status": lambda: threads_api.token_status(),
         "refresh_token": lambda: threads_api.refresh_token(
@@ -2039,6 +2504,398 @@ def _threads_output(action: str, **kwargs) -> int:
     return 0
 
 
+def _threads_full_output(action: str, **kwargs) -> int:
+    """Run read-first Threads analytics or an explicitly approved action."""
+    load_env()
+    ensure_dirs()
+    import threads_full_api as api
+
+    actions = {
+        "permissions": lambda: api.permissions(probe=True),
+        "profile_sync": lambda: api.profile_sync(
+            dry_run=kwargs.get("dry_run", False)),
+        "sync_posts": lambda: api.sync_posts(
+            dry_run=kwargs.get("dry_run", False),
+            since=kwargs.get("since", ""), until=kwargs.get("until", "")),
+        "sync_replies": lambda: api.sync_replies(
+            dry_run=kwargs.get("dry_run", False)),
+        "sync_mentions": lambda: api.sync_mentions(
+            dry_run=kwargs.get("dry_run", False)),
+        "post_insights": lambda: api.collect_post_insights(
+            dry_run=kwargs.get("dry_run", False)),
+        "account_insights": lambda: api.collect_account_insights(
+            dry_run=kwargs.get("dry_run", False)),
+        "search": lambda: api.search(
+            kwargs["query"], search_type=kwargs.get("search_type", ""),
+            search_mode=kwargs.get("search_mode", "KEYWORD"),
+            since=kwargs.get("since", ""), until=kwargs.get("until", ""),
+            hours=kwargs.get("hours", 0),
+            dry_run=kwargs.get("dry_run", False)),
+        "trends": lambda: api.trends(
+            hours=kwargs.get("hours", 24),
+            dry_run=kwargs.get("dry_run", False)),
+        "quota": lambda: api.quota_status(
+            dry_run=kwargs.get("dry_run", False)),
+        "container": lambda: api.container_status(kwargs["container_id"]),
+        "daily_report": lambda: api.daily_report(
+            dry_run=kwargs.get("dry_run", False)),
+        "weekly_report": lambda: api.weekly_report(
+            dry_run=kwargs.get("dry_run", False)),
+        "comparison": lambda: api.x_comparison(kwargs.get("days", 30)),
+        "reply_draft": lambda: api.reply_draft(
+            kwargs["target_id"], kwargs.get("text", "")),
+        "reply_publish": lambda: api.apply_action(
+            kwargs["draft_id"], confirm=kwargs.get("confirm", False)),
+        "quote_draft": lambda: api.quote_draft(
+            kwargs["target_id"], kwargs.get("text", "")),
+        "quote_publish": lambda: api.apply_action(
+            kwargs["draft_id"], confirm=kwargs.get("confirm", False)),
+        "moderation_draft": lambda: api.moderation_draft(
+            kwargs["target_id"], kwargs["moderation_action"]),
+        "moderation_apply": lambda: api.apply_action(
+            kwargs["draft_id"], confirm=kwargs.get("confirm", False)),
+        "retention": lambda: api.data_retention_run(),
+        "user_delete": lambda: api.user_data_delete(
+            kwargs["user_id"], confirm=kwargs.get("confirm", False)),
+        "full_sync": lambda: api.full_sync(
+            dry_run=kwargs.get("dry_run", False)),
+        "location": lambda: api.location_get(kwargs["location_id"]),
+        "profile_discovery": lambda: api.profile_discovery(
+            kwargs["username"], dry_run=kwargs.get("dry_run", False)),
+    }
+    if action == "direct_action":
+        draft = api.direct_action_draft(
+            kwargs["action_type"], kwargs["target_id"],
+            reason=kwargs.get("reason", ""))
+        if not kwargs.get("confirm") or draft.get("status") != "draft":
+            result = {
+                **draft,
+                "reason": (
+                    draft.get("reason") or "confirm_required"),
+                "external_writes": 0,
+            }
+        else:
+            result = api.apply_action(
+                int(draft["draft_id"]), confirm=True)
+    elif action in {"format_preview", "format_validate"}:
+        spec_path = Path(kwargs["spec_file"]).resolve()
+        if ROOT_DIR not in spec_path.parents:
+            raise ValueError("Threads format spec must be inside repository")
+        spec = json.loads(spec_path.read_text(encoding="utf-8"))
+        result = (
+            api.format_preview(spec) if action == "format_preview"
+            else api.validate_format(spec))
+    elif action == "format_publish":
+        result = api.apply_action(
+            kwargs["draft_id"], confirm=kwargs.get("confirm", False))
+    else:
+        result = actions[action]()
+    print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    if isinstance(result, dict) and result.get("status") in {
+        "failed", "rejected", "ambiguous",
+    }:
+        return 1
+    return 0
+
+
+def _crosspost_output(action: str, **kwargs) -> int:
+    """Run the preview-first video cross-post pipeline."""
+    load_env(require=False)
+    ensure_dirs()
+    import crosspost
+
+    publication_id = kwargs.get("publication_id", "")
+    actions = {
+        "status": lambda: crosspost.status(),
+        "candidates": lambda: crosspost.candidates(),
+        "generate_copy": lambda: crosspost.generate_copy(
+            publication_id, dry_run=kwargs.get("dry_run", True)),
+        "render": lambda: crosspost.render_renditions(
+            publication_id, dry_run=kwargs.get("dry_run", True)),
+        "validate": lambda: crosspost.validate(
+            publication_id, dry_run=kwargs.get("dry_run", True)),
+        "prepare": lambda: crosspost.prepare(
+            publication_id, dry_run=kwargs.get("dry_run", True)),
+        "publish": lambda: crosspost.publish(
+            publication_id, confirm=kwargs.get("confirm", False),
+            dry_run=kwargs.get("dry_run", False)),
+        "reconcile": lambda: crosspost.reconcile(publication_id),
+        "metrics": lambda: crosspost.metrics_sync(
+            publication_id, dry_run=kwargs.get("dry_run", True)),
+        "report": lambda: crosspost.report(
+            publication_id, dry_run=kwargs.get("dry_run", True)),
+        "emergency_stop": lambda: crosspost.emergency_stop(),
+        "instagram_auth_url": lambda: crosspost.instagram_auth_url(),
+        "instagram_exchange": lambda: crosspost.instagram_exchange_code(
+            kwargs.get("code", ""), dry_run=kwargs.get("dry_run", True)),
+        "instagram_token": lambda: crosspost.token_status("instagram"),
+        "instagram_profile": lambda: crosspost.instagram_profile(
+            dry_run=kwargs.get("dry_run", True)),
+        "instagram_reel_status": lambda: crosspost.instagram_reel_status(
+            kwargs.get("creation_id", ""),
+            dry_run=kwargs.get("dry_run", True)),
+        "youtube_token": lambda: crosspost.token_status("youtube"),
+    }
+    result = actions[action]()
+    print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    if isinstance(result, dict) and result.get("status") in {
+        "failed", "ambiguous",
+    }:
+        return 1
+    return 0
+
+
+def _growth_output(action: str, **kwargs) -> int:
+    """Run the local-only Phase A social content factory."""
+    load_env(require=False)
+    ensure_dirs()
+    import social_content_factory as factory
+    from runtime_config import audit as config_audit
+
+    actions = {
+        "config_audit": lambda: config_audit(),
+        "packet": lambda: factory.generate_packet(
+            topic_key=kwargs.get("topic_key"),
+            content_id=kwargs.get("content_id"),
+        ),
+        "inventory_status": lambda: factory.inventory_status(),
+        "inventory_build": lambda: factory.build_inventory(
+            dry_run=kwargs.get("dry_run", True)),
+        "variants": lambda: factory.generate_variants(
+            dry_run=kwargs.get("dry_run", True)),
+        "hypotheses": lambda: factory.hypotheses(
+            dry_run=kwargs.get("dry_run", True)),
+        "growth_status": lambda: factory.growth_status(),
+        "daily_report": lambda: factory.daily_report(
+            dry_run=kwargs.get("dry_run", True)),
+        "weekly_report": lambda: factory.weekly_report(
+            dry_run=kwargs.get("dry_run", True)),
+        "shorts": lambda: factory.promote_short_candidates(
+            dry_run=kwargs.get("dry_run", True)),
+        "articles": lambda: factory.promote_article_candidates(
+            dry_run=kwargs.get("dry_run", True)),
+        "visuals": lambda: factory.visual_candidates(
+            dry_run=kwargs.get("dry_run", True)),
+        "threads": lambda: factory.thread_candidates(
+            dry_run=kwargs.get("dry_run", True)),
+        "replies": lambda: factory.reply_candidate_list(
+            dry_run=kwargs.get("dry_run", True)),
+        "quotes": lambda: factory.quote_candidate_list(
+            dry_run=kwargs.get("dry_run", True)),
+        "source_health": lambda: factory.source_health(),
+        "budget": lambda: factory.budget_simulation(
+            x_posts=kwargs.get("x_posts", 14),
+            threads_posts=kwargs.get("threads_posts", 6),
+            visuals=kwargs.get("visuals", 2),
+            short_candidates=kwargs.get("short_candidates", 5),
+            days=kwargs.get("days", 30),
+        ),
+        "full_cycle": lambda: factory.full_cycle(
+            dry_run=kwargs.get("dry_run", True)),
+    }
+    result = actions[action]()
+    print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    return 0
+
+
+def _current_affairs_output(action: str, **kwargs) -> int:
+    """Run the local-only current-affairs Phase A engine."""
+    load_env(require=False)
+    ensure_dirs()
+    import current_affairs
+
+    actions = {
+        "status": lambda: current_affairs.status(),
+        "list": lambda: current_affairs.categories(),
+        "classify": lambda: current_affairs.classify_items(
+            content_id=kwargs.get("content_id"),
+            dry_run=kwargs.get("dry_run", True)),
+        "mix": lambda: current_affairs.mix_config(),
+        "candidates": lambda: current_affairs.category_candidates(
+            category=kwargs.get("category"),
+            dry_run=kwargs.get("dry_run", True)),
+        "performance": lambda: current_affairs.performance(
+            category=kwargs.get("category")),
+        "exclusions": lambda: current_affairs.exclusions(),
+        "sources": lambda: current_affairs.source_health(),
+        "daily": lambda: current_affairs.daily_report(
+            dry_run=kwargs.get("dry_run", True)),
+        "weekly": lambda: current_affairs.weekly_report(
+            dry_run=kwargs.get("dry_run", True)),
+        "full_cycle": lambda: current_affairs.full_cycle(
+            dry_run=kwargs.get("dry_run", True)),
+    }
+    result = actions[action]()
+    print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    return 0
+
+
+def _social_anger_output(action: str, **kwargs) -> int:
+    """Run the local-only evidence-based social anger Phase A engine."""
+    load_env(require=False)
+    ensure_dirs()
+    import social_anger
+
+    actions = {
+        "status": lambda: social_anger.status(),
+        "assess": lambda: social_anger.assess_items(
+            content_id=kwargs.get("content_id"),
+            dry_run=kwargs.get("dry_run", True)),
+        "candidates": lambda: social_anger.candidate_cycle(
+            content_id=kwargs.get("content_id"),
+            dry_run=kwargs.get("dry_run", True)),
+        "targets": lambda: social_anger.targets_report(),
+        "risk": lambda: social_anger.risk_report(),
+        "solution_gaps": lambda: social_anger.solution_gaps(),
+        "daily": lambda: social_anger.daily_report(
+            dry_run=kwargs.get("dry_run", True)),
+        "weekly": lambda: social_anger.weekly_report(
+            dry_run=kwargs.get("dry_run", True)),
+        "full_cycle": lambda: social_anger.full_cycle(
+            dry_run=kwargs.get("dry_run", True)),
+    }
+    result = actions[action]()
+    print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    return 0
+
+
+def cmd_review_strategy_status() -> int:
+    """Show the currently active validated ChatGPT review strategy."""
+    load_env(require=False)
+    if str(SRC_DIR) not in sys.path:
+        sys.path.insert(0, str(SRC_DIR))
+    from review_strategy import strategy_status  # noqa: E402
+    print(json.dumps(
+        strategy_status(ROOT_DIR), ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_review_strategy_disable(confirm: bool) -> int:
+    """Disable the active ChatGPT strategy while preserving its audit trail."""
+    load_env(require=False)
+    if not confirm:
+        print(json.dumps({
+            "deactivated": False,
+            "reason": "confirmation_required",
+        }, ensure_ascii=False, indent=2))
+        return 2
+    if str(SRC_DIR) not in sys.path:
+        sys.path.insert(0, str(SRC_DIR))
+    from review_strategy import deactivate_strategy  # noqa: E402
+    print(json.dumps(
+        deactivate_strategy(
+            ROOT_DIR, reason="manual_cli_disable"),
+        ensure_ascii=False,
+        indent=2,
+    ))
+    return 0
+
+
+def _disaster_output(action: str, **kwargs) -> int:
+    """Run the isolated disaster-update lifecycle pipeline."""
+    load_env(require=False)
+    ensure_dirs()
+    import disaster_updates as disaster
+
+    incident_id = kwargs.get("incident_id") or disaster.INCIDENT_ID
+    actions = {
+        "status": lambda: disaster.status(incident_id),
+        "create": lambda: disaster.create_snapshot(
+            incident_id, kwargs["snapshot_type"],
+            dry_run=kwargs.get("dry_run", False)),
+        "list": lambda: disaster.list_snapshots(incident_id),
+        "detail": lambda: disaster.detail(kwargs["snapshot_id"]),
+        "delta": lambda: disaster.latest_delta(incident_id),
+        "visual": lambda: disaster.render_latest(
+            incident_id, kwargs["snapshot_type"],
+            dry_run=kwargs.get("dry_run", False)),
+        "candidates": lambda: disaster.latest_candidates(
+            incident_id, kwargs["snapshot_type"],
+            dry_run=kwargs.get("dry_run", False)),
+        "corrections": lambda: disaster.latest_correction(incident_id),
+        "frequency": lambda: disaster.frequency_recommendation(incident_id),
+        "approve": lambda: disaster.approve_candidate(
+            kwargs["snapshot_id"], kwargs["platform"],
+            decision=kwargs.get("decision", "approved"),
+            approved_by=kwargs.get("approved_by", "local_operator"),
+            notes=kwargs.get("notes", "")),
+        "publish": lambda: disaster.publish_candidate(
+            kwargs["snapshot_id"], kwargs["platform"],
+            confirm=kwargs.get("confirm", False)),
+        "auto_publish": lambda: disaster.auto_publish_verified(
+            kwargs["snapshot_id"]),
+        "frequency_apply": lambda: disaster.apply_frequency_mode(
+            incident_id, kwargs["mode"],
+            confirm=kwargs.get("confirm", False)),
+        "recovery_brief": lambda: disaster.recovery_brief(incident_id),
+        "closure": lambda: disaster.closure_package(incident_id),
+        "full_cycle": lambda: disaster.full_cycle(
+            incident_id, kwargs["snapshot_type"],
+            dry_run=kwargs.get("dry_run", False)),
+    }
+    result = actions[action]()
+    print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    if isinstance(result, dict) and result.get("status") in {
+        "not_found", "no_snapshots",
+    }:
+        return 1
+    return 0
+
+
+def _post_experiment_output(action: str, **kwargs) -> int:
+    """Run Phase A analysis only; this dispatcher has no publishing action."""
+    load_env(require=False)
+    ensure_dirs()
+    if str(SRC_DIR) not in sys.path:
+        sys.path.insert(0, str(SRC_DIR))
+    import post_experiments as experiments
+
+    limit = kwargs.get("limit", 300)
+    actions = {
+        "status": lambda: experiments.status(ROOT_DIR),
+        "extract": lambda: experiments.feature_extract(ROOT_DIR, limit),
+        "sync": lambda: experiments.performance_sync(ROOT_DIR, limit),
+        "audit": lambda: experiments.audit(ROOT_DIR, limit),
+        "backtest": lambda: experiments.backtest(
+            ROOT_DIR, limit, dry_run=kwargs.get("dry_run", True)),
+        "candidates": lambda: experiments.candidate_for_content(
+            ROOT_DIR, kwargs["content_id"],
+            dry_run=kwargs.get("dry_run", True)),
+        "compare": lambda: experiments.build_analysis(
+            experiments.resolve_db_path(ROOT_DIR)[0],
+            kwargs.get("window_days", 90)),
+        "correlation": lambda: experiments.build_analysis(
+            experiments.resolve_db_path(ROOT_DIR)[0],
+            kwargs.get("window_days", 90))["correlations"],
+        "report": lambda: experiments.full_cycle(
+            ROOT_DIR, limit, dry_run=True, notify_discord=False),
+        "weekly_report": lambda: experiments.full_cycle(
+            ROOT_DIR, limit, dry_run=True, notify_discord=False),
+        "full_cycle": lambda: experiments.full_cycle(
+            ROOT_DIR, limit, dry_run=kwargs.get("dry_run", False)),
+        "phase_b_assign": lambda: experiments.assign_phase_b(
+            experiments.resolve_db_path(ROOT_DIR)[0],
+            kwargs["experiment_id"], kwargs["platform"], kwargs.get("stratum", "default")),
+        "phase_b_approve": lambda: experiments.approve_phase_b(
+            experiments.resolve_db_path(ROOT_DIR)[0],
+            kwargs["experiment_id"], kwargs["candidate_id"],
+            kwargs["approved_by"], kwargs.get("decision", "approved"),
+            kwargs.get("reason", "")),
+        "phase_b_link": lambda: experiments.link_phase_b_publication(
+            experiments.resolve_db_path(ROOT_DIR)[0],
+            kwargs["experiment_id"], kwargs["candidate_id"],
+            kwargs["platform"], kwargs["post_id"]),
+        "phase_b_evaluate": lambda: experiments.evaluate_phase_b_rollout(
+            experiments.resolve_db_path(ROOT_DIR)[0], kwargs.get("minimum")),
+    }
+    result = actions[action]()
+    # Avoid dumping full joined records from compare commands.
+    if action == "compare" and isinstance(result, dict):
+        result = {key: value for key, value in result.items() if key != "records"}
+    print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
@@ -2061,16 +2918,282 @@ def main() -> int:
     sub.add_parser("daemon", help="常駐実行（スロット間隔・時間帯は.envで設定）")
     sub.add_parser("init-state", help="初回用: 過去スロットを処理済み化（バックログ暴発防止）")
     sub.add_parser("status", help="状態確認")
+    p_cleanup = sub.add_parser(
+        "storage-cleanup",
+        help="不要なキャッシュ・古いログ等を保持期限に従って整理")
+    p_cleanup.add_argument(
+        "--apply", action="store_true",
+        help="削除・ログローテーションを実行（省略時はdry-run）")
+    sub.add_parser(
+        "post-experiment-status", help="投稿実績検証Phase Aの状態を表示")
+    for command, help_text in (
+        ("post-feature-extract", "既存投稿・候補の特徴量を抽出"),
+        ("post-performance-sync", "既存の公開実績を欠損保持で同期"),
+        ("post-performance-audit", "投稿・実績データの利用可能範囲を監査"),
+        ("post-experiment-compare", "特徴別の実績比較を表示"),
+        ("post-experiment-report", "Phase A比較レポートを生成"),
+        ("post-experiment-weekly-report", "Phase A週次レポートを生成"),
+    ):
+        item = sub.add_parser(command, help=help_text)
+        item.add_argument("--limit", type=int, default=300)
+        if command in {
+            "post-experiment-compare", "post-experiment-report",
+            "post-experiment-weekly-report",
+        }:
+            item.add_argument("--dry-run", action="store_true")
+    p_post_backtest = sub.add_parser(
+        "post-experiment-backtest", help="過去テーマの候補をローカル再生成")
+    p_post_backtest.add_argument("--limit", type=int, default=100)
+    p_post_backtest.add_argument("--dry-run", action="store_true")
+    p_post_candidates = sub.add_parser(
+        "post-experiment-candidates", help="同一fact packetのcontrol/variant候補を生成")
+    p_post_candidates.add_argument(
+        "--content-id", help="省略時は社会保障の固定fixtureを使用")
+    p_post_candidates.add_argument("--dry-run", action="store_true")
+    p_post_correlation = sub.add_parser(
+        "post-feature-correlation", help="特徴量と実績の相関を分析")
+    p_post_correlation.add_argument("--window-days", type=int, default=90)
+    p_post_full = sub.add_parser(
+        "post-experiment-full-cycle", help="外部投稿なしでPhase A一式を実行")
+    p_post_full.add_argument("--limit", type=int, default=300)
+    p_post_full.add_argument("--dry-run", action="store_true")
+    p_phase_b_assign = sub.add_parser(
+        "post-experiment-phase-b-assign",
+        help="Phase Bのcontrol/variantを決定論的に割当（投稿なし）")
+    p_phase_b_assign.add_argument("--experiment-id", required=True)
+    p_phase_b_assign.add_argument("--platform", choices=("x", "threads"), required=True)
+    p_phase_b_assign.add_argument("--stratum", default="default")
+    p_phase_b_approve = sub.add_parser(
+        "post-experiment-phase-b-approve", help="Phase Bの人間承認を記録（投稿なし）")
+    p_phase_b_approve.add_argument("--experiment-id", required=True)
+    p_phase_b_approve.add_argument("--candidate-id", required=True)
+    p_phase_b_approve.add_argument("--approved-by", required=True)
+    p_phase_b_approve.add_argument(
+        "--decision", choices=("approved", "rejected"), default="approved")
+    p_phase_b_approve.add_argument("--reason", default="")
+    p_phase_b_link = sub.add_parser(
+        "post-experiment-phase-b-link", help="既存公開post IDを候補へ紐付け")
+    p_phase_b_link.add_argument("--experiment-id", required=True)
+    p_phase_b_link.add_argument("--candidate-id", required=True)
+    p_phase_b_link.add_argument("--platform", choices=("x", "threads"), required=True)
+    p_phase_b_link.add_argument("--post-id", required=True)
+    p_phase_b_eval = sub.add_parser(
+        "post-experiment-phase-b-evaluate", help="自動採用なしでrollout適格性を評価")
+    p_phase_b_eval.add_argument("--minimum", type=int)
+    p_post_replies = sub.add_parser(
+        "post-replies-collect",
+        help="X公式Recent Searchで自分の投稿への返信を読み取り専用収集")
+    p_post_replies.add_argument("--post-limit", type=int, default=5)
+    p_post_replies.add_argument("--replies-per-post", type=int, default=20)
+    sub.add_parser(
+        "measurement-status",
+        help="投稿指標・返信・フォロワー計測計画を外部通信なしで表示")
+    p_measurement = sub.add_parser(
+        "measurement-cycle",
+        help="計測計画を表示（--execute指定時だけ読み取りAPIを実行）")
+    p_measurement.add_argument("--execute", action="store_true")
+    p_measurement_reconcile = sub.add_parser(
+        "measurement-reconcile",
+        help="外部APIなしで計測計画の作成・期限切れ整合を確認")
+    p_measurement_reconcile.add_argument(
+        "--apply", action="store_true",
+        help="SQLite内の計画作成・整合だけを適用")
     sub.add_parser("report", help="投稿実績（インプレッション等）を取得しknowledge/へ学習パターンを書き出す")
     sub.add_parser("weekly-report", help="週次AI分析をローカル保存（既定では無効・X投稿なし）")
     sub.add_parser("premium-report", help="手動プレミアム分析をローカル保存（既定では無効・X投稿なし）")
     sub.add_parser("collect-metrics", help="1h/24h/72h投稿指標を未取得窓だけ収集")
     sub.add_parser("daily-review", help="日次レビューを実行")
+    sub.add_parser(
+        "review-strategy-status",
+        help="ChatGPT日次レビューの有効方針を表示")
+    p_strategy_disable = sub.add_parser(
+        "review-strategy-disable",
+        help="ChatGPT日次レビュー方針を監査履歴を残して停止")
+    p_strategy_disable.add_argument(
+        "--confirm", action="store_true", help="停止を実行")
+    p_disaster_status = sub.add_parser(
+        "disaster-update-status", help="熊本地震朝夕更新のPhase A状態を表示")
+    p_disaster_status.add_argument(
+        "--incident-id", default="kumamoto-earthquake-20260728")
+    p_disaster_create = sub.add_parser(
+        "disaster-snapshot-create", help="公式情報スナップショットを保存")
+    p_disaster_create.add_argument("--incident-id", required=True)
+    p_disaster_create.add_argument(
+        "--snapshot-type", choices=["morning", "evening"], required=True)
+    p_disaster_create.add_argument("--dry-run", action="store_true")
+    p_disaster_list = sub.add_parser(
+        "disaster-snapshot-list", help="災害スナップショット一覧を表示")
+    p_disaster_list.add_argument(
+        "--incident-id", default="kumamoto-earthquake-20260728")
+    p_disaster_detail = sub.add_parser(
+        "disaster-snapshot-detail", help="災害スナップショット詳細を表示")
+    p_disaster_detail.add_argument("--snapshot-id", required=True)
+    p_disaster_delta = sub.add_parser(
+        "disaster-delta", help="直近2スナップショットの差分を表示")
+    p_disaster_delta.add_argument("--incident-id", required=True)
+    p_disaster_visual = sub.add_parser(
+        "disaster-visual-render", help="X・Threads用定型画像を生成")
+    p_disaster_visual.add_argument("--incident-id", required=True)
+    p_disaster_visual.add_argument(
+        "--snapshot-type", choices=["morning", "evening"], required=True)
+    p_disaster_visual.add_argument("--dry-run", action="store_true")
+    p_disaster_candidates = sub.add_parser(
+        "disaster-update-candidates", help="X・Threads投稿候補を生成")
+    p_disaster_candidates.add_argument("--incident-id", required=True)
+    p_disaster_candidates.add_argument(
+        "--snapshot-type", choices=["morning", "evening"], required=True)
+    p_disaster_candidates.add_argument("--dry-run", action="store_true")
+    p_disaster_correction = sub.add_parser(
+        "disaster-correction-candidates", help="公式訂正の候補を生成")
+    p_disaster_correction.add_argument("--incident-id", required=True)
+    p_disaster_correction.add_argument("--dry-run", action="store_true")
+    p_disaster_frequency = sub.add_parser(
+        "disaster-frequency-recommendation",
+        help="頻度縮小・終了候補を人間承認用に評価")
+    p_disaster_frequency.add_argument("--incident-id", required=True)
+    p_disaster_approve = sub.add_parser(
+        "disaster-update-approve",
+        help="Phase BのX・Threads候補を人間承認または却下")
+    p_disaster_approve.add_argument("--snapshot-id", required=True)
+    p_disaster_approve.add_argument(
+        "--platform", choices=["x", "threads"], required=True)
+    p_disaster_approve.add_argument(
+        "--decision", choices=["approved", "rejected"], default="approved")
+    p_disaster_approve.add_argument("--approved-by", default="local_operator")
+    p_disaster_approve.add_argument("--notes", default="")
+    p_disaster_publish = sub.add_parser(
+        "disaster-update-publish",
+        help="承認済み災害候補を明示確認付きで1媒体へ投稿")
+    p_disaster_publish.add_argument("--snapshot-id", required=True)
+    p_disaster_publish.add_argument(
+        "--platform", choices=["x", "threads"], required=True)
+    p_disaster_publish.add_argument(
+        "--confirm", action="store_true", help="外部投稿を明示承認")
+    p_disaster_auto = sub.add_parser(
+        "disaster-update-auto-publish",
+        help="Phase Cの確認済み情報限定自動投稿ゲートを実行")
+    p_disaster_auto.add_argument("--snapshot-id", required=True)
+    p_disaster_frequency_apply = sub.add_parser(
+        "disaster-frequency-apply",
+        help="人間承認後に災害更新モードを記録")
+    p_disaster_frequency_apply.add_argument("--incident-id", required=True)
+    p_disaster_frequency_apply.add_argument(
+        "--mode", choices=[
+            "active_twice_daily", "active_daily",
+            "recovery_periodic", "closed"], required=True)
+    p_disaster_frequency_apply.add_argument(
+        "--confirm", action="store_true", help="モード変更を明示承認")
+    p_disaster_recovery = sub.add_parser(
+        "disaster-recovery-brief",
+        help="Phase Dの定期復旧報告候補をローカル生成")
+    p_disaster_recovery.add_argument(
+        "--incident-id", default="kumamoto-earthquake-20260728")
+    p_disaster_closure = sub.add_parser(
+        "disaster-closure-package",
+        help="終了時の総括記事・防災解説候補をローカル生成")
+    p_disaster_closure.add_argument(
+        "--incident-id", default="kumamoto-earthquake-20260728")
+    p_disaster_cycle = sub.add_parser(
+        "disaster-update-full-cycle",
+        help="Phase Aの収集・差分・候補・画像・通知を一括実行")
+    p_disaster_cycle.add_argument("--incident-id", required=True)
+    p_disaster_cycle.add_argument(
+        "--snapshot-type", choices=["morning", "evening"], required=True)
+    p_disaster_cycle.add_argument("--dry-run", action="store_true")
     sub.add_parser("weekly-review", help="週次レビューをローカル保存")
     sub.add_parser("preview-extensions", help="拡張投稿案をプレビュー保存（投稿なし）")
     sub.add_parser("budget-status", help="今月のOpenAI/X/合計費用を表示")
     sub.add_parser("cost-forecast", help="過去7日から月末費用を予測")
     sub.add_parser("xai-roi", help="xAI由来投稿と非xAI投稿の費用対効果を比較")
+    sub.add_parser(
+        "integrated-research-status",
+        help="統合リサーチDBと分析投稿候補の状態を表示")
+    p_ir_history = sub.add_parser(
+        "integrated-research-history", help="統合テーマと判断履歴を表示")
+    p_ir_history.add_argument("--topic-key", default="")
+    p_ir_history.add_argument("--limit", type=int, default=20)
+    for command, help_text in (
+        ("integrated-research-outcomes", "統合リサーチ投稿の成果を表示"),
+        ("integrated-research-source-contribution", "情報源別の寄与を表示"),
+    ):
+        item = sub.add_parser(command, help=help_text)
+        item.add_argument("--days", type=int, default=30)
+    p_ir_export = sub.add_parser(
+        "integrated-research-export", help="統合結果をJSON・CSV・Markdown出力")
+    p_ir_export.add_argument(
+        "--format", choices=["json", "csv", "markdown"], default="json")
+    p_ir_export.add_argument("--days", type=int, default=30)
+    p_ir_export.add_argument("--output")
+    p_ir_dashboard = sub.add_parser(
+        "integrated-research-dashboard", help="ローカルHTML可視化を生成")
+    p_ir_dashboard.add_argument("--days", type=int, default=30)
+    p_ir_dashboard.add_argument("--output")
+    p_ir_audit = sub.add_parser(
+        "integrated-research-audit", help="DB整合性と証拠状態を監査")
+    p_ir_audit.add_argument("--output")
+    p_ir_backfill = sub.add_parser(
+        "integrated-research-backfill", help="過去xAI結果を監査専用で移行")
+    p_ir_backfill.add_argument("--limit", type=int, default=500)
+    p_ir_backfill.add_argument("--apply", action="store_true")
+    p_ir_retention = sub.add_parser(
+        "integrated-research-retention", help="古いSNS本文を監査情報を残して秘匿")
+    p_ir_retention.add_argument("--days", type=int)
+    p_ir_retention.add_argument("--apply", action="store_true")
+    sub.add_parser(
+        "integrated-research-backup-check", help="一時復元でDBバックアップを検証")
+    p_ir_correction = sub.add_parser(
+        "integrated-research-correction", help="事実訂正を履歴付きで記録")
+    p_ir_correction.add_argument("--topic-id", type=int, required=True)
+    p_ir_correction.add_argument("--fact-summary", required=True)
+    p_ir_correction.add_argument("--reason", required=True)
+    p_ir_correction.add_argument("--apply", action="store_true")
+    p_ir_delete = sub.add_parser(
+        "integrated-research-source-delete", help="削除済み情報源を墓標化")
+    p_ir_delete.add_argument("--provider", required=True)
+    p_ir_delete.add_argument("--source-id", required=True)
+    p_ir_delete.add_argument("--apply", action="store_true")
+    p_ir_reuse = sub.add_parser(
+        "integrated-research-reuse", help="note・動画向けコンテンツパケット化")
+    p_ir_reuse.add_argument("--topic-id", type=int, required=True)
+    sub.add_parser(
+        "integrated-research-mitigations", help="外部制約と代替策を表示")
+    sub.add_parser("xai-discovery-status", help="xAI discovery status and safety state")
+    sub.add_parser("xai-budget-mode", help="Show current dynamic xAI budget mode")
+    sub.add_parser("xai-run-budget", help="Show the dynamic per-run xAI budget")
+    p_xai_coverage = sub.add_parser(
+        "xai-coverage-report", help="Report xAI search-window coverage")
+    p_xai_coverage.add_argument("--days", type=int, default=30)
+    p_xai_costs = sub.add_parser(
+        "xai-cost-breakdown", help="Report canonical xAI cost details")
+    p_xai_costs.add_argument("--days", type=int, default=30)
+    sub.add_parser("xai-discovery-audit", help="Run the local xAI operation audit")
+    p_xai_dry = sub.add_parser(
+        "xai-discovery-dry-run", help="Run fixture-only xAI acceptance checks")
+    p_xai_dry.add_argument("--max-topics", type=int, default=5)
+    p_xai_dry.add_argument("--no-api-call", action="store_true")
+    p_xai_roi_report = sub.add_parser(
+        "xai-roi-report", help="Report xAI-assisted post ROI")
+    p_xai_roi_report.add_argument("--days", type=int, default=30)
+    p_xai_roi_report.add_argument("--dry-run", action="store_true")
+    p_xai_optimize = sub.add_parser(
+        "xai-optimize", help="Phase D bounded frequency/tool-call optimizer")
+    p_xai_optimize.add_argument("--days", type=int, default=30)
+    p_xai_optimize.add_argument("--apply", action="store_true")
+    p_xai_live = sub.add_parser(
+        "xai-live-validation", help="Phase B bounded live xAI API validation")
+    p_xai_live.add_argument("--runs", type=int, choices=[1, 2], default=2)
+    p_xai_live.add_argument("--confirm", action="store_true")
+    sub.add_parser(
+        "x-research-analysis-status",
+        help="X Search分析投稿の設定・投稿状態を表示")
+    sub.add_parser(
+        "x-research-analysis-preview",
+        help="公式照合済みX Search分析の長文投稿をプレビュー")
+    p_x_research_publish = sub.add_parser(
+        "x-research-analysis-publish",
+        help="X Search分析をPremium長文またはスレッドで投稿")
+    p_x_research_publish.add_argument("--confirm", action="store_true")
+    p_x_research_publish.add_argument("--live", action="store_true")
     sub.add_parser("openai-usage-breakdown", help="OpenAI使用量をtask_type別に表示")
     sub.add_parser("db-status", help="SQLiteテーブル件数を表示")
     sub.add_parser("engagement-queue", help="人間承認用の引用・返信候補を保存（X送信なし）")
@@ -2097,6 +3220,15 @@ def main() -> int:
     p_follower.add_argument("--capture", action="store_true",
                             help="Owned Readを使って現在値を保存")
     sub.add_parser("quality-dashboard", help="直近の品質・安全・prompt版比較を表示")
+    p_daily_goal = sub.add_parser(
+        "daily-post-goal", help="X日次20投稿目標を監視し未達理由と対策を表示")
+    p_daily_goal.add_argument("--target", type=int)
+    p_daily_goal.add_argument("--date", help="集計対象日（YYYY-MM-DD、既定は当日）")
+    p_daily_goal.add_argument("--save", action="store_true")
+    p_daily_goal.add_argument("--notify", action="store_true")
+    p_daily_goal.add_argument(
+        "--apply-remediation", action="store_true",
+        help="未達時の安全な是正ポリシーを次回投稿から適用")
 
     sub.add_parser("discord-test", help="Discord Webhookへテスト通知を送信")
     sub.add_parser(
@@ -2181,7 +3313,90 @@ def main() -> int:
     sub.add_parser(
         "free-note-due", help="期限到来済みの無料note生成枠を処理")
 
-    sub.add_parser("threads-auth-url", help="Meta公式OAuth認可URLを表示")
+    sub.add_parser(
+        "config-audit", help=".env・typed config・runtime・文書の不整合を監査")
+    p_packet = sub.add_parser(
+        "content-packet-generate", help="確認済みテーマからコンテンツパケットを生成")
+    p_packet.add_argument("--topic-key")
+    p_packet.add_argument("--content-id")
+    sub.add_parser(
+        "content-inventory-status", help="コンテンツ在庫の状態と件数を表示")
+    for command, help_text in (
+        ("content-inventory-build", "確認済みニュースとEvergreenから在庫を構築"),
+        ("content-variants-generate", "X・Threads向け複数角度候補を生成"),
+        ("content-hypotheses", "検証可能なコンテンツ仮説を生成"),
+        ("growth-daily-report", "成長KPIの日次レポートを保存"),
+        ("growth-weekly-report", "成長KPIの週次レポートを保存"),
+        ("short-candidates", "Short動画昇格候補を生成"),
+        ("article-candidates", "X記事・note・長尺の昇格候補を生成"),
+        ("visual-candidates", "自動図解候補を生成"),
+        ("thread-candidates", "3〜5投稿のXスレッド候補を生成"),
+        ("reply-candidates", "低リスク返信の人間承認候補を生成"),
+        ("quote-candidates", "公式一次資料の引用候補を生成"),
+        ("growth-full-cycle", "外部投稿なしでPhase A全工程を実行"),
+    ):
+        item = sub.add_parser(command, help=help_text)
+        item.add_argument("--dry-run", action="store_true")
+    sub.add_parser("growth-status", help="需要発見・在庫・昇格エンジンの状態を表示")
+    sub.add_parser("current-affairs-status", help="Current affairs Phase A status")
+    sub.add_parser("category-list", help="List current affairs categories")
+    p_category_classify = sub.add_parser("category-classify", help="Classify local topics")
+    p_category_classify.add_argument("--content-id")
+    p_category_classify.add_argument("--dry-run", action="store_true")
+    sub.add_parser("category-mix-status", help="Show category mix safeguards")
+    p_category_candidates = sub.add_parser("category-candidates", help="Build local category candidates")
+    p_category_candidates.add_argument("--category")
+    p_category_candidates.add_argument("--dry-run", action="store_true")
+    p_category_performance = sub.add_parser("category-performance", help="Show category-relative performance")
+    p_category_performance.add_argument("--category")
+    sub.add_parser("category-exclusions", help="Show brand-fit exclusions")
+    sub.add_parser("category-source-health", help="Show category source registry")
+    for command, help_text in (
+        ("current-affairs-daily-report", "Save category daily report"),
+        ("current-affairs-weekly-report", "Save category weekly proposal"),
+        ("current-affairs-full-cycle", "Run local-only current affairs Phase A"),
+    ):
+        item = sub.add_parser(command, help=help_text)
+        item.add_argument("--dry-run", action="store_true")
+    sub.add_parser(
+        "social-anger-status",
+        help="事実と制度に基づく社会的怒りPhase Aの状態を表示")
+    p_social_anger_assess = sub.add_parser(
+        "social-anger-assess", help="負担・決定・責任と怒りの妥当性を評価")
+    p_social_anger_assess.add_argument("--content-id")
+    p_social_anger_assess.add_argument("--dry-run", action="store_true")
+    p_social_anger_candidates = sub.add_parser(
+        "social-anger-candidates", help="X・Threads向け複数角度候補を生成")
+    p_social_anger_candidates.add_argument("--content-id")
+    p_social_anger_candidates.add_argument("--dry-run", action="store_true")
+    sub.add_parser(
+        "social-anger-targets", help="批判対象の集中度を表示")
+    sub.add_parser(
+        "social-anger-risk-report", help="怒り搾取・集団攻撃・名誉毀損リスクを表示")
+    sub.add_parser(
+        "social-anger-solution-gaps", help="批判から改善策への未接続を表示")
+    for command, help_text in (
+        ("social-anger-daily-report", "社会的怒りPhase Aの日次レポートを保存"),
+        ("social-anger-weekly-report", "社会的怒りPhase Aの週次提案を保存"),
+        ("social-anger-full-cycle", "外部投稿なしで社会的怒りPhase A全工程を実行"),
+    ):
+        item = sub.add_parser(command, help=help_text)
+        item.add_argument("--dry-run", action="store_true")
+    sub.add_parser("source-health", help="公式情報源レジストリの状態を表示")
+    p_growth_budget = sub.add_parser(
+        "growth-budget-simulation", help="新しい候補生産量のAPI費用を試算")
+    p_growth_budget.add_argument("--x-posts", type=int, default=14)
+    p_growth_budget.add_argument("--threads-posts", type=int, default=6)
+    p_growth_budget.add_argument("--visuals", type=int, default=2)
+    p_growth_budget.add_argument("--short-candidates", type=int, default=5)
+    p_growth_budget.add_argument("--days", type=int, default=30)
+
+    p_threads_auth = sub.add_parser(
+        "threads-auth-url", help="Meta公式OAuth認可URLを表示")
+    p_threads_auth.add_argument(
+        "--scope-profile",
+        choices=["basic", "keyword-search", "full-analysis"],
+        default="basic")
     p_threads_exchange = sub.add_parser(
         "threads-exchange-code", help="OAuthコードを長期トークンへ交換")
     p_threads_exchange.add_argument("--code", required=True)
@@ -2208,6 +3423,222 @@ def main() -> int:
         "threads-endpoints", help="Meta管理画面へ登録する公開URLを表示")
     sub.add_parser(
         "threads-web", help="Threads OAuth callbackサーバーを起動")
+    sub.add_parser(
+        "threads-permissions", help="現在権限と不足権限を安全に表示")
+    for command, help_text in (
+        ("threads-profile-sync", "自分のThreadsプロフィールを同期"),
+        ("threads-sync-posts", "自分のThreads投稿を増分同期"),
+        ("threads-sync-replies", "返信ツリーと自分の返信を同期"),
+        ("threads-sync-mentions", "自分へのメンションを同期"),
+        ("threads-collect-post-insights", "投稿別Insightsを収集"),
+        ("threads-collect-account-insights", "アカウントInsightsを収集"),
+        ("threads-trends", "収集済み標本内の相対トレンドを集計"),
+        ("threads-daily-report", "Threads日次レポートをローカル生成"),
+        ("threads-weekly-report", "Threads週次レポートをローカル生成"),
+        ("threads-full-sync", "取得・分析のみのThreads一括同期"),
+    ):
+        item = sub.add_parser(command, help=help_text)
+        item.add_argument("--dry-run", action="store_true")
+        if command == "threads-sync-posts":
+            item.add_argument("--since", default="")
+            item.add_argument("--until", default="")
+        if command == "threads-trends":
+            item.add_argument("--hours", type=int, default=24)
+    p_threads_search = sub.add_parser(
+        "threads-search", help="公式APIでキーワードまたはトピックタグ検索")
+    p_threads_search.add_argument("--query", required=True)
+    p_threads_search.add_argument(
+        "--search-type", choices=["TOP", "RECENT"], default="RECENT")
+    p_threads_search.add_argument(
+        "--search-mode", choices=["KEYWORD", "TAG"], default="KEYWORD")
+    p_threads_search.add_argument("--since", default="")
+    p_threads_search.add_argument("--until", default="")
+    p_threads_search.add_argument("--hours", type=int, default=0)
+    p_threads_search.add_argument("--dry-run", action="store_true")
+    p_threads_quota = sub.add_parser(
+        "threads-quota-status", help="Threads公式公開枠を取得")
+    p_threads_quota.add_argument("--dry-run", action="store_true")
+    p_threads_container = sub.add_parser(
+        "threads-container-status", help="投稿コンテナ状態を取得")
+    p_threads_container.add_argument("--container-id", required=True)
+    p_threads_compare = sub.add_parser(
+        "threads-x-comparison", help="XとThreadsの同一コンテンツ比較")
+    p_threads_compare.add_argument("--days", type=int, default=30)
+    p_reply_draft = sub.add_parser(
+        "threads-reply-draft", help="人間承認用の返信案を保存")
+    p_reply_draft.add_argument("--reply-to-id", required=True)
+    p_reply_draft.add_argument("--text", default="")
+    p_reply_publish = sub.add_parser(
+        "threads-reply-publish", help="承認済み返信案を明示投稿")
+    p_reply_publish.add_argument("--draft-id", type=int, required=True)
+    p_reply_publish.add_argument("--confirm", action="store_true")
+    p_quote_draft = sub.add_parser(
+        "threads-quote-draft", help="人間承認用の引用投稿案を保存")
+    p_quote_draft.add_argument("--post-id", required=True)
+    p_quote_draft.add_argument("--text", default="")
+    p_quote_publish = sub.add_parser(
+        "threads-quote-publish", help="承認済み引用投稿案を明示投稿")
+    p_quote_publish.add_argument("--draft-id", type=int, required=True)
+    p_quote_publish.add_argument("--confirm", action="store_true")
+    p_repost = sub.add_parser(
+        "threads-repost", help="人間確認後に公式APIでリポスト")
+    p_repost.add_argument("--post-id", required=True)
+    p_repost.add_argument("--confirm", action="store_true")
+    p_delete = sub.add_parser(
+        "threads-delete", help="人間確認後に自分の投稿を削除")
+    p_delete.add_argument("--post-id", required=True)
+    p_delete.add_argument("--reason", required=True)
+    p_delete.add_argument("--confirm", action="store_true")
+    p_moderation_draft = sub.add_parser(
+        "threads-moderation-draft", help="返信モデレーション案を保存")
+    p_moderation_draft.add_argument("--reply-id", required=True)
+    p_moderation_draft.add_argument(
+        "--action", choices=["hide", "unhide"], required=True)
+    p_moderation_apply = sub.add_parser(
+        "threads-moderation-apply", help="人間確認後に返信管理を適用")
+    p_moderation_apply.add_argument("--draft-id", type=int, required=True)
+    p_moderation_apply.add_argument("--confirm", action="store_true")
+    sub.add_parser(
+        "threads-data-retention-run", help="Threads保存期限を適用")
+    p_user_delete = sub.add_parser(
+        "threads-user-data-delete", help="指定連携ユーザーのデータを削除")
+    p_user_delete.add_argument("--user-id", required=True)
+    p_user_delete.add_argument("--confirm", action="store_true")
+    p_format_preview = sub.add_parser(
+        "threads-format-preview", help="投稿形式JSONを検証して承認案を保存")
+    p_format_preview.add_argument("--spec-file", required=True)
+    p_format_validate = sub.add_parser(
+        "threads-format-validate", help="投稿形式JSONを検証（保存なし）")
+    p_format_validate.add_argument("--spec-file", required=True)
+    p_format_publish = sub.add_parser(
+        "threads-format-publish", help="承認済み形式投稿案を明示投稿")
+    p_format_publish.add_argument("--draft-id", type=int, required=True)
+    p_format_publish.add_argument("--confirm", action="store_true")
+    p_location = sub.add_parser(
+        "threads-location-get", help="公式APIで位置情報IDを取得")
+    p_location.add_argument("--location-id", required=True)
+    p_profile_discovery = sub.add_parser(
+        "threads-profile-discovery",
+        help="公式APIで完全一致の公開プロフィールを確認")
+    p_profile_discovery.add_argument("--username", required=True)
+    p_profile_discovery.add_argument("--dry-run", action="store_true")
+
+    sub.add_parser(
+        "crosspost-status", help="動画クロス投稿のローカル状態を表示")
+    sub.add_parser(
+        "crosspost-candidates", help="動画クロス投稿候補を表示")
+    for command, help_text in (
+        ("crosspost-generate-copy", "4媒体向け投稿文を個別生成"),
+        ("crosspost-render-renditions", "4媒体向け動画をFFmpegで生成"),
+        ("crosspost-validate", "動画・投稿文・安全条件を検証"),
+        ("crosspost-prepare", "外部送信なしで公開準備を検証"),
+        ("crosspost-reconcile", "媒体別結果を照合"),
+        ("crosspost-metrics-sync", "媒体別指標の同期計画を確認"),
+        ("crosspost-report", "クロスプラットフォーム分析を表示"),
+    ):
+        item = sub.add_parser(command, help=help_text)
+        item.add_argument("--publication-id", default="")
+        item.add_argument("--dry-run", action="store_true")
+    p_cross_publish = sub.add_parser(
+        "crosspost-publish",
+        help="多重スイッチと明示確認を満たす場合のみクロス投稿")
+    p_cross_publish.add_argument("--publication-id", default="")
+    p_cross_publish.add_argument("--dry-run", action="store_true")
+    p_cross_publish.add_argument("--confirm", action="store_true")
+    sub.add_parser(
+        "crosspost-emergency-stop", help="クロス投稿を緊急停止")
+
+    # Integrated research -> short-video factory. Publishing is still blocked
+    # unless every Phase-D safety gate and explicit confirmation is satisfied.
+    sub.add_parser("short-video-status", help="Short動画工場の安全状態と件数を表示")
+    p_sv_candidates = sub.add_parser(
+        "short-video-candidates", help="統合リサーチから動画候補を採点")
+    p_sv_candidates.add_argument("--limit", type=int, default=20)
+    p_sv_candidates.add_argument("--dry-run", action="store_true")
+    p_sv_create = sub.add_parser(
+        "short-video-project-create", help="動画プロジェクトを重複なく作成")
+    p_sv_create.add_argument("--topic-id", type=int, required=True)
+    p_sv_create.add_argument("--angle", default="")
+    p_sv_create.add_argument("--force", action="store_true")
+    for command, help_text in (
+        ("short-video-script-generate", "45〜60秒台本を生成"),
+        ("short-video-script-check", "台本の根拠・数字・安全性を検査"),
+        ("short-video-audio-generate", "ローカルのモック音声を生成"),
+        ("short-video-caption-generate", "SRT/VTT字幕を生成"),
+        ("short-video-visual-plan", "縦型シーン画像と構成を生成"),
+        ("short-video-quality-check", "動画の最終品質ゲートを検査"),
+        ("short-video-platform-variants", "X・Threads等の派生情報を生成"),
+        ("short-video-publish-plan", "外部書込なしで公開計画を表示"),
+    ):
+        item = sub.add_parser(command, help=help_text)
+        item.add_argument("--video-id", required=True)
+    p_sv_render = sub.add_parser(
+        "short-video-render", help="FFmpegで1080x1920 MP4を生成")
+    p_sv_render.add_argument("--video-id", required=True)
+    p_sv_render.add_argument(
+        "--platform", choices=["all", "x", "threads", "youtube", "instagram"],
+        default="all")
+    p_sv_render.add_argument("--dry-run", action="store_true")
+    p_sv_queue = sub.add_parser(
+        "short-video-queue", help="冪等なX・Threads公開キューへ登録")
+    p_sv_queue.add_argument("--video-id", required=True)
+    p_sv_queue.add_argument(
+        "--platforms", nargs="+",
+        choices=["x", "threads", "youtube", "instagram"],
+        default=["x", "threads"])
+    p_sv_queue.add_argument("--scheduled-at", default="")
+    p_sv_publish = sub.add_parser(
+        "short-video-publish", help="全安全ゲート通過後だけ公式APIへ動画投稿")
+    p_sv_publish.add_argument("--video-id", required=True)
+    p_sv_publish.add_argument(
+        "--platform", choices=["x", "threads", "youtube", "instagram"],
+        required=True)
+    p_sv_publish.add_argument("--public-url", default="")
+    p_sv_publish.add_argument("--confirm", action="store_true")
+    p_sv_publish.add_argument("--live", action="store_true")
+    p_sv_metrics = sub.add_parser(
+        "short-video-metrics-sync", help="公開済み動画の計測対象を確認")
+    p_sv_metrics.add_argument("--video-id", default="")
+    p_sv_metrics.add_argument("--live", action="store_true")
+    p_sv_worker = sub.add_parser(
+        "short-video-queue-run",
+        help="期限到来済みの動画公開キューとメトリクス回収を処理")
+    p_sv_worker.add_argument("--limit", type=int, default=10)
+    p_sv_worker.add_argument("--live", action="store_true")
+    p_sv_scheduled = sub.add_parser(
+        "short-video-scheduled-run",
+        help="候補生成・レンダリング・公開キュー・メトリクスを定期処理")
+    p_sv_scheduled.add_argument("--live", action="store_true")
+    sub.add_parser(
+        "short-video-experiment-report", help="Short動画A/B実験を集計")
+    sub.add_parser("short-video-daily-report", help="Short動画の日次結果を集計")
+    sub.add_parser("short-video-weekly-report", help="Short動画の週次結果を集計")
+    p_sv_cycle = sub.add_parser(
+        "short-video-full-cycle", help="統合リサーチから公開計画まで一括dry-run")
+    p_sv_cycle.add_argument("--topic-id", type=int, required=True)
+    p_sv_cycle.add_argument("--dry-run", action="store_true")
+    sub.add_parser("short-video-emergency-stop", help="Short動画公開を緊急停止")
+    p_sv_resume = sub.add_parser(
+        "short-video-emergency-resume", help="明示確認付きで緊急停止を解除")
+    p_sv_resume.add_argument("--confirm", action="store_true")
+
+    sub.add_parser(
+        "instagram-auth-url", help="Instagram Login公式OAuth URLを生成")
+    p_instagram_exchange = sub.add_parser(
+        "instagram-exchange-code", help="Instagram認証コード交換")
+    p_instagram_exchange.add_argument("--code", required=True)
+    p_instagram_exchange.add_argument("--dry-run", action="store_true")
+    sub.add_parser(
+        "instagram-token-status", help="Instagramトークン設定状態を表示")
+    p_instagram_profile = sub.add_parser(
+        "instagram-profile", help="Instagramプロアカウント状態を確認")
+    p_instagram_profile.add_argument("--dry-run", action="store_true")
+    p_instagram_reel = sub.add_parser(
+        "instagram-reel-status", help="Instagram Reelコンテナ状態を確認")
+    p_instagram_reel.add_argument("--creation-id", required=True)
+    p_instagram_reel.add_argument("--dry-run", action="store_true")
+    sub.add_parser(
+        "youtube-token-status", help="YouTubeトークン設定状態を表示")
 
     args = parser.parse_args()
 
@@ -2221,6 +3652,81 @@ def main() -> int:
         return cmd_init_state()
     if args.command == "status":
         return cmd_status()
+    if args.command == "storage-cleanup":
+        return cmd_storage_cleanup(apply=args.apply)
+    if args.command == "post-experiment-status":
+        return _post_experiment_output("status")
+    if args.command == "post-feature-extract":
+        return _post_experiment_output("extract", limit=args.limit)
+    if args.command == "post-performance-sync":
+        return _post_experiment_output("sync", limit=args.limit)
+    if args.command == "post-performance-audit":
+        return _post_experiment_output("audit", limit=args.limit)
+    if args.command == "post-experiment-backtest":
+        return _post_experiment_output(
+            "backtest", limit=args.limit, dry_run=args.dry_run)
+    if args.command == "post-experiment-candidates":
+        return _post_experiment_output(
+            "candidates", content_id=args.content_id, dry_run=args.dry_run)
+    if args.command == "post-experiment-compare":
+        return _post_experiment_output(
+            "compare", limit=args.limit, dry_run=args.dry_run)
+    if args.command == "post-feature-correlation":
+        return _post_experiment_output(
+            "correlation", window_days=args.window_days)
+    if args.command == "post-experiment-report":
+        return _post_experiment_output("report", limit=args.limit)
+    if args.command == "post-experiment-weekly-report":
+        return _post_experiment_output("weekly_report", limit=args.limit)
+    if args.command == "post-experiment-full-cycle":
+        return _post_experiment_output(
+            "full_cycle", limit=args.limit, dry_run=args.dry_run)
+    if args.command == "post-experiment-phase-b-assign":
+        return _post_experiment_output(
+            "phase_b_assign", experiment_id=args.experiment_id,
+            platform=args.platform, stratum=args.stratum)
+    if args.command == "post-experiment-phase-b-approve":
+        return _post_experiment_output(
+            "phase_b_approve", experiment_id=args.experiment_id,
+            candidate_id=args.candidate_id, approved_by=args.approved_by,
+            decision=args.decision, reason=args.reason)
+    if args.command == "post-experiment-phase-b-link":
+        return _post_experiment_output(
+            "phase_b_link", experiment_id=args.experiment_id,
+            candidate_id=args.candidate_id, platform=args.platform,
+            post_id=args.post_id)
+    if args.command == "post-experiment-phase-b-evaluate":
+        return _post_experiment_output(
+            "phase_b_evaluate", minimum=args.minimum)
+    if args.command == "post-replies-collect":
+        load_env()
+        ensure_dirs()
+        from reply_metrics import collect_x_replies
+        print(json.dumps(collect_x_replies(
+            post_limit=args.post_limit,
+            replies_per_post=args.replies_per_post,
+        ), ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "measurement-reconcile":
+        load_env()
+        if str(SRC_DIR) not in sys.path:
+            sys.path.insert(0, str(SRC_DIR))
+        from measurement_jobs import reconcile_local
+        print(json.dumps(
+            reconcile_local(apply=args.apply),
+            ensure_ascii=False, indent=2))
+        return 0
+    if args.command in {"measurement-status", "measurement-cycle"}:
+        load_env()
+        ensure_dirs()
+        from measurement_jobs import (
+            run as run_measurements, status as measurement_status)
+        if args.command == "measurement-status":
+            result = measurement_status()
+        else:
+            result = run_measurements(execute=args.execute)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
     if args.command == "report":
         return cmd_report()
     if args.command == "weekly-report":
@@ -2231,6 +3737,62 @@ def main() -> int:
         return cmd_collect_metrics()
     if args.command == "daily-review":
         return cmd_report()
+    if args.command == "review-strategy-status":
+        return cmd_review_strategy_status()
+    if args.command == "review-strategy-disable":
+        return cmd_review_strategy_disable(args.confirm)
+    if args.command == "disaster-update-status":
+        return _disaster_output("status", incident_id=args.incident_id)
+    if args.command == "disaster-snapshot-create":
+        return _disaster_output(
+            "create", incident_id=args.incident_id,
+            snapshot_type=args.snapshot_type, dry_run=args.dry_run)
+    if args.command == "disaster-snapshot-list":
+        return _disaster_output("list", incident_id=args.incident_id)
+    if args.command == "disaster-snapshot-detail":
+        return _disaster_output("detail", snapshot_id=args.snapshot_id)
+    if args.command == "disaster-delta":
+        return _disaster_output("delta", incident_id=args.incident_id)
+    if args.command == "disaster-visual-render":
+        return _disaster_output(
+            "visual", incident_id=args.incident_id,
+            snapshot_type=args.snapshot_type, dry_run=args.dry_run)
+    if args.command == "disaster-update-candidates":
+        return _disaster_output(
+            "candidates", incident_id=args.incident_id,
+            snapshot_type=args.snapshot_type, dry_run=args.dry_run)
+    if args.command == "disaster-correction-candidates":
+        return _disaster_output(
+            "corrections", incident_id=args.incident_id,
+            dry_run=args.dry_run)
+    if args.command == "disaster-frequency-recommendation":
+        return _disaster_output("frequency", incident_id=args.incident_id)
+    if args.command == "disaster-update-approve":
+        return _disaster_output(
+            "approve", snapshot_id=args.snapshot_id,
+            platform=args.platform, decision=args.decision,
+            approved_by=args.approved_by, notes=args.notes)
+    if args.command == "disaster-update-publish":
+        return _disaster_output(
+            "publish", snapshot_id=args.snapshot_id,
+            platform=args.platform, confirm=args.confirm)
+    if args.command == "disaster-update-auto-publish":
+        return _disaster_output(
+            "auto_publish", snapshot_id=args.snapshot_id)
+    if args.command == "disaster-frequency-apply":
+        return _disaster_output(
+            "frequency_apply", incident_id=args.incident_id,
+            mode=args.mode, confirm=args.confirm)
+    if args.command == "disaster-recovery-brief":
+        return _disaster_output(
+            "recovery_brief", incident_id=args.incident_id)
+    if args.command == "disaster-closure-package":
+        return _disaster_output(
+            "closure", incident_id=args.incident_id)
+    if args.command == "disaster-update-full-cycle":
+        return _disaster_output(
+            "full_cycle", incident_id=args.incident_id,
+            snapshot_type=args.snapshot_type, dry_run=args.dry_run)
     if args.command == "weekly-review":
         return cmd_weekly_report()
     if args.command == "preview-extensions":
@@ -2241,6 +3803,94 @@ def main() -> int:
         return cmd_cost_forecast()
     if args.command == "xai-roi":
         return cmd_xai_roi()
+    if args.command == "integrated-research-status":
+        return cmd_integrated_research_status()
+    if args.command == "integrated-research-history":
+        return cmd_integrated_research(
+            "history", topic_key=args.topic_key, limit=args.limit)
+    if args.command == "integrated-research-outcomes":
+        return cmd_integrated_research("outcomes", days=args.days)
+    if args.command == "integrated-research-source-contribution":
+        return cmd_integrated_research("sources", days=args.days)
+    if args.command == "integrated-research-export":
+        return cmd_integrated_research(
+            "export", format=args.format, days=args.days, output=args.output)
+    if args.command == "integrated-research-dashboard":
+        return cmd_integrated_research(
+            "dashboard", days=args.days, output=args.output)
+    if args.command == "integrated-research-audit":
+        return cmd_integrated_research("audit", output=args.output)
+    if args.command == "integrated-research-backfill":
+        return cmd_integrated_research(
+            "backfill", limit=args.limit, apply=args.apply)
+    if args.command == "integrated-research-retention":
+        return cmd_integrated_research(
+            "retention", days=args.days, apply=args.apply)
+    if args.command == "integrated-research-backup-check":
+        return cmd_integrated_research("backup_check")
+    if args.command == "integrated-research-correction":
+        return cmd_integrated_research(
+            "correction", topic_id=args.topic_id,
+            fact_summary=args.fact_summary, reason=args.reason,
+            apply=args.apply)
+    if args.command == "integrated-research-source-delete":
+        return cmd_integrated_research(
+            "source_delete", provider=args.provider,
+            source_id=args.source_id, apply=args.apply)
+    if args.command == "integrated-research-reuse":
+        return cmd_integrated_research("reuse", topic_id=args.topic_id)
+    if args.command == "integrated-research-mitigations":
+        return cmd_integrated_research("mitigations")
+    if args.command == "xai-discovery-status":
+        return cmd_xai_discovery("status")
+    if args.command == "xai-budget-mode":
+        return cmd_xai_discovery("budget_mode")
+    if args.command == "xai-run-budget":
+        return cmd_xai_discovery("run_budget")
+    if args.command == "xai-coverage-report":
+        return cmd_xai_discovery("coverage", days=args.days)
+    if args.command == "xai-cost-breakdown":
+        return cmd_xai_discovery("costs", days=args.days)
+    if args.command == "xai-discovery-audit":
+        return cmd_xai_discovery("audit")
+    if args.command == "xai-discovery-dry-run":
+        if not args.no_api_call:
+            print("xai-discovery-dry-run requires --no-api-call")
+            return 2
+        return cmd_xai_discovery("dry_run", max_topics=args.max_topics)
+    if args.command == "xai-roi-report":
+        return cmd_xai_discovery(
+            "roi", days=args.days, apply=not args.dry_run)
+    if args.command == "xai-optimize":
+        return cmd_xai_discovery(
+            "optimize", days=args.days, apply=args.apply)
+    if args.command == "xai-live-validation":
+        return cmd_xai_live_validation(args.runs, args.confirm)
+    if args.command.startswith("x-research-analysis-"):
+        load_env()
+        ensure_dirs()
+        if str(SRC_DIR) not in sys.path:
+            sys.path.insert(0, str(SRC_DIR))
+        from x_research_analysis import (
+            prepare as prepare_x_research_analysis,
+            publish as publish_x_research_analysis,
+            status as x_research_analysis_status,
+        )
+        analysis_db = ROOT_DIR / "data" / "bot_metrics.db"
+        if args.command == "x-research-analysis-status":
+            result = x_research_analysis_status(analysis_db)
+        elif args.command == "x-research-analysis-preview":
+            result = prepare_x_research_analysis(
+                analysis_db, ignore_timing=True)
+            result["external_writes"] = 0
+        else:
+            result = publish_x_research_analysis(
+                confirm=args.confirm,
+                dry_run=not args.live,
+                path=analysis_db)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result.get("status") not in {
+            "failed", "partial", "unknown"} else 1
     if args.command == "openai-usage-breakdown":
         return cmd_openai_usage_breakdown()
     if args.command == "db-status":
@@ -2313,8 +3963,91 @@ def main() -> int:
         return cmd_note_pipeline_status()
     if args.command == "free-note-due":
         return cmd_free_note_due()
+    if args.command == "config-audit":
+        return _growth_output("config_audit")
+    if args.command == "content-packet-generate":
+        return _growth_output(
+            "packet", topic_key=args.topic_key, content_id=args.content_id)
+    if args.command == "content-inventory-status":
+        return _growth_output("inventory_status")
+    if args.command == "content-inventory-build":
+        return _growth_output("inventory_build", dry_run=args.dry_run)
+    if args.command == "content-variants-generate":
+        return _growth_output("variants", dry_run=args.dry_run)
+    if args.command == "content-hypotheses":
+        return _growth_output("hypotheses", dry_run=args.dry_run)
+    if args.command == "growth-status":
+        return _growth_output("growth_status")
+    if args.command == "growth-daily-report":
+        return _growth_output("daily_report", dry_run=args.dry_run)
+    if args.command == "growth-weekly-report":
+        return _growth_output("weekly_report", dry_run=args.dry_run)
+    if args.command == "short-candidates":
+        return _growth_output("shorts", dry_run=args.dry_run)
+    if args.command == "article-candidates":
+        return _growth_output("articles", dry_run=args.dry_run)
+    if args.command == "visual-candidates":
+        return _growth_output("visuals", dry_run=args.dry_run)
+    if args.command == "thread-candidates":
+        return _growth_output("threads", dry_run=args.dry_run)
+    if args.command == "reply-candidates":
+        return _growth_output("replies", dry_run=args.dry_run)
+    if args.command == "quote-candidates":
+        return _growth_output("quotes", dry_run=args.dry_run)
+    if args.command == "source-health":
+        return _growth_output("source_health")
+    if args.command == "growth-budget-simulation":
+        return _growth_output(
+            "budget", x_posts=args.x_posts, threads_posts=args.threads_posts,
+            visuals=args.visuals, short_candidates=args.short_candidates,
+            days=args.days)
+    if args.command == "growth-full-cycle":
+        return _growth_output("full_cycle", dry_run=args.dry_run)
+    if args.command == "current-affairs-status":
+        return _current_affairs_output("status")
+    if args.command == "category-list":
+        return _current_affairs_output("list")
+    if args.command == "category-classify":
+        return _current_affairs_output("classify", content_id=args.content_id, dry_run=args.dry_run)
+    if args.command == "category-mix-status":
+        return _current_affairs_output("mix")
+    if args.command == "category-candidates":
+        return _current_affairs_output("candidates", category=args.category, dry_run=args.dry_run)
+    if args.command == "category-performance":
+        return _current_affairs_output("performance", category=args.category)
+    if args.command == "category-exclusions":
+        return _current_affairs_output("exclusions")
+    if args.command == "category-source-health":
+        return _current_affairs_output("sources")
+    if args.command == "current-affairs-daily-report":
+        return _current_affairs_output("daily", dry_run=args.dry_run)
+    if args.command == "current-affairs-weekly-report":
+        return _current_affairs_output("weekly", dry_run=args.dry_run)
+    if args.command == "current-affairs-full-cycle":
+        return _current_affairs_output("full_cycle", dry_run=args.dry_run)
+    if args.command == "social-anger-status":
+        return _social_anger_output("status")
+    if args.command == "social-anger-assess":
+        return _social_anger_output(
+            "assess", content_id=args.content_id, dry_run=args.dry_run)
+    if args.command == "social-anger-candidates":
+        return _social_anger_output(
+            "candidates", content_id=args.content_id, dry_run=args.dry_run)
+    if args.command == "social-anger-targets":
+        return _social_anger_output("targets")
+    if args.command == "social-anger-risk-report":
+        return _social_anger_output("risk")
+    if args.command == "social-anger-solution-gaps":
+        return _social_anger_output("solution_gaps")
+    if args.command == "social-anger-daily-report":
+        return _social_anger_output("daily", dry_run=args.dry_run)
+    if args.command == "social-anger-weekly-report":
+        return _social_anger_output("weekly", dry_run=args.dry_run)
+    if args.command == "social-anger-full-cycle":
+        return _social_anger_output("full_cycle", dry_run=args.dry_run)
     if args.command == "threads-auth-url":
-        return _threads_output("auth_url")
+        return _threads_output(
+            "auth_url", scope_profile=args.scope_profile)
     if args.command == "threads-exchange-code":
         return _threads_output("exchange_code", code=args.code)
     if args.command == "threads-token-status":
@@ -2340,6 +4073,168 @@ def main() -> int:
         return _threads_output("run")
     if args.command == "threads-endpoints":
         return _threads_output("endpoints")
+    if args.command == "threads-permissions":
+        return _threads_full_output("permissions")
+    if args.command == "threads-profile-sync":
+        return _threads_full_output(
+            "profile_sync", dry_run=args.dry_run)
+    if args.command == "threads-sync-posts":
+        return _threads_full_output(
+            "sync_posts", dry_run=args.dry_run,
+            since=args.since, until=args.until)
+    if args.command == "threads-sync-replies":
+        return _threads_full_output(
+            "sync_replies", dry_run=args.dry_run)
+    if args.command == "threads-sync-mentions":
+        return _threads_full_output(
+            "sync_mentions", dry_run=args.dry_run)
+    if args.command == "threads-collect-post-insights":
+        return _threads_full_output(
+            "post_insights", dry_run=args.dry_run)
+    if args.command == "threads-collect-account-insights":
+        return _threads_full_output(
+            "account_insights", dry_run=args.dry_run)
+    if args.command == "threads-search":
+        return _threads_full_output(
+            "search", query=args.query, search_type=args.search_type,
+            search_mode=args.search_mode, since=args.since, until=args.until,
+            hours=args.hours, dry_run=args.dry_run)
+    if args.command == "threads-trends":
+        return _threads_full_output(
+            "trends", hours=args.hours, dry_run=args.dry_run)
+    if args.command == "threads-quota-status":
+        return _threads_full_output(
+            "quota", dry_run=args.dry_run)
+    if args.command == "threads-container-status":
+        return _threads_full_output(
+            "container", container_id=args.container_id)
+    if args.command == "threads-daily-report":
+        return _threads_full_output(
+            "daily_report", dry_run=args.dry_run)
+    if args.command == "threads-weekly-report":
+        return _threads_full_output(
+            "weekly_report", dry_run=args.dry_run)
+    if args.command == "threads-x-comparison":
+        return _threads_full_output("comparison", days=args.days)
+    if args.command == "threads-reply-draft":
+        return _threads_full_output(
+            "reply_draft", target_id=args.reply_to_id, text=args.text)
+    if args.command == "threads-reply-publish":
+        return _threads_full_output(
+            "reply_publish", draft_id=args.draft_id, confirm=args.confirm)
+    if args.command == "threads-quote-draft":
+        return _threads_full_output(
+            "quote_draft", target_id=args.post_id, text=args.text)
+    if args.command == "threads-quote-publish":
+        return _threads_full_output(
+            "quote_publish", draft_id=args.draft_id, confirm=args.confirm)
+    if args.command == "threads-repost":
+        return _threads_full_output(
+            "direct_action", action_type="repost",
+            target_id=args.post_id, confirm=args.confirm)
+    if args.command == "threads-delete":
+        return _threads_full_output(
+            "direct_action", action_type="delete",
+            target_id=args.post_id, reason=args.reason, confirm=args.confirm)
+    if args.command == "threads-moderation-draft":
+        return _threads_full_output(
+            "moderation_draft", target_id=args.reply_id,
+            moderation_action=args.action)
+    if args.command == "threads-moderation-apply":
+        return _threads_full_output(
+            "moderation_apply", draft_id=args.draft_id,
+            confirm=args.confirm)
+    if args.command == "threads-data-retention-run":
+        return _threads_full_output("retention")
+    if args.command == "threads-user-data-delete":
+        return _threads_full_output(
+            "user_delete", user_id=args.user_id, confirm=args.confirm)
+    if args.command == "threads-full-sync":
+        return _threads_full_output(
+            "full_sync", dry_run=args.dry_run)
+    if args.command == "threads-format-preview":
+        return _threads_full_output(
+            "format_preview", spec_file=args.spec_file)
+    if args.command == "threads-format-validate":
+        return _threads_full_output(
+            "format_validate", spec_file=args.spec_file)
+    if args.command == "threads-format-publish":
+        return _threads_full_output(
+            "format_publish", draft_id=args.draft_id,
+            confirm=args.confirm)
+    if args.command == "threads-location-get":
+        return _threads_full_output(
+            "location", location_id=args.location_id)
+    if args.command == "threads-profile-discovery":
+        return _threads_full_output(
+            "profile_discovery", username=args.username,
+            dry_run=args.dry_run)
+    if args.command == "crosspost-status":
+        return _crosspost_output("status")
+    if args.command == "crosspost-candidates":
+        return _crosspost_output("candidates")
+    if args.command == "crosspost-generate-copy":
+        return _crosspost_output(
+            "generate_copy", publication_id=args.publication_id,
+            dry_run=args.dry_run)
+    if args.command == "crosspost-render-renditions":
+        return _crosspost_output(
+            "render", publication_id=args.publication_id,
+            dry_run=args.dry_run)
+    if args.command == "crosspost-validate":
+        return _crosspost_output(
+            "validate", publication_id=args.publication_id,
+            dry_run=args.dry_run)
+    if args.command == "crosspost-prepare":
+        return _crosspost_output(
+            "prepare", publication_id=args.publication_id,
+            dry_run=args.dry_run)
+    if args.command == "crosspost-publish":
+        return _crosspost_output(
+            "publish", publication_id=args.publication_id,
+            dry_run=args.dry_run, confirm=args.confirm)
+    if args.command == "crosspost-reconcile":
+        return _crosspost_output(
+            "reconcile", publication_id=args.publication_id,
+            dry_run=args.dry_run)
+    if args.command == "crosspost-metrics-sync":
+        return _crosspost_output(
+            "metrics", publication_id=args.publication_id,
+            dry_run=args.dry_run)
+    if args.command == "crosspost-report":
+        return _crosspost_output(
+            "report", publication_id=args.publication_id,
+            dry_run=args.dry_run)
+    if args.command == "crosspost-emergency-stop":
+        return _crosspost_output("emergency_stop")
+    if args.command.startswith("short-video-"):
+        load_env()
+        ensure_dirs()
+        from short_video_factory.cli import run as run_short_video
+        action = args.command.removeprefix("short-video-")
+        kwargs = vars(args).copy()
+        kwargs.pop("command", None)
+        if action == "publish":
+            kwargs["dry_run"] = not kwargs.pop("live")
+        elif action == "metrics-sync":
+            kwargs["dry_run"] = not kwargs.pop("live")
+        return run_short_video(action, **kwargs)
+    if args.command == "instagram-auth-url":
+        return _crosspost_output("instagram_auth_url")
+    if args.command == "instagram-exchange-code":
+        return _crosspost_output(
+            "instagram_exchange", code=args.code, dry_run=args.dry_run)
+    if args.command == "instagram-token-status":
+        return _crosspost_output("instagram_token")
+    if args.command == "instagram-profile":
+        return _crosspost_output(
+            "instagram_profile", dry_run=args.dry_run)
+    if args.command == "instagram-reel-status":
+        return _crosspost_output(
+            "instagram_reel_status", creation_id=args.creation_id,
+            dry_run=args.dry_run)
+    if args.command == "youtube-token-status":
+        return _crosspost_output("youtube_token")
     if args.command == "threads-web":
         load_env()
         ensure_dirs()
@@ -2352,6 +4247,30 @@ def main() -> int:
         return cmd_discord_note_draft_test()
     if args.command == "discord-log":
         return cmd_discord_log(args.source, args.lines)
+    if args.command == "daily-post-goal":
+        load_env()
+        ensure_dirs()
+        from daily_post_goal import apply_remediation, build_report, save_report
+        report_date = (
+            datetime.fromisoformat(args.date).date() if args.date else None)
+        result = build_report(
+            path=ROOT_DIR / "data" / "bot_metrics.db",
+            log_dir=ROOT_DIR / "logs",
+            target=args.target,
+            report_date=report_date,
+        )
+        if args.save:
+            saved = save_report(result, ROOT_DIR / "data" / "daily_post_goal")
+            result["saved_to"] = str(saved)
+        if args.apply_remediation:
+            result["applied_remediation"] = apply_remediation(
+                result, ROOT_DIR / "data" / "daily_post_goal")
+        result["discord_notified"] = False
+        if args.notify:
+            from discord_notify import notify_daily_post_goal
+            result["discord_notified"] = notify_daily_post_goal(result)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
     parser.print_help()
     return 1
 

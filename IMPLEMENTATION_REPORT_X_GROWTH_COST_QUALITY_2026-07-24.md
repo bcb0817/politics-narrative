@@ -5,7 +5,7 @@
 
 ## 1. バックアップ
 
-- `D:\SNS Bot\politics-narrative-backup-20260724-010132`
+- `D:\SNS Bot\politics-narrative\backups\politics-narrative-backup-20260724-010132`
 - 16,742ファイル
 
 ## 2. 既存コード調査
@@ -223,7 +223,7 @@ Get-ScheduledTask -TaskName "PoliticsNarrativeBot" |
 ```powershell
 Stop-ScheduledTask -TaskName "PoliticsNarrativeBot" -ErrorAction SilentlyContinue
 Rename-Item "D:\SNS Bot\politics-narrative" "politics-narrative-failed-20260724"
-Copy-Item "D:\SNS Bot\politics-narrative-backup-20260724-010132" `
+Copy-Item "D:\SNS Bot\politics-narrative\backups\politics-narrative-backup-20260724-010132" `
   "D:\SNS Bot\politics-narrative" -Recurse
 ```
 

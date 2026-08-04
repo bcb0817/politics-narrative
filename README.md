@@ -1,5 +1,43 @@
 # politics-narrative
 
+## Current Affairs Expansion Phase A
+
+久世ゆい Social Content Factory は、政治を中核に、経済・企業、重大事件、
+AI・テクノロジー、サイバー、社会・生活、安全保障、災害・インフラを
+「制度・お金・責任・安全」の視点で整理する時事解説AIへ拡張しました。
+
+Phase Aはカテゴリ分類、brand fit評価、候補在庫、Short・記事・長尺候補、
+カテゴリ別レポートだけをローカル生成します。既存のX/Threads投稿数、
+プロフィール、重大事案処理、note・動画公開経路は変更しません。
+SNSは需要発見だけに使い、事実確認には一次資料と信頼できる報道を使います。
+
+```powershell
+.\.venv\Scripts\python.exe local_bot.py current-affairs-status
+.\.venv\Scripts\python.exe local_bot.py category-list
+.\.venv\Scripts\python.exe local_bot.py category-classify --dry-run
+.\.venv\Scripts\python.exe local_bot.py current-affairs-full-cycle --dry-run
+```
+
+詳細は `IMPLEMENTATION_PLAN_CURRENT_AFFAIRS_EXPANSION.md`、
+`config/current_affairs_categories.json`、
+`config/current_affairs_sources.json` を参照してください。
+
+## 社会的怒りの構造化
+
+「社会の怒りを届ける」を、感情の増幅ではなく、負担・受益・意思決定・
+責任・説明不足を事実で整理する候補生成・安全評価機能として追加しています。
+Phase Bはシャドー比較、Phase Cは制度・予算・行政プロセスなど低リスク対象
+だけをX・Threads生成へ接続します。重要テーマは最大5案、通常テーマは最大3案を
+比較し、既存の安全・品質・間隔・日次上限・予算判定を通った1案だけを投稿します。
+
+```powershell
+.\.venv\Scripts\python.exe local_bot.py social-anger-status
+.\.venv\Scripts\python.exe local_bot.py social-anger-full-cycle --dry-run
+```
+
+詳細は `docs/SOCIAL_ANGER_PHASE_A.md` を参照してください。
+
+
 
 ## 現在の投稿方針
 
@@ -13,7 +51,10 @@
 **このBotはローカル運用に移行しました。** GitHub Actions では動かしません。
 ローカルPC / ローカルサーバー上で `local_bot.py daemon` として常駐させます。
 
-- 対象プラットフォームは **X のみ**（Threads対応はありません）
+- 本番配信先は **XとMeta公式Threads API** です。
+- Phase AのSocial Content Factoryは、SNSを需要発見装置として扱い、
+  topic・claim・angle単位の候補、図解、スレッド、Short、記事原料をローカル生成します。
+- 動画クロス投稿は準備機能まで実装済みで、自動公開は既定OFFです。
 - `POST_ENABLED=true` にしない限り **X への実投稿は一切行われません**
 
 > テキスト投稿への移行と、catch-up 詰まり対策（attempted_slots.json）の詳しい方針は
@@ -80,6 +121,33 @@ X_NATIVE_SEARCH_ENABLED=false
 XAI_ENABLED=true
 XAI_MODEL=grok-4.5
 XAI_SEARCH_SCHEDULE=06:00,09:00,12:00,15:00,18:00,21:00
+```
+
+## 設定の正本
+
+設定の優先順位は次のとおりです。
+
+```text
+.env
+  ↓
+src/runtime_config.py の型付き設定
+  ↓
+実行時設定
+  ↓
+local_bot.py config-audit
+  ↓
+README・運用レポート
+```
+
+`.env.example`は設定例であり、本番値ではありません。Gmailへのnoteドラフト転送は
+現行実装に含まれません。noteドラフトの外部通知先はDiscordだけです。
+
+Phase Aの候補生産を外部投稿なしで確認できます。
+
+```powershell
+.\.venv\Scripts\python.exe local_bot.py config-audit
+.\.venv\Scripts\python.exe local_bot.py growth-full-cycle --dry-run
+.\.venv\Scripts\python.exe local_bot.py growth-status
 ```
 
 xAIレーダーは`tool_choice=required`、`max_turns=1`、`parallel_tool_calls=false`で実行します。
@@ -184,6 +252,8 @@ python local_bot.py daemon
 - タスクスケジューラを使う場合: 「タスクの作成」→ トリガー「ログオン時」→
   操作でプログラム `C:\path\to\repo\.venv\Scripts\python.exe`、
   引数 `local_bot.py daemon`、開始（作業）フォルダをリポジトリ直下に設定。
+- `daemon`は稼働中ずっと `data/daemon.lock` のOSロックを保持する。
+  タスクや手動ターミナルから重複起動されても、後発プロセスは即時終了する。
 
 ### macOS
 
@@ -283,19 +353,19 @@ logs/                   ログ（git管理外）
 
 ## 選別投稿ポリシー
 
-Botは05:00〜23:00の毎時00分にニュースを監視しますが、全枠で投稿しません。JST基準で次を適用します。
+Botは05:00〜23:00を45分間隔（約25監視枠）で監視しますが、全枠で投稿しません。JST基準で次を適用します。
 
-- `ORIGINAL_DAILY_POST_MIN=6`: 目標値（投稿ノルマではない）
-- `ORIGINAL_DAILY_POST_MAX=8`: 通常投稿の上限
-- `BREAKING_DAILY_POST_LIMIT=2` / `MAX_DAILY_AUTOMATED_POSTS=10`: 重大速報・総投稿上限
-- `MIN_POST_INTERVAL_MINUTES=60`: 成功投稿間の最短間隔
+- `ORIGINAL_DAILY_POST_MIN=20`: 日次目標（投稿ノルマではなく、安全・品質条件を満たす場合のみ）
+- `ORIGINAL_DAILY_POST_MAX=20`: 通常投稿の上限
+- `BREAKING_DAILY_POST_LIMIT=2` / `MAX_DAILY_AUTOMATED_POSTS=20`: 重大速報の内数上限・総投稿上限
+- `MIN_POST_INTERVAL_MINUTES=45`: 成功投稿間の最短間隔
 - `TOPIC_COOLDOWN_HOURS=4`: 同一テーマの冷却時間
 - `LOW_QUALITY_FALLBACK_ENABLED=false`: 無投稿でも品質基準を緩和しない
 - `EVERGREEN_MIN_SILENCE_HOURS=3`: 3時間無投稿なら公式資料に基づく制度解説を最大1件検討
 - `QUALITY_GATE_ENABLED=true` / `MIN_POST_SCORE=7.0`: 品質スコアゲート
 
 低品質フォールバック中も、RSS確認、政治関連性、重複URL、未確認情報、BANリスク、
-1日10件の上限は緩和しません。絵文字は選択式で、約25％・最大1個です。重大事件では使いません。
+1日20件の総上限、安全・品質・重複・予算ゲートは緩和しません。毎日04:40の日次レビューが前日の達成率と未達理由を分析し、候補選別・一時障害再試行・検証済み常緑候補だけを自動調整します。目標未達を理由に低品質な投稿を強制しません。絵文字は選択式で、約25％・最大1個です。重大事件では使いません。
 
 投稿タイプは `breaking_news`、`issue_diagram`、`strong_opinion`、
 `comparison_factcheck`、`digest` の5種類です。内部ラベルは本文へ出しません。
@@ -333,20 +403,54 @@ OpenAI予算は投稿生成 `$5`、分類 `$0.5`、日次レビュー `$1.5`、�
 テーマ履歴は `data/recent_topics.json`、最新レビューは
 `data/daily_review_latest.json`、日別レビューは `data/daily_reviews/YYYY-MM-DD.json` に保存します。
 
-毎日04:45のレビューは、上位・成長上位・下位・品質エラーに加え、投稿時のX注目度、
+毎日04:40のレビューは、上位・成長上位・下位・品質エラーに加え、投稿時のX注目度、
 投稿タイプ・フック・批判軸・時間別の成績、構文の反復傾向を集計し、
 `knowledge/viral_patterns/` の `winning_patterns.md`、`losing_patterns.md`、
 `avoid_patterns.md` を更新します。次回生成では成功形式を最大3件、失敗・禁止ルールを
 最大5件だけ読み込み、プロンプトコストを制限します。
 
+さらにChatGPT（OpenAI Responses API）が、24時間の投稿指標と匿名化した運用ログ集計を
+解析し、インプレッション最大化の翌日方針を構造化JSONで返します。根拠Tweet ID、
+計測指標、信頼度がある提案だけを48時間有効にし、投稿型・フック・文字数・文章構造へ
+自動反映します。安全基準、事実確認、政治的評価原則、投稿上限、API予算は変更できません。
+
+```powershell
+.\.venv\Scripts\python.exe local_bot.py review-strategy-status
+```
+
+## Integrated research database and analysis posts 📊
+
+Official information and RSS remain the factual foundation. xAI X Search and
+available Threads Search results are stored separately as public-reaction
+signals. Integrated records are saved in `integrated_research_runs`,
+`integrated_research_topics`, `integrated_research_evidence`, plus decision,
+correction, and audit history. The pipeline classifies fact, opinion, and
+speculation; separates disagreement from explicit factual contradiction;
+scores posting value; and links X/Threads outcomes to the daily AI review.
+
+At most one qualified integrated-analysis candidate is added to the normal
+posting pipeline per research run. It does not add a separate posting slot and
+must pass the existing quality, safety, budget, interval, daily-limit, and
+72-hour semantic-duplicate checks before X or Threads publication.
+
+```powershell
+.\.venv\Scripts\python.exe .\local_bot.py integrated-research-status
+.\.venv\Scripts\python.exe .\local_bot.py integrated-research-dashboard --days 30
+.\.venv\Scripts\python.exe .\local_bot.py integrated-research-audit
+.\.venv\Scripts\python.exe .\local_bot.py integrated-research-mitigations
+```
+
+See [`docs/INTEGRATED_RESEARCH.md`](docs/INTEGRATED_RESEARCH.md).
+
 ## OpenAI Batch API
 
-日次レビューと週次レビューは、既定でOpenAI Batch API（`/v1/responses`、完了枠`24h`）へ
-非同期送信します。速報・通常投稿の生成は遅延を避けるため同期Responses APIのままです。
+日次レビューは翌日の投稿へ即時反映するため同期Responses APIを使用します。
+週次レビューなど遅延可能な処理は、OpenAI Batch API（`/v1/responses`、完了枠`24h`）へ
+非同期送信できます。速報・通常投稿の生成も同期Responses APIのままです。
 
 ```dotenv
 OPENAI_BATCH_ENABLED=true
-OPENAI_BATCH_TASKS=daily_review,weekly_report
+OPENAI_BATCH_TASKS=weekly_report,quality_eval
 ```
 
 デーモンは起動時と毎時処理後に完了結果を回収します。手動操作も可能です。
@@ -436,12 +540,33 @@ DISCORD_NOTIFY_POST_SUCCESS=true
 DISCORD_NOTIFY_ERROR=true
 DISCORD_NOTIFY_RUN_LOG=true
 DISCORD_NOTIFY_SKIP=false
+DISCORD_NOTIFY_THREADS_RESEARCH=true
+DISCORD_NOTIFY_X_RESEARCH=true
 DISCORD_LOG_MODE=result_only
 ```
 
 通知は「投稿完了」「今回は投稿なし」「処理失敗」「ログ確認結果」に整理されます。
 投稿成功は重複通知せず、`discord-log`もログ本文ではなく、エラー・警告件数と
 正常／異常の結果だけを送ります。
+
+Threads公式API検索後の相対トレンド分析は、検索語、取得件数、
+代表的な公開投稿（最大3件）、上位トピック、公式・報道との照合結果を
+1件のDiscord通知にまとめます。アクセストークン、ユーザー識別ハッシュ、
+生レスポンス、内部ログは送信しません。同じ検索結果の再分析だけでは
+再通知せず、新しい検索実行が保存された場合だけ通知します。
+
+```dotenv
+THREADS_DISCORD_RESEARCH_ENABLED=true
+```
+
+X API Recent SearchまたはxAI X Searchの実行後も、検索テーマ、取得件数、
+代表投稿または主な賛否、注目度・速度、RSS・公式情報との照合結果を
+1件のDiscord通知にまとめます。X上の情報だけで事実認定せず、
+同一スケジュール枠のキャッシュ再利用では再通知しません。
+
+```dotenv
+X_DISCORD_RESEARCH_ENABLED=true
+```
 
 Send a manual connection test:
 
@@ -470,28 +595,33 @@ NOTE_DRAFT_DISCORD_WEBHOOK_USERNAME=久世ゆい note Bot
 - 自動起動は `PoliticsNarrativeBot` へ統一しました。
 - `production\register_task.ps1` は登録のみ行い、自動開始しません。
 - xAI費用の正本はSQLite `xai_usage_events` です。
-- `XAI_COST_LEDGER_VERIFIED=false` の間も、xAI実効月額上限は5ドルです。
-- xAIは原則06:00・12:00・18:00、低変動日は06:00・18:00に実行します。
+- `XAI_COST_LEDGER_VERIFIED=false` の間も、運用者指定のxAI実効月額上限は30ドルです。
+- xAIは通常06:00・09:00・12:00・15:00・18:00・21:00、低変動日は
+  06:00・12:00・18:00、予算制限時は06:00・18:00に実行します。
 - `xai-roi` と `openai-usage-breakdown` で費用対効果と用途別費用を確認できます。
 - 詳細は `AUDIT_BUDGET_STARTUP_XAI.md` を参照してください。
 # API予算 💰
 
-現行の月額API予算は、OpenAI `$15`、xAI `$5`、X API `$16`、
-合計 `$36` です。reserve `$2` は総額に追加せず、36ドル内の保留額として扱うため、
-通常の実効利用可能額は `$34` です。
+現行の月額API予算は、OpenAI `$15`、xAI `$30`、X API `$16`、
+合計 `$61` です。reserve `$3.25` は総額に追加せず、61ドル内の保留額として扱うため、
+通常の実効利用可能額は `$57.75` です。
 
 円表示は固定5,000円ではなく、`TOTAL_MONTHLY_API_BUDGET_USD` と
-`BUDGET_USD_JPY_RATE` から動的に計算します。標準レート165円では5,940円です。
+`BUDGET_USD_JPY_RATE` から動的に計算します。標準レート165円では10,065円です。
 
-xAIは `XAI_COST_LEDGER_VERIFIED=false` の場合も
-`XAI_UNVERIFIED_EFFECTIVE_LIMIT_USD=5.0`を適用し、実効上限を5ドルにします。
-台帳検証失敗は引き続き警告として表示し、RSS・公式情報へのフォールバックを維持します。
+xAIの設定上限は月30ドルです。ただし、
+`XAI_COST_LEDGER_VERIFIED=false` の間は
+`XAI_UNVERIFIED_EFFECTIVE_LIMIT_USD=7.5`を適用します。台帳検証済みの場合のみ
+`XAI_VERIFIED_EFFECTIVE_LIMIT_USD=30.0`まで利用できます。未検証状態で30ドルを
+開放するには、運用者が明示的に
+`XAI_ALLOW_UNVERIFIED_FULL_BUDGET=true`を設定する必要があります。
+検証失敗時もRSS・公式情報へのフォールバックは継続します。
 
 予算ステージは85%で警告、93%で補助機能を順次縮小、100%で新規の有料API処理を
 停止します。RSS・公式情報のローカル監視と既存キャッシュは継続します。
 # 無料note原稿パイプライン 📝
 
-政治・制度解説を週1〜2本生成し、`outputs/note`へMarkdownで保存できます。記事末尾は「一次資料2リンク＋関連書籍候補1〜3件」に統一し、関連書籍はISBN確認済みカタログから関連性スコア7.0以上の候補を自動選定します。初期設定の`manual`モードでは架空のAmazonリンクを作らず、`AMAZON_LINK_PENDING:`プレースホルダーを置きます。人がSiteStripe等で作成したアソシエイトリンクを登録し、開示文とリンクの確認が済むまで承認を止められます。同時に、記事タイトル入りの見出し画像`cover.png`を1280×670 px（1.91:1）でローカル生成します。合格原稿は専用Discordへ結果概要、見出し画像、確認用ファイルを通知しますが、noteへの公開は必ず人が行います。
+政治・制度解説を通常週2本、強い勝ちテーマがある週は最大3本まで候補生成し、`outputs/note`へMarkdownで保存できます。記事末尾は一次資料2〜5件と関連書籍候補0〜3件に対応し、関連書籍はISBN確認済みカタログから関連性スコア7.0以上の候補を選定します。初期設定の`manual`モードでは架空のAmazonリンクを作らず、`AMAZON_LINK_PENDING:`プレースホルダーを置きます。人がSiteStripe等で作成したアソシエイトリンクを登録し、開示文とリンクの確認が済むまで承認を止められます。同時に、記事タイトル入りの見出し画像`cover.png`を1280×670 px（1.91:1）でローカル生成します。合格原稿は専用Discordへ結果概要、見出し画像、確認用ファイルを通知しますが、noteへの公開は必ず人が行います。
 
 ```powershell
 .\.venv\Scripts\python.exe local_bot.py generate-free-note --dry-run

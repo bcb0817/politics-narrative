@@ -11,12 +11,15 @@ data/
 logs/
 outputs/
 reports/
+knowledge/viral_patterns/chatgpt_strategy.json
+knowledge/viral_patterns/chatgpt_strategy.md
 evals/results/
 archive/
 bot.log
 
 # Local backup copies
 *.backup-*
+backups/
 
 # Runtime performance learning (may contain operational metrics/topics)
 knowledge/viral_patterns/winning_patterns.md

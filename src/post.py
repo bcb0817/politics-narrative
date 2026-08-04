@@ -31,6 +31,7 @@ import sys
 import json
 import re
 import shutil
+import hashlib
 from difflib import SequenceMatcher
 from pathlib import Path
 from datetime import datetime, time, timedelta
@@ -47,11 +48,13 @@ from publishing_policy import (
     classify_hook_type,
     classify_post_type,
     choose_post_style,
+    has_material_policy_update,
     normalize_topic_key,
     post_type_quota_reached,
     pre_generation_skip_reason,
     phase_daily_limit_reached,
     stagnation_fallback_active,
+    semantic_policy_signature,
     topic_cooldown_skip_reason,
 )
 from x_attention import final_news_score
@@ -67,6 +70,11 @@ from api_budget import (estimate_openai, estimate_x, finalize as finalize_budget
 from metrics_db import insert_generated, insert_news, insert_published, write as db_write
 from phase2 import classify_if_needed, save_extension_previews
 from discord_notify import notify_error, notify_post_success
+from social_anger import (
+    evaluate_production_candidate as evaluate_social_anger_candidate,
+    production_prompt_context as social_anger_prompt_context,
+    record_target as record_social_anger_target,
+)
 
 # ---------------------------------------------------------------------------
 # 定数
@@ -176,18 +184,18 @@ def _migrate_legacy_state() -> None:
 _migrate_legacy_state()
 
 # 投稿スロット（JST）— 24時間対象。
-# 監視間隔はMONITOR_INTERVAL_MINUTESで可変（既定60分）。
+# 監視間隔はMONITOR_INTERVAL_MINUTESで可変（既定45分）。
 # 45分なら1日32スロット（45×32=1440で1日に綺麗に割り切れる）。
-# 1440 を割り切る値のみ許可（割り切れない値は既定30にフォールバック）。
+# 1440 を割り切る値のみ許可（割り切れない値は既定45にフォールバック）。
 def _get_slot_interval_minutes() -> int:
     try:
         v = int(os.getenv("MONITOR_INTERVAL_MINUTES",
-                          os.getenv("SLOT_INTERVAL_MINUTES", "60")))
+                          os.getenv("SLOT_INTERVAL_MINUTES", "45")))
     except (TypeError, ValueError):
-        return 60
+        return 45
     if v < 1 or 1440 % v != 0:
-        print(f"[WARN] SLOT_INTERVAL_MINUTES={v} は1440を割り切れないため既定30を使用", flush=True)
-        return 60
+        print(f"[WARN] SLOT_INTERVAL_MINUTES={v} は1440を割り切れないため既定45を使用", flush=True)
+        return 45
     return v
 
 
@@ -328,8 +336,8 @@ def _env_float(name: str, default: float) -> float:
 # 投稿可否の最終しきい値: effective_score がこの値以上で投稿可。
 MIN_POST_SCORE = _env_float("MIN_POST_SCORE", 6.3)
 MAX_DAILY_POSTS = max(0, _env_int("MAX_DAILY_AUTOMATED_POSTS",
-                                  _env_int("MAX_DAILY_POSTS", 10)))
-MIN_POST_INTERVAL_MINUTES = max(0, _env_int("MIN_POST_INTERVAL_MINUTES", 60))
+                                  _env_int("MAX_DAILY_POSTS", 20)))
+MIN_POST_INTERVAL_MINUTES = max(0, _env_int("MIN_POST_INTERVAL_MINUTES", 45))
 TOPIC_COOLDOWN_HOURS = max(0.0, _env_float("TOPIC_COOLDOWN_HOURS", 4.0))
 LOW_QUALITY_FALLBACK_HOURS = max(0.0, _env_float("LOW_QUALITY_FALLBACK_HOURS", 3.0))
 LOW_QUALITY_FALLBACK_ENABLED = os.environ.get(
@@ -349,7 +357,8 @@ EVERGREEN_TOPICS = (
 )
 
 
-def _evergreen_candidate(history: list[dict], now_jst: datetime) -> dict | None:
+def _evergreen_candidate(history: list[dict], now_jst: datetime,
+                         max_per_day: int | None = None) -> dict | None:
     if os.environ.get("EVERGREEN_FALLBACK_ENABLED", "true").lower() not in ("1", "true", "yes"):
         return None
     if not stagnation_fallback_active(history, now_jst,
@@ -357,7 +366,14 @@ def _evergreen_candidate(history: list[dict], now_jst: datetime) -> dict | None:
         return None
     today_count = sum(1 for row in history if row.get("post_type") == "evergreen_explainer"
                       and str(row.get("posted_at_jst", "")).startswith(now_jst.date().isoformat()))
-    if today_count >= _env_int("EVERGREEN_MAX_PER_DAY", 1):
+    # A second verified evergreen candidate may help recover a quiet news day,
+    # but it is still subject to the normal quality, safety, interval, topic
+    # cooldown, budget, and total daily limit gates below.
+    evergreen_limit = (
+        max(0, int(max_per_day)) if max_per_day is not None
+        else _env_int("EVERGREEN_MAX_PER_DAY", 2)
+    )
+    if today_count >= evergreen_limit:
         return None
     used = {row.get("topic_key") for row in history[-30:]}
     title, summary, url = next((row for row in EVERGREEN_TOPICS if row[0] not in used), EVERGREEN_TOPICS[0])
@@ -387,10 +403,12 @@ def _score_gate_allows(
     stagnation_fallback: bool,
 ) -> bool:
     """Relax only the performance score; safety checks run before this gate."""
+    fallback_floor = _env_float("LOW_QUALITY_FALLBACK_MIN_SCORE", 4.5)
     return bool(
         force_bypass
         or effective_score >= MIN_POST_SCORE
         or rescue_rule_applied
+        or (stagnation_fallback and effective_score >= fallback_floor)
     )
 
 # ---------------------------------------------------------------------------
@@ -615,12 +633,31 @@ def recent_types(history: list, n: int = 5) -> list:
             if h.get("post_type") or h.get("type")]
 
 
+def _classification_or_local_fallback(
+    enriched: dict,
+    classifier=None,
+) -> dict:
+    """Keep deterministic metadata when the optional classifier is unavailable."""
+    classifier = classifier or classify_if_needed
+    classified = classifier(enriched)
+    if classified is not None:
+        return classified
+    fallback = dict(enriched)
+    fallback["classification_mode"] = "local_limit_fallback"
+    fallback["classification_confidence"] = max(
+        0.65, float(fallback.get("classification_confidence") or 0)
+    )
+    return fallback
+
+
 def is_duplicate(candidate: dict, history: list) -> bool:
     """URL一致 or タイトル一致 or 主要キーワードの強い重なりで重複と判断"""
     url = (candidate.get("source_url") or "").strip()
     title = (candidate.get("title") or "").strip()
     kw = set(candidate.get("keywords") or [])
     text = re.sub(r"\s+", "", candidate.get("tweet_text") or candidate.get("final_text") or "")
+    semantic = semantic_policy_signature(
+        f"{title} {candidate.get('summary', '')} {text}")
     for h in history[-120:]:
         if url and url == (h.get("source_url") or "").strip():
             return True
@@ -630,6 +667,17 @@ def is_duplicate(candidate: dict, history: list) -> bool:
         if kw and hkw and len(kw & hkw) >= max(2, min(len(kw), len(hkw))):
             return True
         old_text = re.sub(r"\s+", "", h.get("tweet_text") or "")
+        old_semantic = semantic_policy_signature(
+            f"{h.get('title', '')} {h.get('summary', '')} {old_text}")
+        if (
+            semantic
+            and old_semantic == semantic
+            and not has_material_policy_update(
+                f"{title} {text}",
+                f"{h.get('title', '')} {old_text}",
+            )
+        ):
+            return True
         if text and old_text and SequenceMatcher(None, text, old_text).ratio() >= 0.88:
             return True
     return False
@@ -697,6 +745,23 @@ def gather_candidate_news(include_x: bool = True) -> list:
             "xai_discovered_at": str(it.get("xai_discovered_at", "") or ""),
             "xai_cost_allocated_usd": float(
                 it.get("xai_cost_allocated_usd", 0) or 0),
+            "source_type": str(it.get("source_type", "") or ""),
+            "verified": bool(it.get("verified")),
+            "verification_reason": str(
+                it.get("verification_reason", "") or ""),
+            "source_reliability_score": float(
+                it.get("source_reliability_score", 0) or 0),
+            "freshness_score": float(it.get("freshness_score", 0) or 0),
+            "final_news_score": float(
+                it.get("final_news_score", 0) or 0),
+            "has_counter_claims": bool(it.get("has_counter_claims")),
+            "post_type_hint": str(it.get("post_type_hint", "") or ""),
+            "integrated_research_topic_id": it.get(
+                "integrated_research_topic_id"),
+            "integrated_research_run_id": str(
+                it.get("integrated_research_run_id", "") or ""),
+            "integrated_research_confidence": float(
+                it.get("integrated_research_confidence", 0) or 0),
         })
     return items
 
@@ -879,12 +944,25 @@ def prefilter_news(items: list, top_n: int = None, allow_low_quality: bool = Fal
             freshness = 4.0
         source = (it.get("source_name") or "").strip()
         reliability = SOURCE_RELIABILITY.get(source, 6.0)
-        x_attention = float(it.get("x_attention_score", 0) or 0)
+        # xAI X Search values are qualitative discovery estimates, not a
+        # quantitative X-wide popularity measurement.  Keep native X scoring
+        # unchanged, but apply xAI only as a separately capped bonus.
+        xai_match = bool(it.get("xai_topic_match"))
+        x_attention = (
+            0.0 if xai_match
+            else float(it.get("x_attention_score", 0) or 0))
         x_weight = max(0.0, min(_env_float("X_SEARCH_WEIGHT", 0.25), 0.50))
         s = final_news_score(relevance, freshness, x_attention, reliability, x_weight)
+        xai_bonus = (
+            max(0.0, min(
+                float(it.get("xai_discovery_bonus", 0) or 0),
+                _env_float("XAI_TOTAL_DISCOVERY_BONUS_MAX", 2.0)))
+            if xai_match else 0.0)
+        s += xai_bonus
         it["news_relevance_score"] = round(relevance, 3)
         it["freshness_score"] = round(freshness, 3)
         it["source_reliability_score"] = round(reliability, 3)
+        it["xai_discovery_bonus_applied"] = round(xai_bonus, 3)
         it["final_news_score"] = s
         # 除外・低優先テーマは大きく減点（実質除外）
         if any(t in text for t in EXCLUDED_TOPICS):
@@ -1142,19 +1220,49 @@ CANDIDATE_RESPONSE_SCHEMA = {
 
 
 def _get_candidate_count() -> int:
-    """1ニュースあたりの生成候補数（既定1）。1〜3にクランプ。
-    少ないほど出力トークンとコストが下がる。"""
+    """Return the normal candidate count, clamped to the supported range."""
     try:
-        v = int(os.getenv("CANDIDATES_PER_NEWS", "1"))
+        v = int(os.getenv("CANDIDATES_PER_NEWS", "3"))
     except (TypeError, ValueError):
-        v = 1
-    return max(1, min(v, 3))
+        v = 3
+    return max(1, min(v, 5))
 
 
 CANDIDATES_PER_NEWS = _get_candidate_count()
 
 
-def _load_performance_patterns(topic_key: str = "", max_chars: int = 900) -> str:
+def _candidate_count_for_news(news_item: dict) -> int:
+    """Generate five angles for important topics and three for normal topics."""
+    concept_enabled = os.environ.get(
+        "SOCIAL_ANGER_CONCEPT_ENABLED", "true").strip().lower() in {
+            "1", "true", "yes", "on",
+        }
+    if not concept_enabled:
+        return CANDIDATES_PER_NEWS
+    important = bool(
+        news_item.get("important")
+        or news_item.get("major_incident")
+        or float(news_item.get("final_news_score", 0) or 0) >= 8.0
+        or news_item.get("post_type") == "breaking_news"
+    )
+    key = (
+        "SOCIAL_ANGER_CANDIDATES_PER_IMPORTANT_TOPIC" if important
+        else "SOCIAL_ANGER_CANDIDATES_PER_NORMAL_TOPIC"
+    )
+    default = 5 if important else 3
+    try:
+        value = int(os.environ.get(key, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(1, min(value, 5))
+
+
+def _load_performance_patterns(
+    topic_key: str = "",
+    max_chars: int = 900,
+    *,
+    use_ai_strategy: bool = True,
+) -> str:
     """Load at most 3 relevant wins and 5 recent failure/avoid rules."""
     root = ROOT_DIR / "knowledge" / "viral_patterns"
     sections = []
@@ -1183,7 +1291,21 @@ def _load_performance_patterns(topic_key: str = "", max_chars: int = 900) -> str
         if selected:
             sections.append(f"【{label}】\n" + "\n".join(selected))
     out = "\n\n".join(sections).strip()
-    return out[:max_chars]
+    ai_guidance = ""
+    if use_ai_strategy:
+        try:
+            from review_strategy import (
+                load_active_strategy, render_prompt_guidance,
+            )
+            ai_guidance = render_prompt_guidance(
+                load_active_strategy(ROOT_DIR))
+        except Exception:
+            pass
+    if not ai_guidance:
+        return out[:max_chars]
+    ai_guidance = ai_guidance[:min(500, max_chars)]
+    remaining = max(0, max_chars - len(ai_guidance) - 2)
+    return (out[:remaining].rstrip() + "\n\n" + ai_guidance).strip()
 
 
 _DEFAULT_IMPORTANT_KEYWORDS = [
@@ -1284,6 +1406,17 @@ _EMOJI_PATTERN = re.compile(
 )
 
 
+def _is_serious_news(news_item: dict) -> bool:
+    source_text = " ".join([
+        str(news_item.get("title", "")),
+        str(news_item.get("summary", "")),
+    ])
+    return any(term in source_text for term in (
+        "司法", "裁判", "判決", "逮捕", "死亡", "死者", "災害", "地震",
+        "戦争", "開戦", "停戦",
+    ))
+
+
 def _candidate_quality_violations(candidate: dict, news_item: dict) -> list[str]:
     """Cheap deterministic checks that block template leakage and off-topic axes."""
     text = (candidate.get("tweet_text") or "").strip()
@@ -1328,8 +1461,14 @@ def _candidate_quality_violations(candidate: dict, news_item: dict) -> list[str]
     emojis = _EMOJI_PATTERN.findall(text)
     if len(emojis) > max(0, _env_int("EMOJI_MAX_PER_POST", 1)):
         violations.append("too_many_emojis")
-    serious = any(term in source_text for term in (
-        "司法", "裁判", "判決", "逮捕", "死亡", "死者", "災害", "地震", "戦争", "開戦", "停戦"))
+    serious = _is_serious_news(news_item)
+    if (
+        not serious
+        and os.environ.get("EMOJI_REQUIRED", "true").strip().lower()
+        in {"1", "true", "yes", "on"}
+        and not emojis
+    ):
+        violations.append("emoji_required")
     if serious and emojis:
         violations.append("emoji_on_serious_news")
     if "\n\n" not in text:
@@ -1338,9 +1477,78 @@ def _candidate_quality_violations(candidate: dict, news_item: dict) -> list[str]
 
 
 LAST_GENERATION_FAILURE_REASON = ""
+LAST_GENERATION_API_CALLS = 0
 
 
-def generate_candidates(news_item: dict, regeneration_attempt: int = 0, retries_used: int = 0) -> list:
+def _candidate_cache_path(news_item: dict) -> Path:
+    """Return a content-addressed cache path for an unpublished candidate."""
+    identity = "|".join((
+        str(news_item.get("url") or ""),
+        str(news_item.get("title") or ""),
+        str(news_item.get("pub_date") or ""),
+        str(news_item.get("summary") or ""),
+        os.environ.get("PROMPT_VERSION", "x-growth-quality-v2"),
+    ))
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    return STATE_DIR / "politics_candidate_cache" / f"{digest}.json"
+
+
+def _load_cached_candidates(news_item: dict) -> list[dict]:
+    if not _env_bool("POLITICS_CANDIDATE_CACHE_ENABLED", "true"):
+        return []
+    path = _candidate_cache_path(news_item)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        created_at = datetime.fromisoformat(str(payload.get("created_at") or ""))
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=JST)
+        ttl_hours = max(
+            0.25, _env_float("POLITICS_CANDIDATE_CACHE_TTL_HOURS", 4.0))
+        if datetime.now(JST) - created_at > timedelta(hours=ttl_hours):
+            return []
+        candidates = payload.get("candidates") or []
+        if not isinstance(candidates, list):
+            return []
+        return [row for row in candidates if isinstance(row, dict)]
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return []
+
+
+def _save_cached_candidates(news_item: dict, candidates: list[dict]) -> None:
+    if (
+        not candidates
+        or not _env_bool("POLITICS_CANDIDATE_CACHE_ENABLED", "true")
+    ):
+        return
+    path = _candidate_cache_path(news_item)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _save_json(path, {
+        "created_at": datetime.now(JST).isoformat(),
+        "source_url": str(news_item.get("url") or ""),
+        "candidates": candidates,
+    })
+
+
+def _reset_generation_diagnostics() -> None:
+    global LAST_GENERATION_FAILURE_REASON, LAST_GENERATION_API_CALLS
+    LAST_GENERATION_FAILURE_REASON = ""
+    LAST_GENERATION_API_CALLS = 0
+
+
+def _should_retry_stale_candidate_cache(*, cache_hit: bool,
+                                        usable_count: int,
+                                        remediation_policy: dict,
+                                        retry_used: bool) -> bool:
+    """Allow one bounded cache bypass only when daily remediation requests it."""
+    return bool(
+        cache_hit
+        and usable_count == 0
+        and remediation_policy.get("retry_transient_slots")
+        and not retry_used
+    )
+
+
+def _generate_candidates_legacy(news_item: dict, regeneration_attempt: int = 0, retries_used: int = 0) -> list:
     """Generate structured X post candidates with the OpenAI Responses API."""
     api_key = os.environ.get("OPENAI_API_KEY", "").strip()
     if not api_key:
@@ -1352,7 +1560,7 @@ def generate_candidates(news_item: dict, regeneration_attempt: int = 0, retries_
         log(f"[ERROR] openai SDK import failed: {e}")
         return []
 
-    n = CANDIDATES_PER_NEWS
+    n = _candidate_count_for_news(news_item)
     state = _openai_usage_state()
     router = ModelRouter(OPENAI_PRICING_FILE)
     route = router.select_model(
@@ -1388,7 +1596,11 @@ def generate_candidates(news_item: dict, regeneration_attempt: int = 0, retries_
         summary=news_item.get("summary", "")[:1200],
         source_name=news_item.get("source_name", ""),
     )
-    perf = _load_performance_patterns(news_item.get("topic_key", ""))
+    perf = _load_performance_patterns(
+        news_item.get("topic_key", ""),
+        use_ai_strategy=(
+            news_item.get("review_strategy_variant") != "control"),
+    )
     if perf:
         user += "\n\n実績データ（report コマンドで集計した実際のインプレッション傾向）:\n" + perf
     user += (
@@ -1396,6 +1608,20 @@ def generate_candidates(news_item: dict, regeneration_attempt: int = 0, retries_
         "importance_score・source_reliability_score・claim_risk・quality_scoreも必ず評価する。"
         "モデル名、料金、ルーティング理由など内部情報は公開本文へ書かない。"
     )
+    try:
+        social_context = social_anger_prompt_context(
+            news_item, persist=True)["prompt_context"]
+        user += (
+            "\n\n社会的負担・責任の整理（確認済みニュースだけを根拠に使う）:\n"
+            + json.dumps(social_context, ensure_ascii=False)
+            + "\n投稿では、怒りを煽るのではなく、確認済み事実→影響を受ける人"
+              "→決定・監督責任→具体的な改善要求の順で整理する。"
+              "事実と評価を明確に分け、政党・個人・属性集団への敵意、"
+              "群衆行動の誘導、意図の推測、未確認の断定は禁止する。"
+              "候補ごとに事実・負担・責任・改善の角度を変える。"
+        )
+    except Exception as exc:
+        log(f"[WARN] Social anger prompt context unavailable: {type(exc).__name__}")
 
     # One candidate normally fits well under this cap. Reasoning tokens are also
     # counted against max_output_tokens, so keep a modest configurable buffer.
@@ -1499,7 +1725,25 @@ def generate_candidates(news_item: dict, regeneration_attempt: int = 0, retries_
                 c["tweet_text"] = "\n\n".join(nonempty_lines)
         if not c["tweet_text"]:
             continue
+        if (
+            not _is_serious_news(news_item)
+            and os.environ.get("EMOJI_REQUIRED", "true").strip().lower()
+            in {"1", "true", "yes", "on"}
+            and not _EMOJI_PATTERN.search(c["tweet_text"])
+        ):
+            c["tweet_text"] = "📌 " + c["tweet_text"]
+            if lines:
+                lines[0] = "📌 " + str(lines[0])
+                c["tweet_lines"] = lines
+            c["final_text"] = c["tweet_text"]
         violations = _candidate_quality_violations(c, news_item)
+        social_review = evaluate_social_anger_candidate(
+            news_item, c["tweet_text"], platform="x", persist=True)
+        c["social_anger"] = social_review
+        severe_social_violations = social_review.get("safety_violations") or []
+        if severe_social_violations:
+            violations.extend(
+                f"social_anger:{value}" for value in severe_social_violations)
         if violations:
             rejected_violations.extend(violations)
             log(
@@ -1536,6 +1780,27 @@ def generate_candidates(news_item: dict, regeneration_attempt: int = 0, retries_
         c["estimated_cost_usd"] = actual_cost
         c["prompt_version"] = os.environ.get("PROMPT_VERSION", "x-growth-quality-v2")
         c["is_exploration"] = bool(news_item.get("is_exploration"))
+        c["review_strategy_experiment"] = str(
+            news_item.get("review_strategy_experiment") or "")
+        c["review_strategy_active"] = bool(
+            news_item.get("review_strategy_active"))
+        c["review_strategy_id"] = str(
+            news_item.get("review_strategy_id") or "")
+        c["review_strategy_variant"] = str(
+            news_item.get("review_strategy_variant") or "inactive")
+        c["review_strategy_alignment_bonus"] = float(
+            news_item.get("review_strategy_alignment_bonus", 0) or 0)
+        c["social_anger_connected"] = bool(
+            social_review.get("production_publish_connected"))
+        c["social_anger_phase"] = social_review.get("phase", "B")
+        c["social_anger_effective_score"] = float(
+            social_review.get("effective_score", 0) or 0)
+        c["social_anger_axis"] = (
+            social_review.get("assessment") or {}).get("anger_axis", "")
+        c["social_anger_target_type"] = (
+            social_review.get("assessment") or {}).get(
+                "anger_target_type", "")
+        c["social_anger_roles"] = social_review.get("prompt_context") or {}
         if not (c.get("hook") or "").strip():
             first_line = next((str(x).strip() for x in lines if str(x).strip()), "")
             c["hook"] = first_line or (c.get("title") or "").strip()
@@ -1556,8 +1821,299 @@ def generate_candidates(news_item: dict, regeneration_attempt: int = 0, retries_
                 f"{news_item.get('summary', '')}\n再生成指示: 前回は品質検査で拒否。"
                 "内部ラベルを本文へ出さず、ニュース固有の事実と指定した批判軸だけで書き直す。"
             )
-            return generate_candidates(retry_item, regeneration_attempt + 1, retry_consumed + 1)
+            return _generate_candidates_legacy(
+                retry_item, regeneration_attempt + 1, retry_consumed + 1)
     return cleaned
+
+
+def _multistage_model(role: str, routed_model: str) -> str:
+    key = {
+        "analysis": "POLITICS_ANALYSIS_MODEL",
+        "writer": "POLITICS_WRITER_MODEL",
+        "judge": "POLITICS_JUDGE_MODEL",
+        "finalizer": "POLITICS_FINALIZER_MODEL",
+    }.get(role, "POLITICS_WRITER_MODEL")
+    return os.environ.get(key, "").strip() or routed_model
+
+
+def _multistage_candidate(
+    news_item: dict, history: list[dict], *,
+    candidate_count: int | None = None, minimum_mode: bool = False,
+    call_budget: dict | None = None,
+) -> list[dict]:
+    """Run the bounded pipeline and adapt its single winner to legacy metadata."""
+    from politics_multistage import (
+        MultiStagePipeline, PipelineConfig,
+        call_structured_json_with_retry,
+    )
+    from article_content import enrich_article
+
+    news_item = enrich_article(news_item, root=ROOT_DIR)
+
+    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("openai_api_key_missing")
+    from openai import OpenAI
+
+    state = _openai_usage_state()
+    route = ModelRouter(OPENAI_PRICING_FILE).select_model(
+        "post_generation",
+        importance_score=float(news_item.get("final_news_score", 0) or 0),
+        genre=str(news_item.get("genre", "")),
+        source_reliability=float(
+            news_item.get("source_reliability_score", 0) or 0),
+        claim_risk=str(news_item.get("claim_risk", "low") or "low"),
+        budget_state=state, daily_usage=_today_usage(state),
+        text=f"{news_item.get('title', '')} {news_item.get('summary', '')}",
+    )
+    routed_model = str(route.get("model") or "")
+    if not routed_model:
+        raise RuntimeError(route.get("skip_reason") or "model_route_skip")
+    client = OpenAI(
+        api_key=api_key,
+        timeout=max(15.0, _env_float("OPENAI_TIMEOUT_SECONDS", 90.0)),
+        max_retries=0,
+    )
+    call_budget = call_budget if call_budget is not None else {
+        "count": 0,
+        "max": max(1, _env_int(
+            "POLITICS_MAX_API_CALLS_PER_ARTICLE", 12)),
+    }
+
+    def call_json(stage: str, prompt: str, schema: dict, role: str) -> dict:
+        model = _multistage_model(role, routed_model)
+        max_tokens = min(4000, max(
+            900, _env_int("OPENAI_MAX_OUTPUT_TOKENS_POST", 1800)))
+        reservation, reason = reserve_budget(
+            "openai", "post_generation", model,
+            estimate_openai(model, 6000, max_tokens),
+            metadata={"generation_reason": f"politics_multistage_{stage}"},
+        )
+        if not reservation:
+            raise RuntimeError(reason or "openai_budget_guard")
+        last_error = None
+
+        def create_once():
+            if call_budget["count"] >= call_budget["max"]:
+                raise RuntimeError("politics_api_call_limit")
+            call_budget["count"] += 1
+            return client.responses.create(
+                model=model,
+                instructions=(
+                    "日本の政治ニュース編集工程。指定JSON Schemaへ厳密に従い、"
+                    "入力にない事実・数字・動機を作らない。JSON以外を書かない。"
+                ),
+                input=prompt,
+                max_output_tokens=max_tokens,
+                text={"format": {
+                    "type": "json_schema",
+                    "name": f"politics_{stage}",
+                    "strict": True,
+                    "schema": schema,
+                }},
+                store=False,
+            )
+
+        try:
+            response, payload, _attempts = call_structured_json_with_retry(
+                create_once, max_attempts=2)
+            actual_cost = _record_openai_usage(
+                response, model, f"multistage:{stage}",
+                fallback_used=bool(route.get("fallback_used")),
+            )
+            usage = getattr(response, "usage", None)
+            details = getattr(usage, "input_tokens_details", None)
+            finalize_budget(
+                reservation, actual_cost, success=True,
+                input_tokens=int(getattr(usage, "input_tokens", 0) or 0),
+                cached_tokens=int(getattr(details, "cached_tokens", 0) or 0),
+                output_tokens=int(getattr(usage, "output_tokens", 0) or 0),
+                fallback_used=bool(route.get("fallback_used")),
+            )
+            payload["__usage"] = {
+                "model": model,
+                "api_attempts": _attempts,
+                "input_tokens": int(
+                    getattr(usage, "input_tokens", 0) or 0),
+                "output_tokens": int(
+                    getattr(usage, "output_tokens", 0) or 0),
+                "estimated_cost_usd": actual_cost,
+            }
+            return payload
+        except Exception as exc:
+            last_error = exc
+        finalize_budget(
+            reservation, 0, success=False,
+            error_type=type(last_error).__name__ if last_error else "unknown",
+        )
+        raise RuntimeError(
+            f"politics_{stage}_failed:{type(last_error).__name__}:"
+            f"{str(last_error)[:120]}")
+
+    embedding_model = os.environ.get(
+        "POLITICS_EMBEDDING_MODEL", "").strip()
+
+    def embed_texts(texts: list[str]) -> list[list[float]]:
+        if not embedding_model:
+            return []
+        if call_budget["count"] >= call_budget["max"]:
+            raise RuntimeError("politics_api_call_limit")
+        call_budget["count"] += 1
+        response = client.embeddings.create(
+            model=embedding_model, input=texts)
+        return [list(row.embedding) for row in response.data]
+
+    config = PipelineConfig.from_env()
+    if candidate_count is not None:
+        config.candidate_count = max(
+            1, min(config.angle_count, int(candidate_count)))
+    pipeline = MultiStagePipeline(
+        call_json, root=ROOT_DIR, history=history,
+        config=config, embed_texts=embed_texts if embedding_model else None)
+    result = pipeline.run(news_item, minimum_mode=minimum_mode)
+    winner = result.get("winner") or {}
+    text = str(result.get("final_text") or "").strip()
+    if not winner or not text:
+        raise RuntimeError("politics_multistage_no_safe_winner")
+    safety = winner.get("safety_scores") or {}
+    quality = winner.get("quality_scores") or {}
+    score_map = {
+        "news": round(float(safety.get("factual_accuracy", 0) or 0)),
+        "controversy": round(float(quality.get("emotional_resonance", 0) or 0)),
+        "data_ability": round(float(quality.get("specificity", 0) or 0)),
+        "resonance": round(float(quality.get("daily_life_relevance", 0) or 0)),
+        "save_value": round(float(quality.get("specificity", 0) or 0)),
+        "quote_likelihood": round(float(quality.get("quotability", 0) or 0)),
+        "early_reaction_likelihood": round(float(quality.get("scroll_stop", 0) or 0)),
+        "quote_angle_strength": round(float(quality.get("argument_strength", 0) or 0)),
+        "text_diagram_clarity": round(float(quality.get("specificity", 0) or 0)),
+        "policy_structure_value": round(float(quality.get("accountability_clarity", 0) or 0)),
+        "conservative_angle_strength": round(float(quality.get("argument_strength", 0) or 0)),
+        "evergreen_value": round(float(quality.get("novelty", 0) or 0)),
+        "source_trust": round(float(safety.get("source_support", 0) or 0)),
+        "ban_risk": round(float(safety.get("policy_violation_risk", 0) or 0)),
+    }
+    candidate = {
+        "topic_key": news_item.get("topic_key", ""),
+        "post_type": news_item.get("post_type", "strong_opinion"),
+        "hook_type": news_item.get("hook_type", "conclusion_first"),
+        "title": news_item.get("title", ""),
+        "tweet_lines": text.splitlines(),
+        "tweet_text": text,
+        "final_text": text,
+        "threads_text": result.get("threads_text", ""),
+        "genre": news_item.get("genre", "国会法案"),
+        "critique_axis": news_item.get("critique_axis", ""),
+        "hook": winner.get("hook", text.splitlines()[0] if text else ""),
+        "opinion_conclusion": winner.get("thesis", ""),
+        "claim_summary": winner.get("thesis", ""),
+        "angle_id": winner.get("angle_id", ""),
+        "template_id": winner.get("template_id", ""),
+        "target_actor": winner.get("target_actor", ""),
+        "scores": score_map,
+        "overall": max(0, min(10, round(float(
+            winner.get("final_score", 0) or 0)))),
+        "decision_reason": (
+            f"multistage winner={winner.get('candidate_id','')} "
+            f"angle={winner.get('angle_id','')}"
+        ),
+        "source_url": news_item.get("url", ""),
+        "source_name": news_item.get("source_name", ""),
+        "keywords": news_item.get("keywords", []),
+        "uses_unverified_number": False,
+        "quality_score": float(winner.get("final_score", 0) or 0),
+        "ban_risk": score_map["ban_risk"],
+        "importance_score": float(news_item.get("final_news_score", 0) or 0),
+        "source_reliability_score": float(
+            news_item.get("source_reliability_score", 0) or 0),
+        "claim_risk": news_item.get("claim_risk", "low"),
+        "is_breaking": news_item.get("post_type") == "breaking_news",
+        "prompt_version": "politics-multistage-v1",
+        "politics_analysis": result.get("analysis", {}),
+        "politics_model_usage": {
+            **result.get("model_usage", {}),
+            "article_api_calls": call_budget["count"],
+        },
+    }
+    violations = _candidate_quality_violations(candidate, news_item)
+    if violations:
+        raise RuntimeError("multistage_quality_gate:" + ",".join(violations))
+    candidate["_db_generated_id"] = insert_generated(
+        news_item.get("_db_news_id"), candidate)
+    return [candidate]
+
+
+def generate_candidates(
+    news_item: dict, regeneration_attempt: int = 0, retries_used: int = 0
+) -> list:
+    """Prefer multi-stage generation and safely fall back to the legacy path."""
+    global LAST_GENERATION_API_CALLS
+    enabled = os.environ.get(
+        "POLITICS_ENABLE_MULTI_STAGE_GENERATION", "true"
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    hard_max_calls = max(1, _env_int(
+        "POLITICS_MAX_API_CALLS_PER_ARTICLE", 12))
+    reserve_calls = min(
+        max(0, _env_int("POLITICS_LEGACY_FALLBACK_RESERVE_CALLS", 1)),
+        max(0, hard_max_calls - 1),
+    )
+    call_budget = {
+        "count": 0,
+        "max": max(1, hard_max_calls - reserve_calls),
+        "hard_max": hard_max_calls,
+    }
+    LAST_GENERATION_API_CALLS = 0
+    if enabled:
+        history = load_post_history()
+        attempts = (
+            ("full", None, False),
+            ("reduced", min(3, _env_int(
+                "POLITICS_CANDIDATE_COUNT", 6)), False),
+            ("minimum", 1, True),
+        )
+        for label, count, minimum in attempts:
+            if call_budget["count"] >= call_budget["max"]:
+                break
+            try:
+                if label != "full":
+                    log(f"[INFO] Politics fallback stage: {label}")
+                result = _multistage_candidate(
+                    news_item, history, candidate_count=count,
+                    minimum_mode=minimum, call_budget=call_budget)
+                LAST_GENERATION_API_CALLS = call_budget["count"]
+                return result
+            except Exception as exc:
+                global LAST_GENERATION_FAILURE_REASON
+                LAST_GENERATION_FAILURE_REASON = str(exc)[:240]
+                log(
+                    f"[WARN] Multi-stage {label} failed: "
+                    f"{type(exc).__name__}; api_calls={call_budget['count']}/"
+                    f"{hard_max_calls}")
+                # A minimum retry normally needs analysis plus five bounded
+                # stages. Preserve the compact one-call fallback rather than
+                # starting a retry that cannot finish.
+                if call_budget["max"] - call_budget["count"] < 6:
+                    break
+        if call_budget["count"] >= hard_max_calls or reserve_calls <= 0:
+            LAST_GENERATION_FAILURE_REASON = "politics_api_call_limit"
+            LAST_GENERATION_API_CALLS = call_budget["count"]
+            return []
+        if os.environ.get(
+            "POLITICS_FALLBACK_TO_LEGACY", "true"
+        ).strip().lower() not in {"1", "true", "yes", "on"}:
+            return []
+        log(
+            "[INFO] Politics fallback stage: legacy "
+            f"(reserved call; used={call_budget['count']}/{hard_max_calls})")
+        call_budget["count"] += 1
+        result = _generate_candidates_legacy(
+            news_item, regeneration_attempt, retries_used=1)
+        LAST_GENERATION_API_CALLS = call_budget["count"]
+        return result
+    result = _generate_candidates_legacy(
+        news_item, regeneration_attempt, retries_used)
+    LAST_GENERATION_API_CALLS = 1
+    return result
 
 # 実効スコアの加重（合計で割って 0〜10 相当に正規化する）
 EFFECTIVE_WEIGHTS = {
@@ -1626,6 +2182,14 @@ def effective_score(c: dict, history: list) -> float:
 
     if ttype == "strong_opinion" and quote >= 7 and angle >= 7 and ban <= 4:
         base += 0.4
+    if c.get("social_anger_connected"):
+        social_score = float(c.get("social_anger_effective_score", 0) or 0)
+        base = (base * 0.8) + (social_score * 0.2)
+    base += min(
+        0.25,
+        max(0.0, float(c.get(
+            "review_strategy_alignment_bonus", 0) or 0)),
+    )
 
     return base
 
@@ -1858,6 +2422,18 @@ def main():
 
     # --- 素材収集 ---
     history = load_post_history()
+    try:
+        from daily_post_goal import load_active_remediation
+        daily_goal_policy = load_active_remediation(
+            STATE_DIR / "daily_post_goal", now=now_jst)
+    except Exception:
+        daily_goal_policy = {}
+    if daily_goal_policy:
+        log(
+            "[INFO] Daily 20-post remediation active: "
+            f"shortfall={daily_goal_policy.get('shortfall', 0)} "
+            f"prefilter_top_n={daily_goal_policy.get('prefilter_top_n', 1)}"
+        )
     stagnation_fallback = LOW_QUALITY_FALLBACK_ENABLED and stagnation_fallback_active(
         history, now_jst, LOW_QUALITY_FALLBACK_HOURS)
     log(
@@ -1917,9 +2493,12 @@ def main():
         if value.strip().isdigit() and 0 <= int(value) <= 23
     }
     digest_window = now_jst.hour in digest_hours and slot_dt.minute == 0
+    remediation_top_n = max(
+        1, int(daily_goal_policy.get("prefilter_top_n", 1) or 1))
     target_news = prefilter_news(
         news_items,
-        top_n=3 if digest_window else None,
+        top_n=max(3, remediation_top_n) if digest_window else (
+            remediation_top_n if daily_goal_policy else None),
         allow_low_quality=stagnation_fallback,
     )
     if digest_window and len(target_news) >= 2:
@@ -1935,7 +2514,12 @@ def main():
     log(f"[INFO] News after prefilter: {len(target_news)}")
 
     if not target_news:
-        evergreen = _evergreen_candidate(history, now_jst)
+        evergreen = _evergreen_candidate(
+            history, now_jst,
+            max_per_day=daily_goal_policy.get(
+                "verified_evergreen_max_per_day")
+            if daily_goal_policy else None,
+        )
         if evergreen:
             target_news = [evergreen]
             log("[INFO] Evergreen fallback selected; quality and verification gates remain unchanged")
@@ -1974,12 +2558,51 @@ def main():
     for item in target_news:
         enriched = dict(item)
         enriched["topic_key"] = normalize_topic_key(
-            enriched.get("title", ""), enriched.get("keywords") or []
+            f"{enriched.get('title', '')} {enriched.get('summary', '')}",
+            enriched.get("keywords") or [],
         )
-        enriched["post_type"], enriched["is_exploration"] = choose_post_style(
-            enriched, history, now_jst)
+        try:
+            from review_strategy import (
+                alignment_bonus,
+                assignment_for,
+                load_active_strategy,
+            )
+            active_review_strategy = load_active_strategy(
+                ROOT_DIR, now=now_jst)
+            review_variant = assignment_for(
+                enriched,
+                strategy=active_review_strategy,
+                now=now_jst,
+            )
+        except Exception:
+            active_review_strategy = {}
+            review_variant = "inactive"
+        enriched["review_strategy_active"] = bool(
+            active_review_strategy)
+        enriched["review_strategy_experiment"] = str(
+            active_review_strategy.get("experiment_name") or "")
+        enriched["review_strategy_id"] = str(
+            active_review_strategy.get("strategy_id") or "")
+        enriched["review_strategy_variant"] = review_variant
+        post_type_hint = str(enriched.get("post_type_hint") or "")
+        if post_type_hint in POST_TYPES:
+            enriched["post_type"] = post_type_hint
+            enriched["is_exploration"] = False
+        else:
+            enriched["post_type"], enriched["is_exploration"] = choose_post_style(
+                enriched, history, now_jst)
         enriched["hook_type"] = classify_hook_type(enriched, history)
         enriched["critique_axis"] = classify_critique_axis(enriched)
+        try:
+            enriched["review_strategy_alignment_bonus"] = alignment_bonus(
+                active_review_strategy,
+                variant=review_variant,
+                post_type=enriched["post_type"],
+                hook_type=enriched["hook_type"],
+                posted_hour_jst=now_jst.hour,
+            )
+        except Exception:
+            enriched["review_strategy_alignment_bonus"] = 0.0
         genre_hits = {
             genre: sum(keyword in f"{enriched.get('title','')} {enriched.get('summary','')}" for keyword in keywords)
             for genre, keywords in GENRE_KEYWORDS.items()
@@ -1989,12 +2612,11 @@ def main():
         enriched["genre"] = best_genre if best_hits else "未分類"
         enriched["classification_confidence"] = 0.9 if best_hits >= 2 and ties == 1 else (0.7 if best_hits == 1 and ties == 1 else 0.4)
         if _env_bool("PHASE2_ENABLED", "true") and enriched["classification_confidence"] < 0.65:
-            classified = classify_if_needed(enriched)
-            if classified is None:
-                continue
-            enriched = classified
+            enriched = _classification_or_local_fallback(enriched)
+            if enriched.get("classification_mode") == "local_limit_fallback":
+                log("[INFO] Classifier unavailable; using deterministic local classification")
         is_breaking = enriched["post_type"] == "breaking_news"
-        normal_daily_limit = _env_int("ORIGINAL_DAILY_POST_MAX", 8)
+        normal_daily_limit = _env_int("ORIGINAL_DAILY_POST_MAX", 20)
         if cost_forecast().get("restriction_level", 0) >= 7:
             normal_daily_limit = min(
                 normal_daily_limit,
@@ -2015,11 +2637,28 @@ def main():
         cooldown_reason = topic_cooldown_skip_reason(
             enriched["topic_key"], enriched.get("title", ""), recent_topics,
             now_jst, TOPIC_COOLDOWN_HOURS,
+            semantic_cooldown_hours=_env_float(
+                "SEMANTIC_TOPIC_COOLDOWN_HOURS", 72.0),
         )
-        if cooldown_reason and not stagnation_fallback:
+        # Silence rescue may relax quality thresholds, but never topic
+        # duplication. Repeating the same policy is not a valid rescue post.
+        if cooldown_reason:
             blocked_for_topic = True
             continue
         enriched["_db_news_id"] = insert_news(enriched)
+        if (
+            enriched.get("integrated_research_topic_id")
+            and enriched.get("_db_news_id")
+        ):
+            db_write(
+                """UPDATE integrated_research_topics
+                   SET candidate_news_id=?,updated_at=?
+                   WHERE id=?""",
+                (
+                    enriched["_db_news_id"], now_jst.isoformat(),
+                    enriched["integrated_research_topic_id"],
+                ),
+            )
         eligible_news.append(enriched)
 
     if not eligible_news:
@@ -2028,19 +2667,89 @@ def main():
         return
 
     # --- 候補生成・採点（複数ニュースからベスト1を選ぶ） ---
+    _reset_generation_diagnostics()
     best = None
     best_score = -1.0
-    for item in eligible_news:
-        for c in generate_candidates(item):
+    politics_max_articles_raw = os.environ.get(
+        "POLITICS_MAX_ARTICLES_PER_RUN", "").strip()
+    if politics_max_articles_raw:
+        try:
+            politics_max_articles = max(1, int(politics_max_articles_raw))
+        except ValueError:
+            politics_max_articles = len(eligible_news)
+    else:
+        politics_max_articles = len(eligible_news)
+    remediation_retry_used = False
+    cache_duplicate_count = 0
+    for item in eligible_news[:politics_max_articles]:
+        generated = _load_cached_candidates(item)
+        cache_hit = bool(generated)
+        if generated:
+            log(
+                "[INFO] Politics candidate cache hit: "
+                f"{len(generated)} candidate(s); OpenAI calls avoided")
+        else:
+            generated = generate_candidates(item)
+            if generated:
+                _save_cached_candidates(item, generated)
+        usable = []
+        for c in generated:
+            c["integrated_research_topic_id"] = item.get(
+                "integrated_research_topic_id")
+            c["integrated_research_run_id"] = item.get(
+                "integrated_research_run_id", "")
             if is_duplicate(c, history):
+                if cache_hit:
+                    cache_duplicate_count += 1
                 continue
+            usable.append(c)
+
+        # A cached set can become unusable after another post succeeds. When
+        # the daily review identifies transient generation failures, bypass
+        # one stale cache per run and regenerate a materially different angle.
+        # All normal duplicate, quality, safety, interval, quota and budget
+        # gates still run on the regenerated candidates below.
+        if _should_retry_stale_candidate_cache(
+                cache_hit=cache_hit,
+                usable_count=len(usable),
+                remediation_policy=daily_goal_policy,
+                retry_used=remediation_retry_used):
+            remediation_retry_used = True
+            retry_item = dict(item)
+            retry_item["summary"] = (
+                f"{item.get('summary', '')}\n再生成指示: 保存済み候補は直近投稿と重複。"
+                "同じ主張を言い換えず、一次資料にある別の事実・制度影響・反対論から再構成する。"
+            )
+            log(
+                "[INFO] Daily goal remediation: stale duplicate cache "
+                "bypassed for one bounded regeneration")
+            regenerated = generate_candidates(
+                retry_item, regeneration_attempt=1, retries_used=1)
+            if regenerated:
+                _save_cached_candidates(item, regenerated)
+            for c in regenerated:
+                c["integrated_research_topic_id"] = item.get(
+                    "integrated_research_topic_id")
+                c["integrated_research_run_id"] = item.get(
+                    "integrated_research_run_id", "")
+                if not is_duplicate(c, history):
+                    usable.append(c)
+
+        for c in usable:
             s = effective_score(c, history)
             if s > best_score:
                 best, best_score = c, s
 
     if best is None:
         reason = LAST_GENERATION_FAILURE_REASON or "candidate_generation_failed"
-        finalize_skip(reason, mark_attempted=True)
+        finalize_skip(reason, mark_attempted=True, extra={
+            "generation_api_calls": LAST_GENERATION_API_CALLS,
+            "eligible_news_count": len(eligible_news),
+            "candidate_cache_enabled": _env_bool(
+                "POLITICS_CANDIDATE_CACHE_ENABLED", "true"),
+            "cache_duplicate_count": cache_duplicate_count,
+            "remediation_retry_used": remediation_retry_used,
+        })
         return
 
     scores = best.get("scores") or {}
@@ -2169,6 +2878,21 @@ def main():
     if not x_reservation:
         finalize_skip(x_budget_reason, mark_attempted=False, extra={"title": best.get("title", "")})
         return
+    followers_at_publish = None
+    if _env_bool("FOLLOWER_SNAPSHOT_AT_PUBLISH_ENABLED", "true"):
+        try:
+            from growth_tracking import capture_follower_snapshot
+            snapshot = capture_follower_snapshot(now=now_jst)
+            if snapshot.get("captured"):
+                followers_at_publish = snapshot.get("followers_count")
+            else:
+                log(
+                    "[WARN] publish-time follower snapshot unavailable: "
+                    f"{snapshot.get('reason', 'unknown')}")
+        except Exception as exc:
+            log(
+                "[WARN] publish-time follower snapshot failed: "
+                f"{type(exc).__name__}")
     log("[INFO] Decision: post")
     try:
         tweet_id, sent_lengths = post_to_x(tweet_text, reply_texts)
@@ -2214,6 +2938,10 @@ def main():
         # --- 学習材料（効いた型・問い・スコアの振り返り用） ---
         "tweet_text": tweet_text,
         "hook": best.get("hook", ""),
+        "angle_id": best.get("angle_id", ""),
+        "claim_summary": best.get("claim_summary", ""),
+        "template_id": best.get("template_id", ""),
+        "target_actor": best.get("target_actor", ""),
         "structure_title": best.get("structure_title", ""),
         "structure_key_message": best.get("structure_key_message", ""),
         "opinion_conclusion": best.get("opinion_conclusion", ""),
@@ -2234,11 +2962,29 @@ def main():
         "xai_discovered_at": best.get("xai_discovered_at", ""),
         "xai_cost_allocated_usd": best.get("xai_cost_allocated_usd", 0.0),
         "final_news_score": best.get("final_news_score", 0.0),
+        "is_major_update": bool(best.get("is_major_update")),
         "low_quality_fallback": stagnation_fallback,
         "openai_model": best.get("openai_model", ""),
         "prompt_version": best.get("prompt_version", "x-growth-quality-v2"),
         "is_exploration": bool(best.get("is_exploration")),
+        "review_strategy_active": bool(
+            best.get("review_strategy_active")),
+        "review_strategy_experiment": best.get(
+            "review_strategy_experiment", ""),
+        "review_strategy_id": best.get("review_strategy_id", ""),
+        "review_strategy_variant": best.get(
+            "review_strategy_variant", "inactive"),
+        "review_strategy_alignment_bonus": best.get(
+            "review_strategy_alignment_bonus", 0.0),
+        "social_anger_connected": bool(best.get("social_anger_connected")),
+        "social_anger_phase": best.get("social_anger_phase", ""),
+        "social_anger_effective_score": best.get(
+            "social_anger_effective_score", 0.0),
+        "social_anger_axis": best.get("social_anger_axis", ""),
+        "social_anger_target_type": best.get(
+            "social_anger_target_type", ""),
         "automation_type": "automated_original",
+        "followers_at_publish": followers_at_publish,
     }
     if best.get("post_type") == "morning_evening_digest":
         digest_items = best.get("digest_items") or []
@@ -2252,6 +2998,32 @@ def main():
     post_record["posted_hour_jst"] = now_jst.hour
     save_post_record(post_record)
     insert_published(best.get("_db_generated_id"), post_record)
+    if best.get("integrated_research_topic_id"):
+        db_write(
+            """UPDATE integrated_research_topics
+               SET x_post_id=?,updated_at=? WHERE id=?""",
+            (
+                str(tweet_id), now_jst.isoformat(),
+                best["integrated_research_topic_id"],
+            ),
+        )
+        db_write(
+            """INSERT OR IGNORE INTO integrated_research_decisions
+               (topic_id,run_id,stage,decision,reason,scores_json,actor,
+                decided_at) VALUES (?,?,?,?,?,?,?,?)""",
+            (
+                best["integrated_research_topic_id"],
+                best.get("integrated_research_run_id", ""),
+                "standard_post_pipeline", "published",
+                "passed_quality_safety_budget_interval_and_duplicate_gates",
+                json.dumps({
+                    "effective_score": best.get("effective_score"),
+                    "quality_score": best.get("quality_score"),
+                    "ban_risk": best.get("ban_risk"),
+                }, ensure_ascii=False),
+                "post_pipeline", now_jst.isoformat(),
+            ),
+        )
     db_write("""INSERT INTO post_style_experiments
       (tweet_id,post_type,hook_type,is_exploration,experiment_name,created_at,result_json)
       VALUES (?,?,?,?,?,?,?)""", (str(tweet_id), best.get("post_type", ""), best.get("hook_type", ""),
@@ -2264,6 +3036,24 @@ def main():
         "news_title": best.get("title", ""),
         "major_update_signature": normalize_topic_key(best.get("title", "")),
     })
+    if best.get("social_anger_connected"):
+        roles = best.get("social_anger_roles") or {}
+        responsible = roles.get("responsible_entity") or []
+        target_name = str(responsible[0]) if responsible else str(
+            best.get("social_anger_target_type") or "policy")
+        try:
+            record_social_anger_target(
+                str(best.get("topic_key") or ""),
+                str(best.get("social_anger_target_type") or "unknown"),
+                normalize_topic_key(target_name),
+                target_name,
+                published_at=now_jst,
+            )
+        except Exception as exc:
+            log(
+                "[WARN] Social anger target history write failed: "
+                f"{type(exc).__name__}"
+            )
     log("[INFO] Slot and post history recorded.")
     log_attempt({
         "decision": "post", "reason": "success",
@@ -2277,6 +3067,8 @@ def main():
         "ban_risk": ban,
         "post_format": post_format,
         "openai_model": best.get("openai_model", ""),
+        "social_anger_connected": bool(best.get("social_anger_connected")),
+        "social_anger_phase": best.get("social_anger_phase", ""),
         "low_quality_fallback": stagnation_fallback,
         "attempted_recorded": True,
         "posted_recorded": True,

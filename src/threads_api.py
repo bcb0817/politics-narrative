@@ -13,6 +13,8 @@ import os
 import re
 import secrets
 import sqlite3
+import time
+import uuid
 from contextlib import closing
 from datetime import datetime, timedelta
 from difflib import SequenceMatcher
@@ -26,10 +28,15 @@ import requests
 from api_budget import finalize, reserve
 from metrics_db import apply_additive_migrations, connect, db_path, write
 from openai_usage import calculate_cost, load_pricing, usage_from_response
+from publishing_policy import semantic_policy_signature
+from social_anger import (
+    evaluate_production_candidate as evaluate_social_anger_candidate,
+    production_prompt_context as social_anger_prompt_context,
+)
 
 
 JST = ZoneInfo("Asia/Tokyo")
-PROMPT_VERSION = "threads-conversation-v1"
+PROMPT_VERSION = "threads-public-accountability-v3"
 POST_TYPES = {
     "conversation_explainer", "issue_question", "steelman_comparison",
     "policy_context", "evergreen_explainer", "daily_digest",
@@ -41,6 +48,25 @@ POST_STATES = {
 INITIAL_SCOPES = (
     "threads_basic", "threads_content_publish", "threads_manage_insights",
 )
+KNOWN_SCOPES = (
+    "threads_basic", "threads_content_publish", "threads_manage_insights",
+    "threads_read_replies", "threads_manage_replies",
+    "threads_keyword_search", "threads_manage_mentions", "threads_delete",
+    "threads_location_tagging", "threads_profile_discovery",
+)
+SCOPE_PROFILES = {
+    "basic": INITIAL_SCOPES,
+    "keyword-search": (
+        "threads_basic", "threads_content_publish",
+        "threads_manage_insights", "threads_keyword_search",
+    ),
+    "full-analysis": (
+        "threads_basic", "threads_content_publish", "threads_manage_insights",
+        "threads_read_replies", "threads_manage_replies",
+        "threads_keyword_search", "threads_manage_mentions", "threads_delete",
+        "threads_location_tagging", "threads_profile_discovery",
+    ),
+}
 INTERNAL_TERMS = (
     "post_type", "hook_type", "decision_reason", "quality_score",
     "safety_score", "similarity_to_x", "prompt_version", "system_prompt",
@@ -53,7 +79,8 @@ HIGH_RISK_TERMS = (
 ATTACK_TERMS = (
     "売国奴", "非国民", "消えろ", "死ね", "無能な人間", "犯罪者だ",
 )
-WINDOW_HOURS = {"1h": 1, "24h": 24, "72h": 72}
+WINDOW_HOURS = {"15m": .25, "1h": 1, "6h": 6, "24h": 24, "72h": 72}
+_CIRCUIT = {"failures": 0, "opened_at": None}
 
 
 def _root() -> Path:
@@ -117,11 +144,12 @@ def settings() -> dict:
         if value.strip()
     )
     allowed_scopes = tuple(
-        scope for scope in scopes if scope in INITIAL_SCOPES)
+        scope for scope in scopes if scope in KNOWN_SCOPES)
     reply_control = os.environ.get(
         "THREADS_REPLY_CONTROL", "everyone").strip()
     if reply_control not in {
         "everyone", "accounts_you_follow", "mentioned_only",
+        "parent_post_author_only", "followers_only",
     }:
         reply_control = "everyone"
     platform_limit = min(
@@ -146,8 +174,16 @@ def settings() -> dict:
         "api_version": os.environ.get(
             "THREADS_API_VERSION", "v1.0").strip("/"),
         "timeout": max(1, _int("THREADS_API_TIMEOUT_SECONDS", 30)),
-        "max_retries": max(0, min(1, _int(
-            "THREADS_API_MAX_RETRIES", 1))),
+        "max_retries": max(0, min(5, _int(
+            "THREADS_API_MAX_RETRIES", 2))),
+        "retry_base_seconds": max(
+            0.0, _float("THREADS_API_RETRY_BASE_SECONDS", 2.0)),
+        "circuit_breaker_enabled": _bool(
+            "THREADS_API_CIRCUIT_BREAKER_ENABLED", "true"),
+        "circuit_breaker_failures": max(
+            1, _int("THREADS_API_CIRCUIT_BREAKER_FAILURES", 5)),
+        "circuit_breaker_cooldown_minutes": max(
+            1, _int("THREADS_API_CIRCUIT_BREAKER_COOLDOWN_MINUTES", 30)),
         "oauth_state_ttl_seconds": max(
             60, min(1800, _int("THREADS_OAUTH_STATE_TTL_SECONDS", 600))),
         "daily_min": max(0, _int("THREADS_DAILY_POST_MIN", 2)),
@@ -204,11 +240,15 @@ def settings() -> dict:
         "refresh_before_days": max(
             0, _int("THREADS_TOKEN_REFRESH_BEFORE_EXPIRY_DAYS", 7)),
         "metrics_enabled": _bool("THREADS_METRICS_ENABLED", "true"),
-        "metrics_windows": tuple(
-            value.strip() for value in os.environ.get(
-                "THREADS_METRICS_WINDOWS", "1h,24h,72h").split(",")
-            if value.strip() in WINDOW_HOURS
-        ),
+        "metrics_windows": tuple(dict.fromkeys([
+            "15m", "1h", "6h",
+            *[
+                value.strip() for value in os.environ.get(
+                    "THREADS_METRICS_WINDOWS", "1h,24h,72h").split(",")
+                if value.strip() in WINDOW_HOURS
+            ],
+            "24h", "72h",
+        ])),
         "monthly_openai_budget": max(
             0.0, _float("THREADS_OPENAI_MONTHLY_BUDGET_USD", 1.0)),
         "max_cost_per_post": max(
@@ -296,53 +336,209 @@ def _record_threads_call(endpoint: str, success: bool,
         })
 
 
+def _hash_payload(payload: Any) -> str:
+    serialized = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _error_class(status: int, payload: dict | None = None) -> str:
+    message = json.dumps(payload or {}, ensure_ascii=False).lower()
+    if status == 429:
+        return "rate_limited"
+    if status in {401} or any(
+        value in message for value in ("expired", "invalid oauth", "token")
+    ):
+        return "token_invalid"
+    if status in {403} or any(
+        value in message for value in ("permission", "scope", "not authorized")
+    ):
+        return "permission_denied"
+    if 400 <= status < 500:
+        return "client_error"
+    if status >= 500:
+        return "server_error"
+    return ""
+
+
 class ThreadsClient:
     def __init__(self, session=None, path: Path | None = None):
         self.session = session or requests.Session()
         self.path = path
 
+    def _record_call(self, *, request_id: str, method: str, endpoint: str,
+                     status_code: int, success: bool, duration_ms: int,
+                     retry_count: int, error_class: str,
+                     payload: dict | None = None) -> None:
+        _record_threads_call(
+            endpoint, success, error_class, self.path)
+        try:
+            from metrics_db import apply_threads_full_migrations
+            apply_threads_full_migrations(self.path)
+            now = _now().isoformat()
+            write("""INSERT INTO threads_api_calls
+              (request_id,called_at,method,endpoint,status_code,success,
+               duration_ms,retry_count,error_class,permission_error,
+               token_error,rate_limited,created_at,updated_at,source,
+               api_version,raw_response_hash)
+              VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                request_id, now, method.upper(), endpoint, status_code,
+                int(success), duration_ms, retry_count, error_class,
+                int(error_class == "permission_denied"),
+                int(error_class == "token_invalid"),
+                int(error_class == "rate_limited"), now, now,
+                "meta_official_api", settings()["api_version"],
+                _hash_payload(payload or {}),
+            ), self.path)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _circuit_open(cfg: dict) -> bool:
+        if not cfg["circuit_breaker_enabled"] or not _CIRCUIT["opened_at"]:
+            return False
+        opened = _CIRCUIT["opened_at"]
+        elapsed = (_now() - opened).total_seconds()
+        if elapsed >= cfg["circuit_breaker_cooldown_minutes"] * 60:
+            _CIRCUIT.update({"failures": 0, "opened_at": None})
+            return False
+        return True
+
     def _request(self, method: str, path: str, *, token: str = "",
-                 params: dict | None = None, data: dict | None = None) -> dict:
+                 params: dict | None = None, data: dict | None = None,
+                 json_body: dict | None = None) -> dict:
         cfg = settings()
         params = dict(params or {})
         data = dict(data or {})
+        headers = {
+            "Accept": "application/json",
+            "X-Client-Request-ID": str(uuid.uuid4()),
+        }
         if token:
-            if method.upper() == "GET":
-                params["access_token"] = token
-            else:
-                data["access_token"] = token
+            headers["Authorization"] = f"Bearer {token}"
         url = f"{cfg['base_url']}/{path.lstrip('/')}"
+        if self._circuit_open(cfg):
+            raise RuntimeError("threads_api_circuit_open")
         attempts = 1 + (
             cfg["max_retries"] if method.upper() == "GET" else 0)
+        request_id = headers["X-Client-Request-ID"]
         for attempt in range(attempts):
+            started = time.monotonic()
+            status = 0
+            payload: dict = {}
             try:
                 response = self.session.request(
                     method, url, params=params or None, data=data or None,
-                    timeout=cfg["timeout"],
+                    json=json_body, headers=headers, timeout=cfg["timeout"],
                 )
+                raw_status = getattr(response, "status_code", 200)
+                status = raw_status if isinstance(raw_status, int) else 200
+                try:
+                    candidate = response.json()
+                    payload = candidate if isinstance(candidate, dict) else {}
+                except (ValueError, TypeError):
+                    payload = {
+                        "_non_json_response": True,
+                        "_content_hash": hashlib.sha256(
+                            bytes(getattr(response, "content", b""))
+                        ).hexdigest(),
+                    }
                 response.raise_for_status()
-                payload = response.json()
-                if not isinstance(payload, dict):
+                if payload.get("_non_json_response"):
                     raise RuntimeError("threads_api_invalid_response")
-                _record_threads_call(path, True, path=self.path)
+                _CIRCUIT.update({"failures": 0, "opened_at": None})
+                self._record_call(
+                    request_id=request_id, method=method, endpoint=path,
+                    status_code=status, success=True,
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                    retry_count=attempt, error_class="", payload=payload)
                 return payload
             except Exception as exc:
+                response = getattr(exc, "response", None)
+                if response is not None:
+                    raw_status = getattr(response, "status_code", status)
+                    status = raw_status if isinstance(raw_status, int) else status
+                classification = _error_class(status, payload)
                 retryable = (
                     method.upper() == "GET"
                     and attempt + 1 < attempts
                     and (
                         isinstance(exc, (
                             requests.Timeout, requests.ConnectionError))
-                        or getattr(
-                            getattr(exc, "response", None),
-                            "status_code", 0) >= 500
+                        or status == 429 or status >= 500
                     )
                 )
-                _record_threads_call(
-                    path, False, type(exc).__name__, self.path)
+                error_name = classification or type(exc).__name__
+                self._record_call(
+                    request_id=request_id, method=method, endpoint=path,
+                    status_code=status, success=False,
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                    retry_count=attempt, error_class=error_name,
+                    payload=payload)
                 if not retryable:
+                    _CIRCUIT["failures"] += 1
+                    if (
+                        cfg["circuit_breaker_enabled"]
+                        and _CIRCUIT["failures"]
+                        >= cfg["circuit_breaker_failures"]
+                    ):
+                        _CIRCUIT["opened_at"] = _now()
                     raise
+                retry_after = 0.0
+                if response is not None:
+                    try:
+                        retry_after = float(
+                            response.headers.get("Retry-After", 0) or 0)
+                    except (TypeError, ValueError):
+                        retry_after = 0.0
+                delay = retry_after or (
+                    cfg["retry_base_seconds"] * (2 ** attempt))
+                if delay > 0:
+                    time.sleep(min(delay, 60.0))
         raise RuntimeError("threads_api_request_failed")
+
+    def paginate(self, path: str, *, token: str = "",
+                 params: dict | None = None, max_pages: int = 20) -> list[dict]:
+        """Follow official cursor paging while never trusting a next URL."""
+        return self.paginate_with_metadata(
+            path, token=token, params=params, max_pages=max_pages)["data"]
+
+    def paginate_with_metadata(
+            self, path: str, *, token: str = "",
+            params: dict | None = None, max_pages: int = 20) -> dict:
+        """Return rows plus page count and whether another page was truncated."""
+        output: list[dict] = []
+        current = dict(params or {})
+        seen: set[str] = set()
+        pages = 0
+        truncated = False
+        for _ in range(max(1, min(100, max_pages))):
+            payload = self._request("GET", path, token=token, params=current)
+            pages += 1
+            rows = payload.get("data") or []
+            if not isinstance(rows, list):
+                raise RuntimeError("threads_api_invalid_data_schema")
+            output.extend(row for row in rows if isinstance(row, dict))
+            after = str(
+                ((payload.get("paging") or {}).get("cursors") or {})
+                .get("after") or "")
+            if not after or after in seen:
+                break
+            seen.add(after)
+            current["after"] = after
+            current.pop("before", None)
+        else:
+            truncated = bool(after)
+        return {
+            "data": output,
+            "page_count": pages,
+            "pagination_truncated": truncated,
+        }
+
+    @staticmethod
+    def _resource(path: str) -> str:
+        version = settings()["api_version"]
+        return f"{version}/{path.lstrip('/')}" if version else path.lstrip("/")
 
     def exchange_code(self, code: str) -> dict:
         cfg = settings()
@@ -388,43 +584,190 @@ class ThreadsClient:
 
     def profile(self, token: str | None = None) -> dict:
         return self._request(
-            "GET", f"{settings()['api_version']}/me",
+            "GET", self._resource("me"),
             token=token or settings()["access_token"],
-            params={"fields": "id,username,name"},
+            params={"fields": (
+                "id,username,name,is_verified,threads_profile_picture_url,"
+                "threads_biography,recently_searched_keywords,"
+                "is_eligible_for_geo_gating"
+            )},
         )
 
-    def create_container(self, text: str) -> dict:
+    def create_container(self, text: str, **options) -> dict:
         cfg = settings()
         user = cfg["user_id"] or "me"
+        payload = {"media_type": "TEXT", "text": text}
+        payload.update({
+            key: value for key, value in options.items()
+            if value is not None
+        })
         return self._request(
-            "POST", f"{cfg['api_version']}/{user}/threads",
+            "POST", self._resource(f"{user}/threads"),
             token=cfg["access_token"],
-            data={
-                "media_type": "TEXT",
-                "text": text,
-            },
+            data=payload,
         )
 
     def publish_container(self, creation_id: str) -> dict:
         cfg = settings()
         user = cfg["user_id"] or "me"
         return self._request(
-            "POST", f"{cfg['api_version']}/{user}/threads_publish",
+            "POST", self._resource(f"{user}/threads_publish"),
             token=cfg["access_token"], data={"creation_id": creation_id})
 
     def container_status(self, creation_id: str) -> dict:
         cfg = settings()
         return self._request(
-            "GET", f"{cfg['api_version']}/{creation_id}",
+            "GET", self._resource(creation_id),
             token=cfg["access_token"],
             params={"fields": "id,status,error_message"})
 
     def insights(self, post_id: str) -> dict:
         cfg = settings()
         return self._request(
-            "GET", f"{cfg['api_version']}/{post_id}/insights",
+            "GET", self._resource(f"{post_id}/insights"),
             token=cfg["access_token"],
             params={"metric": "views,likes,replies,reposts,quotes,shares"})
+
+    def account_insights(self, *, metrics: str, breakdown: str = "") -> dict:
+        params = {"metric": metrics}
+        if breakdown:
+            params["breakdown"] = breakdown
+        return self._request(
+            "GET", self._resource("me/threads_insights"),
+            token=settings()["access_token"], params=params)
+
+    def publishing_limit(self) -> dict:
+        granted = set(settings()["scopes"])
+        fields = [
+            "quota_usage", "config", "reply_quota_usage", "reply_config",
+        ]
+        if "threads_delete" in granted:
+            fields.extend(["delete_quota_usage", "delete_config"])
+        if "threads_location_tagging" in granted:
+            fields.extend([
+                "location_search_quota_usage", "location_search_config"])
+        return self._request(
+            "GET", "me/threads_publishing_limit",
+            token=settings()["access_token"],
+            params={"fields": ",".join(fields)})
+
+    def debug_token(self) -> dict:
+        cfg = settings()
+        return self._request(
+            "GET", "debug_token", token=cfg["access_token"],
+            params={"input_token": cfg["access_token"]})
+
+    def own_posts(self, **params) -> list[dict]:
+        defaults = {
+            "fields": (
+                "id,media_product_type,media_type,media_url,gif_url,permalink,"
+                "owner,username,text,timestamp,shortcode,thumbnail_url,children,"
+                "is_quote_post,quoted_post,reposted_post,has_replies,alt_text,"
+                "link_attachment_url,poll_attachment,location_id,topic_tag,"
+                "is_verified,profile_picture_url"),
+            "limit": 50,
+        }
+        defaults.update({k: v for k, v in params.items() if v is not None})
+        return self.paginate(
+            self._resource("me/threads"), token=settings()["access_token"],
+            params=defaults)
+
+    def replies(self, post_id: str, **params) -> list[dict]:
+        defaults = {
+            "fields": (
+                "id,text,timestamp,media_type,media_url,gif_url,permalink,"
+                "username,is_reply,is_reply_owned_by_me,root_post,replied_to,"
+                "hide_status,reply_audience,reply_approval_status"),
+            "reverse": "false",
+        }
+        defaults.update({k: v for k, v in params.items() if v is not None})
+        return self.paginate(
+            self._resource(f"{post_id}/conversation"),
+            token=settings()["access_token"], params=defaults)
+
+    def own_replies(self, **params) -> list[dict]:
+        defaults = {"fields": (
+            "id,text,timestamp,media_type,permalink,username,is_reply,"
+            "is_reply_owned_by_me,root_post,replied_to,hide_status,"
+            "reply_audience,reply_approval_status"), "limit": 50}
+        defaults.update({k: v for k, v in params.items() if v is not None})
+        return self.paginate(
+            self._resource("me/replies"), token=settings()["access_token"],
+            params=defaults)
+
+    def mentions(self, **params) -> list[dict]:
+        defaults = {"fields": (
+            "id,media_type,permalink,username,text,timestamp,shortcode,"
+            "is_quote_post,has_replies,topic_tag,is_verified"), "limit": 50}
+        defaults.update({k: v for k, v in params.items() if v is not None})
+        return self.paginate(
+            self._resource("me/mentions"), token=settings()["access_token"],
+            params=defaults)
+
+    def keyword_search(self, query: str, *, search_type: str = "RECENT",
+                       search_mode: str = "KEYWORD", limit: int = 50,
+                       since: str = "", until: str = "",
+                       return_metadata: bool = False):
+        params = {
+            "q": query, "search_type": search_type,
+            "search_mode": search_mode, "limit": limit,
+            "fields": (
+                "id,media_type,media_url,link_attachment_url,permalink,"
+                "username,text,timestamp,shortcode,is_quote_post,has_replies,"
+                "topic_tag,is_verified,"
+                "profile_picture_url"),
+        }
+        if since:
+            params["since"] = since
+        if until:
+            params["until"] = until
+        result = self.paginate_with_metadata(
+            self._resource("keyword_search"),
+            token=settings()["access_token"], params=params)
+        return result if return_metadata else result["data"]
+
+    def repost(self, post_id: str) -> dict:
+        return self._request(
+            "POST", self._resource(f"{post_id}/repost"),
+            token=settings()["access_token"])
+
+    def delete(self, post_id: str) -> dict:
+        return self._request(
+            "DELETE", self._resource(post_id),
+            token=settings()["access_token"])
+
+    def manage_reply(self, reply_id: str, hide: bool) -> dict:
+        return self._request(
+            "POST", self._resource(f"{reply_id}/manage_reply"),
+            token=settings()["access_token"],
+            data={"hide": str(bool(hide)).lower()})
+
+    def location(self, location_id: str) -> dict:
+        return self._request(
+            "GET", self._resource(location_id),
+            token=settings()["access_token"],
+            params={"fields": (
+                "id,address,city,country,name,latitude,longitude,postal_code"
+            )})
+
+    def public_profile(self, username: str) -> dict:
+        return self._request(
+            "GET", self._resource("profile_lookup"),
+            token=settings()["access_token"], params={"username": username})
+
+    def public_profile_posts(self, username: str,
+                             **params) -> list[dict]:
+        defaults = {
+            "username": username,
+            "fields": (
+                "id,media_type,permalink,username,text,timestamp,shortcode,"
+                "is_quote_post,has_replies,topic_tag,is_verified"),
+            "limit": 50,
+        }
+        defaults.update({k: v for k, v in params.items() if v is not None})
+        return self.paginate(
+            self._resource("profile_posts"),
+            token=settings()["access_token"], params=defaults)
 
 
 def create_oauth_state(path: Path | None = None,
@@ -472,8 +815,11 @@ def consume_oauth_state(state: str, path: Path | None = None,
         return False
 
 
-def authorization_url(path: Path | None = None) -> dict:
+def authorization_url(path: Path | None = None,
+                      scope_profile: str = "basic") -> dict:
     cfg = settings()
+    if scope_profile not in SCOPE_PROFILES:
+        raise ValueError("unsupported Threads OAuth scope profile")
     if not cfg["app_id"] or not cfg["redirect_uri"]:
         raise ValueError("THREADS_APP_ID and THREADS_REDIRECT_URI are required")
     redirect = urlsplit(cfg["redirect_uri"])
@@ -491,14 +837,15 @@ def authorization_url(path: Path | None = None) -> dict:
     query = urlencode({
         "client_id": cfg["app_id"],
         "redirect_uri": cfg["redirect_uri"],
-        "scope": ",".join(cfg["scopes"]),
+        "scope": ",".join(SCOPE_PROFILES[scope_profile]),
         "response_type": "code",
         "state": state,
     })
     return {
         "authorization_url": f"https://threads.net/oauth/authorize?{query}",
         "redirect_uri": cfg["redirect_uri"],
-        "requested_scopes": list(cfg["scopes"]),
+        "requested_scopes": list(SCOPE_PROFILES[scope_profile]),
+        "scope_profile": scope_profile,
         "state_created": True,
     }
 
@@ -715,8 +1062,10 @@ def _candidate_query(path: Path | None = None,
     params: tuple = (x_post_id,) if x_post_id else ()
     query = f"""SELECT p.tweet_id,p.text x_text,p.posted_at,p.topic_key,
       p.post_type,g.id generated_post_id,g.quality_score,g.ban_risk,
+      g.threads_text politics_threads_text,
       n.id news_id,n.title,n.summary,n.source_name,n.source_url,
-      n.verified,n.final_news_score,n.source_reliability_score,
+      n.source_type,n.genre,n.metadata_json,n.verified,n.final_news_score,
+      n.source_reliability_score,
       COALESCE(q.correction_required,0) correction_required,
       COALESCE(q.manual_delete_required,0) manual_delete_required,
       COALESCE(q.personal_attack_score,0) personal_attack_score
@@ -731,14 +1080,27 @@ def _candidate_query(path: Path | None = None,
     try:
         with closing(connect(path)) as conn:
             rows = [dict(row) for row in conn.execute(query, params)]
-            recent_topics = {
-                str(row["topic_key"] or "")
+            recent_rows = [
+                dict(row)
                 for row in conn.execute(
-                    """SELECT topic_key FROM threads_posts
+                    """SELECT topic_key,text FROM threads_posts
                        WHERE published_at>=? AND status='published'""",
-                    ((_now() - timedelta(
-                        hours=settings()["topic_cooldown_hours"])).isoformat(),),
+                    ((_now() - timedelta(hours=max(
+                        settings()["topic_cooldown_hours"],
+                        float(os.environ.get(
+                            "SEMANTIC_TOPIC_COOLDOWN_HOURS", "72")),
+                    ))).isoformat(),),
                 )
+            ]
+            recent_topics = {
+                str(row.get("topic_key") or "") for row in recent_rows
+            }
+            recent_semantic_families = {
+                family for family in (
+                    semantic_policy_signature(
+                        f"{row.get('topic_key', '')} {row.get('text', '')}")
+                    for row in recent_rows
+                ) if family
             }
     except sqlite3.Error:
         return None
@@ -746,6 +1108,11 @@ def _candidate_query(path: Path | None = None,
     now = _now()
     for row in rows:
         if str(row.get("topic_key") or "") in recent_topics:
+            continue
+        semantic_family = semantic_policy_signature(
+            f"{row.get('topic_key', '')} {row.get('title', '')} "
+            f"{row.get('summary', '')} {row.get('x_text', '')}")
+        if semantic_family and semantic_family in recent_semantic_families:
             continue
         posted = _parse_datetime(row.get("posted_at"))
         if posted and (
@@ -758,6 +1125,18 @@ def _candidate_query(path: Path | None = None,
             continue
         if float(row.get("personal_attack_score") or 0) > 2.0:
             continue
+        try:
+            metadata = json.loads(row.pop("metadata_json", "") or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            metadata = {}
+        for key in (
+            "affected_group", "decision_maker", "beneficiary", "cost_bearer",
+            "responsible_entity", "major_incident", "incident_phase",
+            "term_evidence",
+        ):
+            if key in metadata:
+                row[key] = metadata[key]
+        row["content_id"] = str(row.get("news_id") or "")
         return row
     return None
 
@@ -771,6 +1150,14 @@ def similarity_to_x(threads_text: str, x_text: str) -> float:
 def _emoji_count(text: str) -> int:
     return len(re.findall(
         r"[\U0001F300-\U0001FAFF\u2600-\u27BF]", text))
+
+
+def _is_serious_source(source: dict) -> bool:
+    source_text = " ".join([
+        str(source.get("title") or ""),
+        str(source.get("summary") or ""),
+    ])
+    return any(term in source_text for term in HIGH_RISK_TERMS)
 
 
 def _avoid_repeated_closing(question: bool,
@@ -800,21 +1187,46 @@ def _local_text(source: dict, question: bool = False,
         "公式情報を確認すると、決定そのものだけでなく、"
         "実施主体と継続的な負担の設計を分けて見る必要があります。"
     )
-    ending = (
-        "賛成・反対の結論より先に、どの条件なら制度が続くのかを確認したいです。"
+    try:
+        social = social_anger_prompt_context(
+            source, persist=False)["prompt_context"]
+    except Exception:
+        social = {}
+    affected = "、".join(social.get("affected_group") or []) or "影響を受ける人"
+    responsible = (
+        "、".join(social.get("responsible_entity") or [])
+        or "決定・監督する側"
     )
+    improvement = str(social.get("proposed_improvement") or (
+        "対象者、費用、実施主体、期限、見直し条件を公開する。"
+    ))
+    ending = ""
     if question:
-        ending = "この制度で、先に明確にしてほしい条件は何でしょうか？"
+        ending = str(social.get("public_question") or (
+            "実施主体は、検証結果と見直し期限をいつ公開しますか。"
+        ))
+        if ending.endswith("か。"):
+            ending = ending[:-1] + "？"
+        elif not ending.endswith(("？", "?")):
+            ending = ending.rstrip("。") + "？"
     lead = "🧵 " if emoji else ""
+    ending_block = f"\n\n{ending}" if ending else ""
     text = (
-        f"{lead}{topic}について、見出しだけでは分かりにくい点があります。\n\n"
+        f"{lead}{topic}。まず確認できる事実は次の通りです。\n\n"
         f"{detail}\n\n"
-        "方向性に理解できる部分があっても、対象者、実施主体、費用、"
-        "見直し時期が曖昧なままでは、評価を急ぐことはできません。"
-        "国会や行政には、判断材料を数字と期限で示す責任があります。\n\n"
-        f"{ending}"
+        f"影響を受けるのは{affected}。説明と検証の責任は"
+        f"{responsible}にあります。求めたい改善は、{improvement}"
+        "評価に必要なのは、実施前後で何を測り、結果が悪ければ"
+        "誰がいつ見直すかという検証手順です。"
+        f"{ending_block}"
     )
-    return text[:settings()["target_max_chars"]]
+    limit = settings()["target_max_chars"]
+    if len(text) <= limit:
+        return text
+    if ending_block:
+        body_limit = max(1, limit - len(ending_block))
+        return text[:body_limit].rstrip() + ending_block
+    return text[:limit].rstrip()
 
 
 def quality_check(text: str, source: dict, x_text: str) -> dict:
@@ -841,9 +1253,28 @@ def quality_check(text: str, source: dict, x_text: str) -> dict:
     if _emoji_count(text) > max(
         0, _int("THREADS_EMOJI_MAX_PER_POST", 1)):
         reasons.append("too_many_emoji")
+    if (
+        _bool("THREADS_EMOJI_REQUIRED", "true")
+        and not _is_serious_source(source)
+        and _emoji_count(text) == 0
+    ):
+        reasons.append("emoji_required")
     if len(re.findall(r"#[^\s#]+", text)) > max(
         0, _int("THREADS_HASHTAG_MAX_PER_POST", 1)):
         reasons.append("too_many_hashtags")
+    try:
+        social_review = evaluate_social_anger_candidate(
+            source, text, platform="threads", persist=True)
+        reasons.extend(
+            f"social_anger:{value}"
+            for value in social_review.get("safety_violations") or []
+        )
+    except Exception:
+        social_review = {
+            "production_publish_connected": False,
+            "phase": "B",
+            "effective_score": 0,
+        }
     quality = max(0.0, 10.0 - len(set(reasons)) * 2.0)
     return {
         "passed": not reasons and quality >= 8.0,
@@ -853,6 +1284,11 @@ def quality_check(text: str, source: dict, x_text: str) -> dict:
         "reasons": sorted(set(reasons)),
         "question_included": text.rstrip().endswith(("？", "?")),
         "emoji_count": _emoji_count(text),
+        "social_anger_connected": bool(
+            social_review.get("production_publish_connected")),
+        "social_anger_phase": social_review.get("phase", "B"),
+        "social_anger_effective_score": float(
+            social_review.get("effective_score", 0) or 0),
     }
 
 
@@ -893,6 +1329,21 @@ def _threads_month_spent(path: Path | None = None) -> float:
 def _openai_text(source: dict, client_factory=None,
                  path: Path | None = None) -> tuple[dict, dict]:
     cfg = settings()
+    prepared = str(source.get("politics_threads_text") or "").strip()
+    if prepared:
+        from politics_multistage import fit_platform_text
+        prepared = fit_platform_text(prepared, cfg["target_max_chars"])
+        if prepared:
+            return {
+                "threads_post_type": "policy_context",
+                "text": prepared,
+                "question_included": prepared.endswith(("？", "?")),
+                "decision_reason": "politics_multistage_independent_threads_text",
+            }, {
+                "model": "politics_multistage_reuse",
+                "input_tokens": 0, "output_tokens": 0,
+                "estimated_cost_usd": 0.0,
+            }
     if (
         not os.environ.get("OPENAI_API_KEY", "").strip()
         or _threads_month_spent(path) + cfg["max_cost_per_post"]
@@ -912,19 +1363,37 @@ def _openai_text(source: dict, client_factory=None,
         client = client_factory(
             api_key=os.environ["OPENAI_API_KEY"],
             timeout=max(10, cfg["timeout"]), max_retries=0)
+        review_guidance = ""
+        if source.get("review_strategy_variant") == "treatment":
+            try:
+                from review_strategy import (
+                    load_active_strategy,
+                    render_prompt_guidance,
+                )
+                review_guidance = render_prompt_guidance(
+                    load_active_strategy(_root()))
+            except Exception:
+                review_guidance = ""
         response = client.responses.create(
             model=cfg["model"],
             instructions=(
                 "確認済み政治ニュースからThreads専用の日本語投稿を作る。"
                 "X本文をコピーせず、要点、制度背景、論点の順で180〜450文字。"
-                "断定・個人攻撃・煽り・内部ラベルは禁止。質問は必要な場合だけ。"
-                "絵文字最大1、ハッシュタグ最大1。"
+                "確認済み事実、影響を受ける人、決定・監督責任、具体的な改善要求を"
+                "読みやすく整理する。社会の不満を扱う場合も怒りを煽らず、"
+                "事実と評価を分ける。政党・個人・属性集団への敵意、群衆行動の誘導、"
+                "意図の推測、未確認の断定は禁止。質問は必要な場合だけ。"
+                "重大事件を除き絵文字は必ず1個、重大事件は0個。"
+                "ハッシュタグ最大1。"
             ),
             input=json.dumps({
                 "title": source.get("title"),
                 "summary": source.get("summary"),
                 "topic_key": source.get("topic_key"),
                 "x_text_to_avoid_copying": source.get("x_text"),
+                "public_accountability_context": social_anger_prompt_context(
+                    source, persist=False)["prompt_context"],
+                "validated_daily_review_guidance": review_guidance,
             }, ensure_ascii=False),
             max_output_tokens=cfg["max_output_tokens"],
             text={"format": {
@@ -960,8 +1429,10 @@ def _save_generation(record: dict, path: Path | None = None) -> int | None:
           (source_content_id,source_x_post_id,topic_key,threads_post_type,text,
            model,prompt_version,similarity_to_x,quality_score,safety_score,
            decision,decision_reason,input_tokens,output_tokens,
-           estimated_cost_usd,question_included,emoji_count,created_at)
-          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+           estimated_cost_usd,question_included,emoji_count,
+           review_strategy_id,review_strategy_experiment,
+           review_strategy_variant,created_at)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
             record.get("source_content_id"), record.get("source_x_post_id"),
             record.get("topic_key"), record.get("threads_post_type"),
             record.get("text"), record.get("model"),
@@ -971,7 +1442,11 @@ def _save_generation(record: dict, path: Path | None = None) -> int | None:
             record.get("input_tokens", 0), record.get("output_tokens", 0),
             record.get("estimated_cost_usd", 0),
             int(bool(record.get("question_included"))),
-            int(record.get("emoji_count", 0)), record.get("created_at"),
+            int(record.get("emoji_count", 0)),
+            record.get("review_strategy_id"),
+            record.get("review_strategy_experiment"),
+            record.get("review_strategy_variant", "inactive"),
+            record.get("created_at"),
         ), path)
     except Exception:
         _append_fallback("generation_runs.jsonl", record)
@@ -988,15 +1463,27 @@ def generate(*, dry_run: bool = False, x_post_id: str | None = None,
     source = _candidate_query(path, x_post_id)
     if not source:
         return {"status": "skipped", "reason": "no_eligible_verified_source"}
+    try:
+        from review_strategy import assignment_for, load_active_strategy
+        active_review_strategy = load_active_strategy(_root(), now=now)
+        review_variant = assignment_for(
+            source, strategy=active_review_strategy, now=now)
+    except Exception:
+        active_review_strategy = {}
+        review_variant = "inactive"
+    source["review_strategy_id"] = str(
+        active_review_strategy.get("strategy_id") or "")
+    source["review_strategy_experiment"] = str(
+        active_review_strategy.get("experiment_name") or "")
+    source["review_strategy_variant"] = review_variant
     question = (
         int(hashlib.sha256(
             str(source["tweet_id"]).encode()).hexdigest(), 16) % 10 < 4
     )
     question = _avoid_repeated_closing(question, path)
-    emoji = (
-        int(hashlib.sha256(
-            ("emoji:" + str(source["tweet_id"])).encode()).hexdigest(), 16)
-        % 100 < round(cfg["emoji_target_ratio"] * 100)
+    emoji = bool(
+        _bool("THREADS_EMOJI_REQUIRED", "true")
+        and not _is_serious_source(source)
     )
     payload = {}
     usage = {}
@@ -1035,6 +1522,16 @@ def generate(*, dry_run: bool = False, x_post_id: str | None = None,
         "estimated_cost_usd": usage.get("estimated_cost_usd", 0.0),
         "question_included": checked["question_included"],
         "emoji_count": checked["emoji_count"],
+        "social_anger_connected": checked.get(
+            "social_anger_connected", False),
+        "social_anger_phase": checked.get("social_anger_phase", "B"),
+        "social_anger_effective_score": checked.get(
+            "social_anger_effective_score", 0.0),
+        "review_strategy_id": source.get("review_strategy_id", ""),
+        "review_strategy_experiment": source.get(
+            "review_strategy_experiment", ""),
+        "review_strategy_variant": source.get(
+            "review_strategy_variant", "inactive"),
         "created_at": now.isoformat(),
     }
     draft_id = _save_generation(record, path)
@@ -1044,6 +1541,14 @@ def generate(*, dry_run: bool = False, x_post_id: str | None = None,
         "source_x_post_id": record["source_x_post_id"],
         "topic_key": record["topic_key"],
         "threads_post_type": post_type,
+        "social_anger_connected": record["social_anger_connected"],
+        "social_anger_phase": record["social_anger_phase"],
+        "social_anger_effective_score": record[
+            "social_anger_effective_score"],
+        "review_strategy_id": record["review_strategy_id"],
+        "review_strategy_experiment": record[
+            "review_strategy_experiment"],
+        "review_strategy_variant": record["review_strategy_variant"],
         "text": text,
         "character_count": len(text),
         "quality_score": record["quality_score"],
@@ -1199,6 +1704,31 @@ def publish(draft_id: int, client: ThreadsClient | None = None,
           published_at=?,updated_at=? WHERE id=?""", (
             threads_post_id, _now().isoformat(), _now().isoformat(), post_id,
         ), path)
+        if draft.get("source_x_post_id"):
+            write(
+                """UPDATE integrated_research_topics
+                   SET threads_post_id=?,updated_at=?
+                   WHERE x_post_id=?""",
+                (
+                    threads_post_id, _now().isoformat(),
+                    str(draft["source_x_post_id"]),
+                ),
+                path,
+            )
+            write(
+                """INSERT OR IGNORE INTO integrated_research_decisions
+                   (topic_id,run_id,stage,decision,reason,scores_json,actor,
+                    decided_at)
+                   SELECT id,run_id,'threads_post_pipeline','published',
+                          'threads_api_publish_succeeded','{}',
+                          'threads_post_pipeline',?
+                   FROM integrated_research_topics WHERE x_post_id=?""",
+                (
+                    _now().isoformat(),
+                    str(draft["source_x_post_id"]),
+                ),
+                path,
+            )
         return {
             "published": True, "threads_post_id": threads_post_id,
             "creation_id_saved": True, "threads_api_calls": calls,
@@ -1411,8 +1941,10 @@ def daily_review_summary(path: Path | None = None) -> dict:
             rows = [dict(row) for row in conn.execute("""
               SELECT g.threads_post_type,g.question_included,g.emoji_count,
               g.similarity_to_x,g.quality_score,g.safety_score,
+              g.review_strategy_id,g.review_strategy_experiment,
+              g.review_strategy_variant,
               p.published_at,m.views,m.replies,m.reposts,m.quotes,
-              m.engagement_rate
+              m.engagement_rate,m.views_per_hour
               FROM threads_generation_runs g
               LEFT JOIN threads_posts p ON p.generation_run_id=g.id
               LEFT JOIN threads_metrics m ON m.threads_post_id=p.threads_post_id
@@ -1426,10 +1958,33 @@ def daily_review_summary(path: Path | None = None) -> dict:
         if float(row.get("safety_score") or 0) >= 9
         and float(row.get("quality_score") or 0) >= 8
     ]
+    strategy_variants = {}
+    for variant in ("treatment", "control"):
+        group = [
+            row for row in safe_rows
+            if row.get("review_strategy_variant") == variant
+            and row.get("views") is not None
+        ]
+        strategy_variants[variant] = {
+            "sample_size": len(group),
+            "average_views": round(
+                sum(float(row.get("views") or 0) for row in group)
+                / len(group), 3,
+            ) if group else None,
+            "average_views_per_hour": round(
+                sum(float(row.get("views_per_hour") or 0) for row in group)
+                / len(group), 3,
+            ) if group else None,
+            "average_engagement_rate": round(
+                sum(float(row.get("engagement_rate") or 0) for row in group)
+                / len(group), 6,
+            ) if group else None,
+        }
     return {
         "sample_size": len(rows),
         "safe_success_sample_size": len(safe_rows),
         "comparison": comparison,
+        "review_strategy_variants": strategy_variants,
         "winning_patterns_exclude_unsafe": True,
     }
 
