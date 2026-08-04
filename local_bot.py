@@ -39,16 +39,16 @@ SRC_DIR = ROOT_DIR / "src"
 ENV_FILE = ROOT_DIR / ".env"
 JST = ZoneInfo("Asia/Tokyo")
 
-# 監視間隔（分）。MONITOR_INTERVAL_MINUTESを優先し、既定60分。
+# 監視間隔（分）。MONITOR_INTERVAL_MINUTESを優先し、既定45分。
 # 互換用にSLOT_INTERVAL_MINUTESも読み込む。1440を割り切る値のみ有効。
 def _slot_interval_minutes() -> int:
     try:
         v = int(os.environ.get("MONITOR_INTERVAL_MINUTES",
-                               os.environ.get("SLOT_INTERVAL_MINUTES", "60")))
+                               os.environ.get("SLOT_INTERVAL_MINUTES", "45")))
     except (TypeError, ValueError):
-        return 60
+        return 45
     if v < 1 or 1440 % v != 0:
-        return 60
+        return 45
     return v
 
 
@@ -769,6 +769,43 @@ def cmd_report() -> int:
         log(f"[INFO] report: already completed for {review_date}; skip (set FORCE_REPORT=true to rerun)")
         return 0
 
+    # The 04:40 review evaluates the completed previous JST calendar day.
+    # This runs even when the rolling 24-hour performance sample is empty, so
+    # a low-output day still creates a report and a bounded remediation policy.
+    daily_goal_report = {}
+    daily_goal_policy = {}
+    daily_goal_notified = False
+    try:
+        from daily_post_goal import (  # noqa: E402
+            apply_remediation,
+            build_report as build_daily_goal_report,
+            save_report as save_daily_goal_report,
+        )
+        previous_date = (now_jst - timedelta(days=1)).date()
+        daily_goal_report = build_daily_goal_report(
+            path=dirs["state"] / "bot_metrics.db",
+            log_dir=dirs["log"],
+            now=now_jst,
+            report_date=previous_date,
+        )
+        goal_dir = dirs["state"] / "daily_post_goal"
+        save_daily_goal_report(daily_goal_report, goal_dir)
+        daily_goal_policy = apply_remediation(
+            daily_goal_report, goal_dir, now=now_jst)
+        from discord_notify import notify_daily_post_goal  # noqa: E402
+        daily_goal_notified = notify_daily_post_goal(daily_goal_report)
+        log(
+            "[INFO] report: previous-day posting goal "
+            f"{daily_goal_report.get('actual', {}).get('x', 0)}/"
+            f"{daily_goal_report.get('target', {}).get('posts', 20)}; "
+            f"remediation_active={str(bool(daily_goal_policy.get('active'))).lower()}"
+        )
+    except Exception as exc:
+        log(
+            "[WARN] report: daily posting goal analysis unavailable; "
+            f"performance review continues ({type(exc).__name__})"
+        )
+
     history = post_mod._load_json(post_mod.POSTED_URLS_FILE, [])
     if not isinstance(history, list):
         history = []
@@ -800,10 +837,32 @@ def cmd_report() -> int:
 
     if not recent:
         log(f"[INFO] report: no bot posts in latest {window_hours} hours")
+        reviews_dir = dirs["state"] / "daily_reviews"
+        reviews_dir.mkdir(parents=True, exist_ok=True)
+        minimal_review = {
+            "reviewed_at_jst": now_jst.isoformat(),
+            "window_start_jst": start_jst.isoformat(),
+            "window_end_jst": now_jst.isoformat(),
+            "reviewed_count": 0,
+            "local_only": True,
+            "reason": "no_posts_in_review_window",
+            "daily_post_goal": daily_goal_report,
+            "daily_post_goal_remediation": daily_goal_policy,
+            "daily_post_goal_discord_sent": daily_goal_notified,
+        }
+        payload_text = json.dumps(minimal_review, ensure_ascii=False, indent=2)
+        dated_file = reviews_dir / f"{now_jst:%Y-%m-%d}.json"
+        latest_file = dirs["state"] / "daily_review_latest.json"
+        atomic_write_text(dated_file, payload_text)
+        atomic_write_text(latest_file, payload_text)
         state.update({
             "last_review_date_jst": review_date,
             "last_reviewed_at_jst": now_jst.isoformat(),
             "reviewed_count": 0,
+            "latest_file": str(latest_file),
+            "daily_post_goal": daily_goal_report.get("achievement", {}),
+            "daily_post_goal_remediation_active": bool(
+                daily_goal_policy.get("active")),
         })
         atomic_write_text(state_file, json.dumps(state, ensure_ascii=False, indent=2))
         return 0
@@ -897,11 +956,33 @@ def cmd_report() -> int:
             pass
     if not metrics:
         log("[WARN] report: no current or stored metrics; local empty review retained")
+        reviews_dir = dirs["state"] / "daily_reviews"
+        reviews_dir.mkdir(parents=True, exist_ok=True)
+        minimal_review = {
+            "reviewed_at_jst": now_jst.isoformat(),
+            "window_start_jst": start_jst.isoformat(),
+            "window_end_jst": now_jst.isoformat(),
+            "reviewed_count": 0,
+            "local_only": True,
+            "reason": "no_current_or_stored_metrics",
+            "daily_post_goal": daily_goal_report,
+            "daily_post_goal_remediation": daily_goal_policy,
+            "daily_post_goal_discord_sent": daily_goal_notified,
+        }
+        payload_text = json.dumps(minimal_review, ensure_ascii=False, indent=2)
+        dated_file = reviews_dir / f"{now_jst:%Y-%m-%d}.json"
+        latest_file = dirs["state"] / "daily_review_latest.json"
+        atomic_write_text(dated_file, payload_text)
+        atomic_write_text(latest_file, payload_text)
         state.update({
             "last_review_date_jst": review_date,
             "last_reviewed_at_jst": now_jst.isoformat(),
             "reviewed_count": 0,
             "local_only": True,
+            "latest_file": str(latest_file),
+            "daily_post_goal": daily_goal_report.get("achievement", {}),
+            "daily_post_goal_remediation_active": bool(
+                daily_goal_policy.get("active")),
         })
         atomic_write_text(state_file, json.dumps(state, ensure_ascii=False, indent=2))
         return 0
@@ -1176,6 +1257,9 @@ def cmd_report() -> int:
                            "conversation_winner", "conversion_winner")
         },
         "prompt_version_comparison": prompt_version_comparison,
+        "daily_post_goal": daily_goal_report,
+        "daily_post_goal_remediation": daily_goal_policy,
+        "daily_post_goal_discord_sent": daily_goal_notified,
     }
     from usage_reports import xai_roi  # noqa: E402
     review_payload["xai_attribution_daily"] = xai_roi(days=1)
@@ -1403,6 +1487,9 @@ def cmd_report() -> int:
             review_payload["chatgpt_strategy_activation"].get("activated")),
         "chatgpt_strategy_reason": review_payload[
             "chatgpt_strategy_activation"].get("reason", ""),
+        "daily_post_goal": daily_goal_report.get("achievement", {}),
+        "daily_post_goal_remediation_active": bool(
+            daily_goal_policy.get("active")),
     })
     atomic_write_text(state_file, json.dumps(state, ensure_ascii=False, indent=2))
 
@@ -2274,7 +2361,7 @@ def cmd_status() -> int:
     print(f"X_SEARCH_QUERY       : {os.environ.get('X_SEARCH_QUERY', '(未設定)')}")
     print(f"SOURCE_SCHEDULE_SPLIT: {os.environ.get('SOURCE_SCHEDULE_SPLIT', '(未設定→true扱い)')}")
     print(f"MIN_POST_SCORE       : {os.environ.get('MIN_POST_SCORE', '(未設定→6.3)')}")
-    print(f"MAX_DAILY_POSTS      : {os.environ.get('MAX_DAILY_POSTS', '(未設定→16)')}")
+    print(f"MAX_DAILY_POSTS      : {os.environ.get('MAX_DAILY_POSTS', '(未設定→20)')}")
     print(f"MIN_POST_INTERVAL_MINUTES: {os.environ.get('MIN_POST_INTERVAL_MINUTES', '(未設定→45)')}")
     print(f"TOPIC_COOLDOWN_HOURS : {os.environ.get('TOPIC_COOLDOWN_HOURS', '(未設定→4)')}")
     print(f"CATCH_UP_HOURS       : {os.environ.get('CATCH_UP_HOURS', '(未設定→24)')}")
@@ -3133,6 +3220,15 @@ def main() -> int:
     p_follower.add_argument("--capture", action="store_true",
                             help="Owned Readを使って現在値を保存")
     sub.add_parser("quality-dashboard", help="直近の品質・安全・prompt版比較を表示")
+    p_daily_goal = sub.add_parser(
+        "daily-post-goal", help="X日次20投稿目標を監視し未達理由と対策を表示")
+    p_daily_goal.add_argument("--target", type=int)
+    p_daily_goal.add_argument("--date", help="集計対象日（YYYY-MM-DD、既定は当日）")
+    p_daily_goal.add_argument("--save", action="store_true")
+    p_daily_goal.add_argument("--notify", action="store_true")
+    p_daily_goal.add_argument(
+        "--apply-remediation", action="store_true",
+        help="未達時の安全な是正ポリシーを次回投稿から適用")
 
     sub.add_parser("discord-test", help="Discord Webhookへテスト通知を送信")
     sub.add_parser(
@@ -4151,6 +4247,30 @@ def main() -> int:
         return cmd_discord_note_draft_test()
     if args.command == "discord-log":
         return cmd_discord_log(args.source, args.lines)
+    if args.command == "daily-post-goal":
+        load_env()
+        ensure_dirs()
+        from daily_post_goal import apply_remediation, build_report, save_report
+        report_date = (
+            datetime.fromisoformat(args.date).date() if args.date else None)
+        result = build_report(
+            path=ROOT_DIR / "data" / "bot_metrics.db",
+            log_dir=ROOT_DIR / "logs",
+            target=args.target,
+            report_date=report_date,
+        )
+        if args.save:
+            saved = save_report(result, ROOT_DIR / "data" / "daily_post_goal")
+            result["saved_to"] = str(saved)
+        if args.apply_remediation:
+            result["applied_remediation"] = apply_remediation(
+                result, ROOT_DIR / "data" / "daily_post_goal")
+        result["discord_notified"] = False
+        if args.notify:
+            from discord_notify import notify_daily_post_goal
+            result["discord_notified"] = notify_daily_post_goal(result)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
     parser.print_help()
     return 1
 

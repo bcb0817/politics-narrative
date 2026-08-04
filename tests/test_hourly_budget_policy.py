@@ -25,10 +25,10 @@ def history(now, normal=0, breaking=0):
     rows = []
     for index in range(normal):
         rows.append({"tweet_id": f"n{index}", "post_type": "strong_opinion",
-                     "posted_at_jst": (now - timedelta(hours=index + 1)).isoformat()})
+                     "posted_at_jst": (now - timedelta(minutes=index + 1)).isoformat()})
     for index in range(breaking):
         rows.append({"tweet_id": f"b{index}", "post_type": "breaking_news",
-                     "posted_at_jst": (now - timedelta(hours=index + 1)).isoformat()})
+                     "posted_at_jst": (now - timedelta(minutes=normal + index + 1)).isoformat()})
     return rows
 
 
@@ -36,13 +36,19 @@ class HourlyBudgetPolicyTests(unittest.TestCase):
     def setUp(self):
         self.now = datetime(2026, 7, 21, 18, 0, tzinfo=JST)
 
-    def test_01_monitoring_is_hourly(self):
-        with patch.dict(os.environ, {"MONITOR_INTERVAL_MINUTES": "60"}):
-            self.assertEqual(local_bot._slot_interval_minutes(), 60)
+    def test_01_monitoring_is_every_forty_five_minutes(self):
+        with patch.dict(os.environ, {"MONITOR_INTERVAL_MINUTES": "45"}):
+            self.assertEqual(local_bot._slot_interval_minutes(), 45)
 
-    def test_02_active_window_has_nineteen_slots(self):
-        with patch.dict(os.environ, {"ACTIVE_HOURS": "5-23", "MONITOR_SCHEDULE_MINUTE": "0"}):
-            self.assertEqual(post.build_post_slots(), [f"{hour:02d}:00" for hour in range(5, 24)])
+    def test_02_active_window_has_twenty_five_slots(self):
+        expected = [f"{minute // 60:02d}:{minute % 60:02d}"
+                    for minute in range(0, 1440, 45)
+                    if 5 <= minute // 60 <= 23]
+        with patch.object(post, "SLOT_INTERVAL_MINUTES", 45), \
+                patch.object(post, "ACTIVE_HOURS", set(range(5, 24))), \
+                patch.dict(os.environ, {"MONITOR_SCHEDULE_MINUTE": "0"}):
+            self.assertEqual(post.build_post_slots(), expected)
+            self.assertEqual(len(expected), 25)
 
     def test_03_x_search_has_only_three_schedule_slots(self):
         with patch.dict(os.environ, {"X_SEARCH_SCHEDULE": "06:00,12:00,18:00"}):
@@ -70,16 +76,16 @@ class HourlyBudgetPolicyTests(unittest.TestCase):
             _, reason = api_budget.reserve("x", "x_search", "recent_search", 0, 1, path=path)
             self.assertEqual(reason, "x_search_daily_resource_cap")
 
-    def test_06_normal_posts_stop_at_eight(self):
-        self.assertTrue(phase_daily_limit_reached(history(self.now, normal=8), self.now, False))
+    def test_06_normal_posts_stop_at_twenty(self):
+        self.assertTrue(phase_daily_limit_reached(history(self.now, normal=20), self.now, False))
 
-    def test_07_total_posts_stop_at_ten(self):
-        self.assertTrue(phase_daily_limit_reached(history(self.now, 8, 2), self.now, True))
+    def test_07_total_posts_stop_at_twenty(self):
+        self.assertTrue(phase_daily_limit_reached(history(self.now, 18, 2), self.now, True))
 
-    def test_08_post_interval_is_sixty_minutes(self):
+    def test_08_post_interval_is_forty_five_minutes(self):
         rows = history(self.now, normal=1)
-        rows[0]["posted_at_jst"] = (self.now - timedelta(minutes=59)).isoformat()
-        self.assertEqual(pre_generation_skip_reason(rows, self.now, 12, 60), "minimum_post_interval")
+        rows[0]["posted_at_jst"] = (self.now - timedelta(minutes=44)).isoformat()
+        self.assertEqual(pre_generation_skip_reason(rows, self.now, 20, 45), "minimum_post_interval")
 
     def test_09_openai_provider_cap_is_enforced(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td, patch.dict(os.environ, {
@@ -143,7 +149,7 @@ class HourlyBudgetPolicyTests(unittest.TestCase):
             self.assertEqual(api_budget.reserve("openai", "post_generation", "m", .01,
                                                 metadata={"is_breaking": True}, path=path)[1], "")
 
-    def test_14_eight_posts_is_a_target_not_a_quota(self):
+    def test_14_twelve_posts_is_a_target_not_a_quota(self):
         self.assertFalse(phase_daily_limit_reached(history(self.now, normal=3), self.now, False))
         self.assertEqual(post.prefilter_news([{"title": "弱い芸能ニュース", "url": "x",
                                                "source_name": "unknown"}]), [])

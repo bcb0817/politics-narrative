@@ -353,19 +353,19 @@ logs/                   ログ（git管理外）
 
 ## 選別投稿ポリシー
 
-Botは05:00〜23:00の毎時00分にニュースを監視しますが、全枠で投稿しません。JST基準で次を適用します。
+Botは05:00〜23:00を45分間隔（約25監視枠）で監視しますが、全枠で投稿しません。JST基準で次を適用します。
 
-- `ORIGINAL_DAILY_POST_MIN=6`: 目標値（投稿ノルマではない）
-- `ORIGINAL_DAILY_POST_MAX=8`: 通常投稿の上限
-- `BREAKING_DAILY_POST_LIMIT=2` / `MAX_DAILY_AUTOMATED_POSTS=10`: 重大速報・総投稿上限
-- `MIN_POST_INTERVAL_MINUTES=60`: 成功投稿間の最短間隔
+- `ORIGINAL_DAILY_POST_MIN=20`: 日次目標（投稿ノルマではなく、安全・品質条件を満たす場合のみ）
+- `ORIGINAL_DAILY_POST_MAX=20`: 通常投稿の上限
+- `BREAKING_DAILY_POST_LIMIT=2` / `MAX_DAILY_AUTOMATED_POSTS=20`: 重大速報の内数上限・総投稿上限
+- `MIN_POST_INTERVAL_MINUTES=45`: 成功投稿間の最短間隔
 - `TOPIC_COOLDOWN_HOURS=4`: 同一テーマの冷却時間
 - `LOW_QUALITY_FALLBACK_ENABLED=false`: 無投稿でも品質基準を緩和しない
 - `EVERGREEN_MIN_SILENCE_HOURS=3`: 3時間無投稿なら公式資料に基づく制度解説を最大1件検討
 - `QUALITY_GATE_ENABLED=true` / `MIN_POST_SCORE=7.0`: 品質スコアゲート
 
 低品質フォールバック中も、RSS確認、政治関連性、重複URL、未確認情報、BANリスク、
-1日10件の上限は緩和しません。絵文字は選択式で、約25％・最大1個です。重大事件では使いません。
+1日20件の総上限、安全・品質・重複・予算ゲートは緩和しません。毎日04:40の日次レビューが前日の達成率と未達理由を分析し、候補選別・一時障害再試行・検証済み常緑候補だけを自動調整します。目標未達を理由に低品質な投稿を強制しません。絵文字は選択式で、約25％・最大1個です。重大事件では使いません。
 
 投稿タイプは `breaking_news`、`issue_diagram`、`strong_opinion`、
 `comparison_factcheck`、`digest` の5種類です。内部ラベルは本文へ出しません。

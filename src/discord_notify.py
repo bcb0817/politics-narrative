@@ -717,7 +717,7 @@ def notify_startup() -> bool:
         fields={
             "投稿": f"POST_ENABLED={os.environ.get('POST_ENABLED', 'false')}",
             "監視時間": os.environ.get("ACTIVE_HOURS", "5-23"),
-            "監視間隔": f"{os.environ.get('MONITOR_INTERVAL_MINUTES', '60')}分",
+            "監視間隔": f"{os.environ.get('MONITOR_INTERVAL_MINUTES', '45')}分",
         },
     )
 
@@ -972,3 +972,27 @@ def notify_log_excerpt(
         force=force,
     )
     return sent, len(selected)
+
+
+def notify_daily_post_goal(report: dict[str, Any]) -> bool:
+    """Send only the operational summary; never include raw attempts/logs."""
+    achievement = report.get("achievement") or {}
+    actual = report.get("actual") or {}
+    analysis = report.get("analysis") or {}
+    met = bool(achievement.get("met"))
+    actions = report.get("remediation") or []
+    next_action = str(actions[0].get("action") or "") if actions else ""
+    return notify(
+        "daily_post_goal",
+        "✅ 日次投稿目標達成" if met else "⚠️ 日次投稿目標未達",
+        "Xの成功投稿をJST日次で集計しました。",
+        level="success" if met else "warning",
+        fields={
+            "日付": report.get("report_date"),
+            "X投稿": f"{actual.get('x', 0)} / {(report.get('target') or {}).get('posts', 20)}",
+            "Threads公開": actual.get("threads", 0),
+            "不足": achievement.get("shortfall", 0),
+            "主因": analysis.get("primary_reason") or "なし",
+            "優先対策": next_action or "現行運用を維持",
+        },
+    )

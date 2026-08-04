@@ -26,7 +26,7 @@ if ($WhatIf) {
     [pscustomobject]@{
         Source = $root
         Destination = $destination
-        Excludes = "backups, .venv, __pycache__, outputs, logs"
+        Excludes = "backups, archive, .git, .venv, __pycache__, outputs, logs, data/daemon.lock"
         Created = $false
     }
     exit 0
@@ -37,10 +37,13 @@ New-Item -ItemType Directory -Path $destination -Force | Out-Null
 
 & robocopy $root $destination /E /COPY:DAT /DCOPY:DAT /R:1 /W:1 `
     /XD (Join-Path $root "backups") `
+        (Join-Path $root "archive") `
+        (Join-Path $root ".git") `
         (Join-Path $root ".venv") `
         (Join-Path $root "__pycache__") `
         (Join-Path $root "outputs") `
         (Join-Path $root "logs") `
+    /XF (Join-Path $root "data\daemon.lock") `
     /NFL /NDL /NJH /NJS /NP | Out-Null
 
 $robocopyCode = $LASTEXITCODE

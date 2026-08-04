@@ -37,10 +37,31 @@ ChatGPTへ渡して運用診断を行いました。
 - 一次情報・信頼できる情報源の確認
 - 同一政策で進展がない場合の72時間重複禁止
 - topic cooldown
-- 60分の最短投稿間隔
+- 45分の最短投稿間隔
 - 品質スコア
 - BANリスク
 - 日次投稿上限
 - OpenAI・X・合計API予算
 
 最低投稿数をノルマ化したり、安全基準を下げたりはしません。
+
+## 日次20件の目標 🎯
+
+`ORIGINAL_DAILY_POST_MIN=20`を運用目標、`ORIGINAL_DAILY_POST_MAX=20`と
+`MAX_DAILY_AUTOMATED_POSTS=20`をハード上限とします。速報はこの20件の内数で、
+別枠で総数を超えません。X APIの作成枠も日次20件・月次600件に揃えます。
+05:00〜23:00の45分間隔（約25監視枠）で、品質条件を満たす候補だけを投稿します。
+未達時は候補不足、品質、安全、重複、冷却時間、予算、API失敗を分析しますが、
+未達を埋めるための強制投稿や品質・安全基準の引き下げは行いません。
+
+本番`.env`への反映はバックアップ後、プレビューを確認して明示適用します。
+
+```powershell
+& ".\production\create_backup.ps1" -Label "before-daily-target-20"
+& ".\production\set_daily_post_target.ps1"
+& ".\production\set_daily_post_target.ps1" -Apply
+```
+
+最後のコマンドは`.env`の対象キーだけを更新し、秘密値を表示しません。
+設定読込がモジュール初期化時に行われるため、反映にはBotの手動再起動が必要です。
+スクリプト自身はBot再起動やWindowsタスク変更を行いません。

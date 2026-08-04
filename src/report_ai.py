@@ -161,6 +161,7 @@ def compact_daily_payload(payload: dict) -> dict:
                 "profile_clicks": row.get("profile_clicks"),
                 "four_axes": row.get("four_axes", {}),
             })
+    daily_goal = payload.get("daily_post_goal") or {}
     return {
         "reviewed_count": payload.get("reviewed_count", 0),
         "samples": samples[:12],
@@ -174,6 +175,17 @@ def compact_daily_payload(payload: dict) -> dict:
             "current_active_strategy", {}),
         "prior_strategy_evaluation": payload.get(
             "prior_strategy_evaluation", {}),
+        "daily_post_goal": {
+            "report_date": daily_goal.get("report_date"),
+            "target": daily_goal.get("target", {}),
+            "actual": daily_goal.get("actual", {}),
+            "achievement": daily_goal.get("achievement", {}),
+            "analysis": daily_goal.get("analysis", {}),
+            "remediation": (daily_goal.get("remediation") or [])[:4],
+            "safety": daily_goal.get("safety", {}),
+        },
+        "daily_post_goal_remediation": payload.get(
+            "daily_post_goal_remediation", {}),
         "integrated_research": {
             key: (payload.get("integrated_research") or {}).get(key)
             for key in (

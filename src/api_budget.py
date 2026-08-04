@@ -392,8 +392,8 @@ def reserve(provider: str, operation: str, model_or_endpoint: str, maximum_cost:
                     _float("X_SEARCH_MAX_POST_READS_PER_MONTH", 1620),
                 ),
                 "post_create": (
-                    _float("X_POST_CREATE_MAX_PER_DAY", 10),
-                    _float("X_POST_CREATE_MAX_PER_MONTH", 300),
+                    _float("X_POST_CREATE_MAX_PER_DAY", 20),
+                    _float("X_POST_CREATE_MAX_PER_MONTH", 600),
                 ),
                 "owned_read": (
                     _float("X_OWNED_READ_MAX_PER_DAY", 36),

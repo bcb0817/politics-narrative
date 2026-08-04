@@ -173,11 +173,25 @@ class UsageAndReportTests(unittest.TestCase):
 
     def test_17_compaction_deduplicates_posts(self):
         row = {"tweet_id": "1", "text": "x" * 500}
-        compact = compact_daily_payload({"top_impressions_3": [row], "top_growth_3": [row],
-                                         "bottom_3": [], "quality_errors": list(range(10))})
+        compact = compact_daily_payload({
+            "top_impressions_3": [row], "top_growth_3": [row],
+            "bottom_3": [], "quality_errors": list(range(10)),
+            "daily_post_goal": {
+                "report_date": "2026-08-03",
+                "target": {"posts": 20},
+                "actual": {"x": 14},
+                "achievement": {"shortfall": 6},
+                "remediation": [{"action": str(index)} for index in range(8)],
+            },
+            "daily_post_goal_remediation": {
+                "active": True, "quality_threshold_locked": True},
+        })
         self.assertEqual(len(compact["samples"]), 1)
         self.assertEqual(len(compact["samples"][0]["text"]), 280)
         self.assertEqual(len(compact["quality_errors"]), 5)
+        self.assertEqual(compact["daily_post_goal"]["target"]["posts"], 20)
+        self.assertEqual(len(compact["daily_post_goal"]["remediation"]), 4)
+        self.assertTrue(compact["daily_post_goal_remediation"]["active"])
 
     def test_18_daily_analysis_success_is_one_call(self):
         FakeClient.calls, FakeClient.failures = [], []

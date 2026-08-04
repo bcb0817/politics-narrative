@@ -339,11 +339,13 @@ class SocialContentFactoryTests(unittest.TestCase):
         issues = {row["issue"] for row in result["document_findings"]}
         self.assertIn("readme_x_only_conflicts_with_threads", issues)
 
-    def test_40_phase_a_defaults_do_not_expand_live_limits(self):
-        cfg = runtime_config.typed_config(Path(self.tmp.name) / "missing.env")
+    def test_40_live_defaults_target_twelve_without_expanding_run_limit(self):
+        with patch.dict(os.environ, {}, clear=True):
+            cfg = runtime_config.typed_config(Path(self.tmp.name) / "missing.env")
         self.assertEqual(cfg["MAX_POSTS_PER_RUN"], 1)
-        self.assertEqual(cfg["ORIGINAL_DAILY_POST_MAX"], 8)
-        self.assertEqual(cfg["MAX_DAILY_AUTOMATED_POSTS"], 10)
+        self.assertEqual(cfg["ORIGINAL_DAILY_POST_MIN"], 20)
+        self.assertEqual(cfg["ORIGINAL_DAILY_POST_MAX"], 20)
+        self.assertEqual(cfg["MAX_DAILY_AUTOMATED_POSTS"], 20)
 
     def test_41_new_x_capability_limits_are_typed(self):
         cfg = runtime_config.typed_config(Path(self.tmp.name) / "missing.env")

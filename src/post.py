@@ -184,18 +184,18 @@ def _migrate_legacy_state() -> None:
 _migrate_legacy_state()
 
 # 投稿スロット（JST）— 24時間対象。
-# 監視間隔はMONITOR_INTERVAL_MINUTESで可変（既定60分）。
+# 監視間隔はMONITOR_INTERVAL_MINUTESで可変（既定45分）。
 # 45分なら1日32スロット（45×32=1440で1日に綺麗に割り切れる）。
-# 1440 を割り切る値のみ許可（割り切れない値は既定30にフォールバック）。
+# 1440 を割り切る値のみ許可（割り切れない値は既定45にフォールバック）。
 def _get_slot_interval_minutes() -> int:
     try:
         v = int(os.getenv("MONITOR_INTERVAL_MINUTES",
-                          os.getenv("SLOT_INTERVAL_MINUTES", "60")))
+                          os.getenv("SLOT_INTERVAL_MINUTES", "45")))
     except (TypeError, ValueError):
-        return 60
+        return 45
     if v < 1 or 1440 % v != 0:
-        print(f"[WARN] SLOT_INTERVAL_MINUTES={v} は1440を割り切れないため既定30を使用", flush=True)
-        return 60
+        print(f"[WARN] SLOT_INTERVAL_MINUTES={v} は1440を割り切れないため既定45を使用", flush=True)
+        return 45
     return v
 
 
@@ -336,8 +336,8 @@ def _env_float(name: str, default: float) -> float:
 # 投稿可否の最終しきい値: effective_score がこの値以上で投稿可。
 MIN_POST_SCORE = _env_float("MIN_POST_SCORE", 6.3)
 MAX_DAILY_POSTS = max(0, _env_int("MAX_DAILY_AUTOMATED_POSTS",
-                                  _env_int("MAX_DAILY_POSTS", 10)))
-MIN_POST_INTERVAL_MINUTES = max(0, _env_int("MIN_POST_INTERVAL_MINUTES", 60))
+                                  _env_int("MAX_DAILY_POSTS", 20)))
+MIN_POST_INTERVAL_MINUTES = max(0, _env_int("MIN_POST_INTERVAL_MINUTES", 45))
 TOPIC_COOLDOWN_HOURS = max(0.0, _env_float("TOPIC_COOLDOWN_HOURS", 4.0))
 LOW_QUALITY_FALLBACK_HOURS = max(0.0, _env_float("LOW_QUALITY_FALLBACK_HOURS", 3.0))
 LOW_QUALITY_FALLBACK_ENABLED = os.environ.get(
@@ -357,7 +357,8 @@ EVERGREEN_TOPICS = (
 )
 
 
-def _evergreen_candidate(history: list[dict], now_jst: datetime) -> dict | None:
+def _evergreen_candidate(history: list[dict], now_jst: datetime,
+                         max_per_day: int | None = None) -> dict | None:
     if os.environ.get("EVERGREEN_FALLBACK_ENABLED", "true").lower() not in ("1", "true", "yes"):
         return None
     if not stagnation_fallback_active(history, now_jst,
@@ -365,7 +366,14 @@ def _evergreen_candidate(history: list[dict], now_jst: datetime) -> dict | None:
         return None
     today_count = sum(1 for row in history if row.get("post_type") == "evergreen_explainer"
                       and str(row.get("posted_at_jst", "")).startswith(now_jst.date().isoformat()))
-    if today_count >= _env_int("EVERGREEN_MAX_PER_DAY", 1):
+    # A second verified evergreen candidate may help recover a quiet news day,
+    # but it is still subject to the normal quality, safety, interval, topic
+    # cooldown, budget, and total daily limit gates below.
+    evergreen_limit = (
+        max(0, int(max_per_day)) if max_per_day is not None
+        else _env_int("EVERGREEN_MAX_PER_DAY", 2)
+    )
+    if today_count >= evergreen_limit:
         return None
     used = {row.get("topic_key") for row in history[-30:]}
     title, summary, url = next((row for row in EVERGREEN_TOPICS if row[0] not in used), EVERGREEN_TOPICS[0])
@@ -1527,6 +1535,19 @@ def _reset_generation_diagnostics() -> None:
     LAST_GENERATION_API_CALLS = 0
 
 
+def _should_retry_stale_candidate_cache(*, cache_hit: bool,
+                                        usable_count: int,
+                                        remediation_policy: dict,
+                                        retry_used: bool) -> bool:
+    """Allow one bounded cache bypass only when daily remediation requests it."""
+    return bool(
+        cache_hit
+        and usable_count == 0
+        and remediation_policy.get("retry_transient_slots")
+        and not retry_used
+    )
+
+
 def _generate_candidates_legacy(news_item: dict, regeneration_attempt: int = 0, retries_used: int = 0) -> list:
     """Generate structured X post candidates with the OpenAI Responses API."""
     api_key = os.environ.get("OPENAI_API_KEY", "").strip()
@@ -2401,6 +2422,18 @@ def main():
 
     # --- 素材収集 ---
     history = load_post_history()
+    try:
+        from daily_post_goal import load_active_remediation
+        daily_goal_policy = load_active_remediation(
+            STATE_DIR / "daily_post_goal", now=now_jst)
+    except Exception:
+        daily_goal_policy = {}
+    if daily_goal_policy:
+        log(
+            "[INFO] Daily 20-post remediation active: "
+            f"shortfall={daily_goal_policy.get('shortfall', 0)} "
+            f"prefilter_top_n={daily_goal_policy.get('prefilter_top_n', 1)}"
+        )
     stagnation_fallback = LOW_QUALITY_FALLBACK_ENABLED and stagnation_fallback_active(
         history, now_jst, LOW_QUALITY_FALLBACK_HOURS)
     log(
@@ -2460,9 +2493,12 @@ def main():
         if value.strip().isdigit() and 0 <= int(value) <= 23
     }
     digest_window = now_jst.hour in digest_hours and slot_dt.minute == 0
+    remediation_top_n = max(
+        1, int(daily_goal_policy.get("prefilter_top_n", 1) or 1))
     target_news = prefilter_news(
         news_items,
-        top_n=3 if digest_window else None,
+        top_n=max(3, remediation_top_n) if digest_window else (
+            remediation_top_n if daily_goal_policy else None),
         allow_low_quality=stagnation_fallback,
     )
     if digest_window and len(target_news) >= 2:
@@ -2478,7 +2514,12 @@ def main():
     log(f"[INFO] News after prefilter: {len(target_news)}")
 
     if not target_news:
-        evergreen = _evergreen_candidate(history, now_jst)
+        evergreen = _evergreen_candidate(
+            history, now_jst,
+            max_per_day=daily_goal_policy.get(
+                "verified_evergreen_max_per_day")
+            if daily_goal_policy else None,
+        )
         if evergreen:
             target_news = [evergreen]
             log("[INFO] Evergreen fallback selected; quality and verification gates remain unchanged")
@@ -2575,7 +2616,7 @@ def main():
             if enriched.get("classification_mode") == "local_limit_fallback":
                 log("[INFO] Classifier unavailable; using deterministic local classification")
         is_breaking = enriched["post_type"] == "breaking_news"
-        normal_daily_limit = _env_int("ORIGINAL_DAILY_POST_MAX", 8)
+        normal_daily_limit = _env_int("ORIGINAL_DAILY_POST_MAX", 20)
         if cost_forecast().get("restriction_level", 0) >= 7:
             normal_daily_limit = min(
                 normal_daily_limit,
@@ -2638,8 +2679,11 @@ def main():
             politics_max_articles = len(eligible_news)
     else:
         politics_max_articles = len(eligible_news)
+    remediation_retry_used = False
+    cache_duplicate_count = 0
     for item in eligible_news[:politics_max_articles]:
         generated = _load_cached_candidates(item)
+        cache_hit = bool(generated)
         if generated:
             log(
                 "[INFO] Politics candidate cache hit: "
@@ -2648,13 +2692,50 @@ def main():
             generated = generate_candidates(item)
             if generated:
                 _save_cached_candidates(item, generated)
+        usable = []
         for c in generated:
             c["integrated_research_topic_id"] = item.get(
                 "integrated_research_topic_id")
             c["integrated_research_run_id"] = item.get(
                 "integrated_research_run_id", "")
             if is_duplicate(c, history):
+                if cache_hit:
+                    cache_duplicate_count += 1
                 continue
+            usable.append(c)
+
+        # A cached set can become unusable after another post succeeds. When
+        # the daily review identifies transient generation failures, bypass
+        # one stale cache per run and regenerate a materially different angle.
+        # All normal duplicate, quality, safety, interval, quota and budget
+        # gates still run on the regenerated candidates below.
+        if _should_retry_stale_candidate_cache(
+                cache_hit=cache_hit,
+                usable_count=len(usable),
+                remediation_policy=daily_goal_policy,
+                retry_used=remediation_retry_used):
+            remediation_retry_used = True
+            retry_item = dict(item)
+            retry_item["summary"] = (
+                f"{item.get('summary', '')}\n再生成指示: 保存済み候補は直近投稿と重複。"
+                "同じ主張を言い換えず、一次資料にある別の事実・制度影響・反対論から再構成する。"
+            )
+            log(
+                "[INFO] Daily goal remediation: stale duplicate cache "
+                "bypassed for one bounded regeneration")
+            regenerated = generate_candidates(
+                retry_item, regeneration_attempt=1, retries_used=1)
+            if regenerated:
+                _save_cached_candidates(item, regenerated)
+            for c in regenerated:
+                c["integrated_research_topic_id"] = item.get(
+                    "integrated_research_topic_id")
+                c["integrated_research_run_id"] = item.get(
+                    "integrated_research_run_id", "")
+                if not is_duplicate(c, history):
+                    usable.append(c)
+
+        for c in usable:
             s = effective_score(c, history)
             if s > best_score:
                 best, best_score = c, s
@@ -2666,6 +2747,8 @@ def main():
             "eligible_news_count": len(eligible_news),
             "candidate_cache_enabled": _env_bool(
                 "POLITICS_CANDIDATE_CACHE_ENABLED", "true"),
+            "cache_duplicate_count": cache_duplicate_count,
+            "remediation_retry_used": remediation_retry_used,
         })
         return
 

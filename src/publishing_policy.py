@@ -30,8 +30,8 @@ POST_TYPES = (
 )
 POST_TYPE_DAILY_LIMITS = {
     "breaking_news": 2,
-    "issue_diagram": 4, "strong_opinion": 4, "comparison_factcheck": 3,
-    "steelman_counterargument": 1, "evergreen_explainer": 1,
+    "issue_diagram": 5, "strong_opinion": 5, "comparison_factcheck": 4,
+    "steelman_counterargument": 1, "evergreen_explainer": 2,
     "morning_evening_digest": 2,
 }
 POST_STYLE_TARGETS = {
@@ -351,8 +351,8 @@ def choose_post_style(news: dict, history: list[dict], now_jst: datetime) -> tup
 
 
 def phase_daily_limit_reached(history: list[dict], now_jst: datetime, is_breaking: bool,
-                              normal_limit: int = 8, breaking_limit: int = 2,
-                              total_limit: int = 10) -> bool:
+                              normal_limit: int = 20, breaking_limit: int = 2,
+                              total_limit: int = 20) -> bool:
     today = successful_posts_today(history, now_jst)
     if len(today) >= total_limit:
         return True

@@ -147,17 +147,17 @@ class NewRequirementsTests(unittest.TestCase):
         self.assertIn('provider == "xai"', source)
         self.assertIn('provider == "native_x"', source)
 
-    def test_10_normal_automated_posts_stop_at_eight(self):
+    def test_10_normal_automated_posts_stop_at_twelve(self):
         now = datetime.now(JST).replace(hour=12, minute=0, second=0, microsecond=0)
         rows = [{"tweet_id": str(i), "post_type": "strong_opinion",
-                 "posted_at_jst": (now - timedelta(minutes=61 + i)).isoformat()} for i in range(8)]
-        self.assertTrue(phase_daily_limit_reached(rows, now, False, 8, 2, 10))
+                 "posted_at_jst": (now - timedelta(minutes=61 + i)).isoformat()} for i in range(20)]
+        self.assertTrue(phase_daily_limit_reached(rows, now, False, 20, 2, 20))
 
-    def test_11_total_automated_posts_stop_at_ten(self):
+    def test_11_total_automated_posts_stop_at_twelve(self):
         now = datetime.now(JST).replace(hour=12, minute=0, second=0, microsecond=0)
-        rows = [{"tweet_id": str(i), "post_type": "strong_opinion" if i < 8 else "breaking_news",
-                 "posted_at_jst": (now - timedelta(minutes=61 + i)).isoformat()} for i in range(10)]
-        self.assertTrue(phase_daily_limit_reached(rows, now, True, 8, 2, 10))
+        rows = [{"tweet_id": str(i), "post_type": "strong_opinion" if i < 10 else "breaking_news",
+                 "posted_at_jst": (now - timedelta(minutes=61 + i)).isoformat()} for i in range(20)]
+        self.assertTrue(phase_daily_limit_reached(rows, now, True, 20, 2, 20))
 
     def test_12_three_same_styles_are_avoided(self):
         now = datetime.now(JST); history = [{"post_type": "strong_opinion",
@@ -179,11 +179,14 @@ class NewRequirementsTests(unittest.TestCase):
             self.assertTrue(post._score_gate_allows(5, False, False, True))
             self.assertFalse(post._score_gate_allows(3, False, False, True))
 
-    def test_16_evergreen_daily_limit_is_one(self):
+    def test_16_evergreen_daily_limit_is_two(self):
         now = datetime.now(JST).replace(hour=12, minute=0, second=0, microsecond=0)
-        history = [{"tweet_id": "1", "post_type": "evergreen_explainer",
-                    "posted_at_jst": (now - timedelta(hours=4)).isoformat()}]
-        with patch.dict(os.environ, {"EVERGREEN_FALLBACK_ENABLED": "true", "EVERGREEN_MAX_PER_DAY": "1"}):
+        history = [
+            {"tweet_id": str(index), "post_type": "evergreen_explainer",
+             "posted_at_jst": (now - timedelta(hours=4 + index)).isoformat()}
+            for index in range(2)
+        ]
+        with patch.dict(os.environ, {"EVERGREEN_FALLBACK_ENABLED": "true", "EVERGREEN_MAX_PER_DAY": "2"}):
             self.assertIsNone(post._evergreen_candidate(history, now))
 
     def test_17_steelman_prompt_forbids_distortion(self):
