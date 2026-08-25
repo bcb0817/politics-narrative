@@ -1645,17 +1645,39 @@ def publish(draft_id: int, client: ThreadsClient | None = None,
             existing = conn.execute(
                 "SELECT * FROM threads_posts WHERE client_post_key=?",
                 (key,)).fetchone()
+            successful_retry = conn.execute(
+                """SELECT 1 FROM threads_posts
+                   WHERE client_post_key LIKE ? AND status='published'
+                   LIMIT 1""",
+                (key + ":retry:%",),
+            ).fetchone()
             last = conn.execute(
                 """SELECT published_at FROM threads_posts
                    WHERE status='published'
                    ORDER BY published_at DESC LIMIT 1""").fetchone()
-        if existing:
+        if successful_retry:
             return {
                 "published": False,
                 "reason": "duplicate_client_post_key",
-                "status": existing["status"],
+                "status": "published",
                 "threads_api_calls": 0,
             }
+        if existing:
+            # A create-container connection failure leaves no remote creation
+            # identifier, so a later scheduled slot may safely try once with a
+            # distinct idempotency key.  Do not retry after any remote state was
+            # recorded: that outcome could be ambiguous and must remain blocked.
+            if (existing["status"] == "failed"
+                    and not existing["creation_id"]
+                    and not existing["threads_post_id"]):
+                key = f"{key}:retry:{draft_id}"
+            else:
+                return {
+                    "published": False,
+                    "reason": "duplicate_client_post_key",
+                    "status": existing["status"],
+                    "threads_api_calls": 0,
+                }
         if last and _parse_datetime(last["published_at"]):
             age = (
                 now - _parse_datetime(last["published_at"]).astimezone(JST)
