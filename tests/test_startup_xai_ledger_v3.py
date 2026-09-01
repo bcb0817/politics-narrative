@@ -212,6 +212,11 @@ class StartupLedgerV3Tests(unittest.TestCase):
             encoding="utf-8-sig")
         self.assertIn("-RestartInterval (New-TimeSpan -Minutes 1)", source)
 
+    def test_29a_register_script_has_no_daemon_execution_limit(self):
+        source = (ROOT / "production" / "register_task.ps1").read_text(
+            encoding="utf-8-sig")
+        self.assertIn("-ExecutionTimeLimit ([TimeSpan]::Zero)", source)
+
     def test_30_roi_requires_minimum_sample(self):
         with patch.dict(os.environ, {"XAI_ATTRIBUTION_MIN_SAMPLE_SIZE": "10"}):
             self.assertEqual(usage_reports.xai_roi(path=self.db)["decision"],
