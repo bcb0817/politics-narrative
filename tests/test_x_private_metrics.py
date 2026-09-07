@@ -74,7 +74,7 @@ class PrivateZeroClient:
 
 class XPrivateMetricsTests(unittest.TestCase):
     def _collect(self, path, client):
-        now = datetime.now(JST)
+        now = datetime(2026, 9, 8, 12, tzinfo=JST)
         history = [{
             "tweet_id": "tweet-1",
             "posted_at_jst": (now - timedelta(hours=2)).isoformat(),
@@ -82,7 +82,8 @@ class XPrivateMetricsTests(unittest.TestCase):
         with patch.dict(os.environ, {
             "POST_METRICS_ENABLED": "true",
             "X_OWNED_READ_MAX_PER_DAY": "24",
-        }):
+            "POST_METRIC_WINDOWS": "15m,1h,6h,24h,72h",
+        }, clear=True), patch.object(post_metrics, 'reserve', return_value=(1,'')), patch.object(post_metrics, 'finalize'), patch.object(post_metrics, 'estimate_x', return_value=.01):
             result = post_metrics.collect(history, now, client, path)
         with closing(metrics_db.connect(path)) as connection:
             rows = [

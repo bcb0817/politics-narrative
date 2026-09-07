@@ -260,6 +260,8 @@ class ShortVideoFactory:
             (video_id,), self.path)
         text = scripts[0]["narration"]
         reasons = []
+        if not claims:
+            reasons.append('claim_evidence_missing')
         if not all(int(c["verified"] or 0) for c in claims):
             reasons.append("unverified_claim")
         if re.search(r"\b\d+(?:\.\d+)?[%％円人件]\b", text) and not claims:
@@ -649,9 +651,13 @@ class ShortVideoFactory:
                    ORDER BY id DESC LIMIT 1""", (video_id,), self.path)),
         }
         # Media checks remain false until an actual FFmpeg render exists.
-        score = round(sum(checks.values()) / len(checks) * 10, 2)
-        safety = float(script.get("score") or 0)
-        passed = all(checks.values()) and score >= self.settings()["quality_min"]
+        structural_score = round(sum(checks.values()) / len(checks) * 10, 2)
+        # Codec/size checks do not measure editorial quality or factual safety.
+        # Until those have a measured evaluator result they remain unknown.
+        score = None
+        safety = None
+        checks['measured_editorial_quality'] = False
+        passed = False
         self._save_check(video_id, "final", passed, score, checks)
         repo.write(
             """UPDATE short_video_projects SET quality_score=?,safety_score=?,
@@ -661,6 +667,7 @@ class ShortVideoFactory:
              _now().isoformat(), video_id), self.path)
         result = {"video_id": video_id, "passed": passed,
                   "quality_score": score, "safety_score": safety,
+                  "quality_status": "unknown", "structural_score": structural_score,
                   "checks": checks, "probe": {
                       "duration_seconds": round(duration, 3),
                       "width": video_stream.get("width"),
@@ -792,6 +799,11 @@ class ShortVideoFactory:
             reasons.append(f"{platform}_authentication_missing")
         if float(project["quality_score"] or 0) < cfg["quality_min"]:
             reasons.append("quality_below_threshold")
+        measured = repo.rows("SELECT details_json FROM short_video_quality_checks WHERE video_id=? AND check_type='final' ORDER BY checked_at DESC LIMIT 1",
+                            (project['video_id'],), self.path)
+        evidence = json.loads(measured[0]['details_json'] or '{}') if measured else {}
+        if evidence.get('measured_editorial_quality') is not True:
+            reasons.append('editorial_quality_unknown')
         if float(project["safety_score"] or 0) < cfg["safety_min"]:
             reasons.append("safety_below_threshold")
         if not int(project.get("publish_eligible") or 0):

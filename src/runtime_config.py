@@ -200,7 +200,8 @@ def audit(env_path: Path | None = None, *, persist: bool = True) -> dict[str, An
 
             init_db()
             apply_migrations()
-            with connect() as conn:
+            from contextlib import closing
+            with closing(connect()) as conn:
                 conn.execute(
                     """INSERT INTO config_audit_results
                        (audited_at,config_json,mismatch_count,env_modified)

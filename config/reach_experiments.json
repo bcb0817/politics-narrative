@@ -1,0 +1,29 @@
+{
+  "version": "reach-v1",
+  "enabled": true,
+  "start": "2026-09-07T00:00:00+09:00",
+  "end": "2026-10-05T00:00:00+09:00",
+  "minimum_measured_per_arm": 30,
+  "max_assignments": 120,
+  "extra_api_cost_usd": 0,
+  "automatic_full_rollout": false,
+  "exploration_fraction": 0.2,
+  "ranking_weights_are_hypotheses": true,
+  "ranking_weights": {"reader_impact": 0.35, "freshness": 0.25, "observed_demand": 0.15, "explanation_value": 0.15, "difference": 0.10},
+  "formats": {
+    "change": "変更点：何が、いつから変わるか。決定と提案を区別する。",
+    "incidence": "負担と恩恵：誰が、どの条件で影響を受けるか。",
+    "comparison": "比較：現行と改正案、過去と現在。両方の根拠がある場合のみ。",
+    "overlooked_fact": "意外な事実：資料で確認できる見落とされやすい点。",
+    "tradeoff": "争点整理：賛否の分かれる具体的な負担配分や優先順位。",
+    "evaluation": "根拠付き評価：政策効果、財政、説明責任による評価。"
+  },
+  "experiments": [
+    {"id":"concrete_opening", "hypothesis":"対象と変化を冒頭に置くと読み始めやすい", "eligibility":"独立した適格ニュース", "factor":"冒頭のみ", "control":"既存の冒頭", "treatment":"冒頭の一文に対象と確認済みの変化を置く。抽象的な批判から始めない。"},
+    {"id":"reader_impact", "hypothesis":"政策の生活への影響を具体化すると説明価値が伝わる", "eligibility":"独立した適格ニュース", "factor":"根拠の説明順序のみ", "control":"既存の説明順", "treatment":"根拠にある範囲で生活への影響と適用条件を先に説明する。資料にない影響や対象者を推測しない。"}
+  ],
+  "assignment": "topic hash selects one experiment; seeded alternating arms within genre and 6-hour time band; one persistent assignment per source URL",
+  "primary_metric": "impressions observed at age 24 to 26 hours",
+  "stop_conditions": ["enabled=false", "end reached", "max_assignments reached", "existing budget or safety gate blocks", "correction or duplicate incident: operator disables experiments"],
+  "causal_claim": false
+}

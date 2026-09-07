@@ -91,8 +91,19 @@ def fetch_article_text(
     except (OSError, ValueError, KeyError, json.JSONDecodeError):
         pass
     if request_get is None:
-        import requests
-        request_get = requests.get
+        from bounded_http import read_html
+        try:
+            html = read_html(url,
+                timeout=min(15, max(1, float(os.environ.get('POLITICS_ARTICLE_FETCH_TIMEOUT_SECONDS', '8')))),
+                max_bytes=min(1000000, max(1, int(os.environ.get('POLITICS_ARTICLE_MAX_BYTES', '1000000')))))
+            text = extract_article_text(html)
+            if text:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps({'url':url, 'text':text,
+                    'fetched_at':datetime.now(timezone.utc).isoformat()},ensure_ascii=False),encoding='utf-8')
+            return text
+        except Exception:
+            return ''
     try:
         response = request_get(
             url, timeout=float(os.environ.get(

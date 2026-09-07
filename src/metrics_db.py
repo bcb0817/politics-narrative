@@ -947,7 +947,10 @@ def apply_additive_migrations(path: Path | None = None) -> dict:
             # Import legacy xAI-only diagnostics that were recorded solely in the
             # generic table. Matching radar rows are intentionally not duplicated.
             legacy = conn.execute("""SELECT * FROM api_usage_events
-                WHERE provider='xai' ORDER BY id""").fetchall()
+                WHERE provider='xai' AND COALESCE(error_type,'')<>'reserved'
+                AND COALESCE(json_extract(CASE WHEN json_valid(metadata_json)
+                    THEN metadata_json ELSE '{}' END,'$.durable_reservation'),0)=0
+                ORDER BY id""").fetchall()
             for row in legacy:
                 match = conn.execute("""SELECT 1 FROM xai_usage_events
                     WHERE operation=? AND ABS(COALESCE(actual_cost_usd,0)-?)<0.000000001

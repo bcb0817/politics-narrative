@@ -210,7 +210,7 @@ def usage_totals(path: Path | None = None, now: datetime | None = None) -> dict:
         with closing(connect(path)) as conn:
             rows = conn.execute("""SELECT provider,operation,model_or_endpoint,resource_count,
                 estimated_cost_usd,success FROM api_usage_events
-                WHERE timestamp LIKE ? AND provider<>'xai'""",
+                WHERE timestamp LIKE ? AND (provider<>'xai' OR error_type='reserved')""",
                 (month_prefix(now) + "%",)).fetchall()
             xai_rows = conn.execute("""SELECT model,operation,tool_call_count,
                 successful_tool_call_count,actual_cost_usd,estimated_cost_usd,cost_source,
@@ -311,12 +311,13 @@ def reserve(provider: str, operation: str, model_or_endpoint: str, maximum_cost:
     provider_reserve = cfg["provider_reserves"].get(provider, 0.0)
     total_limit = cfg["effective_total_limit"]
     total_reserve = cfg["total_reserve"]
-    metadata = metadata or {}
+    metadata = {**(metadata or {}), 'durable_reservation': True}
     is_breaking = bool(metadata.get("is_breaking"))
     forecast_result = forecast(path, now)
     current_stage = forecast_result["current_warning_stage"]
     current_restriction_level = forecast_result["restriction_level"]
     current_totals = usage_totals(path, now)
+    conn = None
     try:
         conn = connect(path)
         conn.execute("BEGIN IMMEDIATE")
@@ -325,7 +326,14 @@ def reserve(provider: str, operation: str, model_or_endpoint: str, maximum_cost:
             GROUP BY provider""",
                             (month_prefix(now) + "%",)).fetchall()
         spent = {row["provider"]: float(row["cost"] or 0) for row in rows}
-        spent["xai"] = float(current_totals["xai"])
+        # Re-read inside this write transaction; concurrent calls must include
+        # both completed ledger charges and durable in-flight reservations.
+        spent["xai"] = float(conn.execute("""SELECT COALESCE(SUM(
+            CASE WHEN cost_source='actual' THEN actual_cost_usd ELSE estimated_cost_usd END),0)
+            FROM xai_usage_events WHERE timestamp LIKE ?""", (month_prefix(now)+"%",)).fetchone()[0])
+        spent["xai"] += float(conn.execute("""SELECT COALESCE(SUM(estimated_cost_usd),0)
+            FROM api_usage_events WHERE provider='xai' AND error_type='reserved'
+            AND timestamp LIKE ?""", (month_prefix(now)+"%",)).fetchone()[0])
         usable_provider_limit = max(0, provider_limit - provider_reserve)
         usable_total_limit = max(0, total_limit - total_reserve)
         if spent.get(provider, 0) + maximum_cost > usable_provider_limit:
@@ -417,11 +425,6 @@ def reserve(provider: str, operation: str, model_or_endpoint: str, maximum_cost:
                 if day_runs >= runs_per_day:
                     conn.rollback(); conn.close()
                     return None, "x_search_daily_run_cap"
-        # xAI has a dedicated request ledger. A negative sentinel represents a
-        # successful budget reservation without creating a mirrored cost row.
-        if provider == "xai":
-            conn.commit(); conn.close()
-            return -1, ""
         cur = conn.execute("""INSERT INTO api_usage_events
             (timestamp,provider,operation,model_or_endpoint,resource_count,input_tokens,cached_input_tokens,
              output_tokens,estimated_cost_usd,success,fallback_used,error_type,metadata_json,
@@ -434,6 +437,9 @@ def reserve(provider: str, operation: str, model_or_endpoint: str, maximum_cost:
         return reservation_id, ""
     except sqlite3.Error:
         return None, "sqlite_budget_reservation_failed"
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def finalize(reservation_id: int | None, actual_cost: float, *, success: bool,

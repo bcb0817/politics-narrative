@@ -1313,10 +1313,11 @@ def publish_candidate(snapshot_id: str, platform: str, *,
         if platform == "x":
             if x_client is None:
                 post_module = importlib.import_module("post")
-                external_id, _ = post_module.post_to_x(row["candidate_text"])
+                external_id, _ = post_module.post_to_x(row["candidate_text"], path=path)
             else:
-                response = x_client.create_tweet(text=row["candidate_text"])
-                external_id = str((response.data or {}).get("id") or "")
+                from x_delivery import publish
+                external_id = publish({"text": row["candidate_text"]},
+                    lambda: (x_client.create_tweet(text=row["candidate_text"]).data or {}).get("id"), path=path)
         else:
             if threads_client is None:
                 from threads_api import ThreadsClient

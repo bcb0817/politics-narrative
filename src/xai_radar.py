@@ -599,10 +599,7 @@ def search(now_jst: datetime | None = None, client_factory=None,
                 semantic_success = 1 <= tool_calls <= max_tool_calls
                 error_type = ("" if semantic_success else
                               "x_search_not_called" if tool_calls == 0 else "x_search_call_cap_exceeded")
-                finalize(reservation, ticks_to_usd(ticks), success=semantic_success,
-                         input_tokens=inp, output_tokens=out, resource_count=tool_calls,
-                         error_type=error_type, path=path)
-                _record_usage(
+                recorded_request_id = _record_usage(
                     model, ticks, inp, out, tool_calls, semantic_success, error_type,
                     now_jst.strftime("%H:%M"), False, path,
                     request_id=str(getattr(response, "id", "") or ""),
@@ -617,6 +614,12 @@ def search(now_jst: datetime | None = None, client_factory=None,
                     reserved_cost_usd=maximum_cost,
                 )
                 actual_cost = ticks_to_usd(ticks)
+                with closing(connect(path)) as ledger_connection:
+                    if not ledger_connection.execute('SELECT 1 FROM xai_usage_events WHERE request_id=?', (recorded_request_id,)).fetchone():
+                        raise RuntimeError('xai_usage_not_persisted')
+                finalize(reservation, actual_cost, success=semantic_success,
+                         input_tokens=inp, output_tokens=out, resource_count=tool_calls,
+                         error_type=error_type, path=path)
                 topic_rows = []
                 if semantic_success:
                     for candidate in candidates or []:
@@ -672,8 +675,8 @@ def search(now_jst: datetime | None = None, client_factory=None,
                     print("xAI X Search returned no topics; retrying once")
             except Exception as exc:
                 completed_at = datetime.now(JST)
-                finalize(reservation, 0, success=False, error_type=type(exc).__name__,
-                         resource_count=0, path=path)
+                # No proof of a free failure: preserve the in-flight maximum
+                # until provider billing can be reconciled.
                 _record_usage(model, 0, 0, 0, 0, False, type(exc).__name__,
                               now_jst.strftime("%H:%M"), False, path,
                               estimated_cost_usd=0.0,

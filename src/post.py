@@ -980,6 +980,8 @@ def prefilter_news(items: list, top_n: int = None, allow_low_quality: bool = Fal
         and float(it.get("news_relevance_score", 0) or 0) >= minimum_relevance
     ]
     if relevant:
+        from reach_policy import rank_eligible
+        relevant = rank_eligible(relevant, load_post_history())
         selected = relevant[:top_n]
         for item in selected:
             log(
@@ -1488,6 +1490,7 @@ def _candidate_cache_path(news_item: dict) -> Path:
         str(news_item.get("pub_date") or ""),
         str(news_item.get("summary") or ""),
         os.environ.get("PROMPT_VERSION", "x-growth-quality-v2"),
+        json.dumps(news_item.get('reach_assignment'), sort_keys=True, ensure_ascii=False),
     ))
     digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
     return STATE_DIR / "politics_candidate_cache" / f"{digest}.json"
@@ -1586,6 +1589,8 @@ def _generate_candidates_legacy(news_item: dict, regeneration_attempt: int = 0, 
     timeout = max(15.0, _env_float("OPENAI_TIMEOUT_SECONDS", 90.0))
     client = OpenAI(api_key=api_key, timeout=timeout, max_retries=0)
     system = GENERATION_SYSTEM.format(n_candidates=n)
+    from reach_policy import instruction
+    system += instruction(news_item.get('reach_assignment'))
     user = GENERATION_USER_TMPL.format(
         n_candidates=n,
         post_type=news_item.get("post_type", ""),
@@ -1881,6 +1886,9 @@ def _multistage_candidate(
     }
 
     def call_json(stage: str, prompt: str, schema: dict, role: str) -> dict:
+        if stage in {'candidates', 'finalize'}:
+            from reach_policy import instruction
+            prompt += instruction(news_item.get('reach_assignment'))
         model = _multistage_model(role, routed_model)
         max_tokens = min(4000, max(
             900, _env_int("OPENAI_MAX_OUTPUT_TOKENS_POST", 1800)))
@@ -2044,6 +2052,19 @@ def _multistage_candidate(
 
 
 def generate_candidates(
+    news_item: dict, regeneration_attempt: int = 0, retries_used: int = 0
+) -> list:
+    from reach_policy import assign
+    item = dict(news_item)
+    assignment = assign(item)
+    item['reach_assignment'] = assignment
+    result = _generate_candidates_existing(item, regeneration_attempt, retries_used)
+    for candidate in result:
+        candidate['reach_assignment'] = assignment
+    return result
+
+
+def _generate_candidates_existing(
     news_item: dict, regeneration_attempt: int = 0, retries_used: int = 0
 ) -> list:
     """Prefer multi-stage generation and safely fall back to the legacy path."""
@@ -2295,7 +2316,7 @@ def _x_client():
     )
 
 
-def post_to_x(text: str, reply_texts: list = None):
+def post_to_x(text: str, reply_texts: list = None, *, delivery_key=None, path=None):
     """Xへテキスト投稿する。画像アップロード経路は存在しない。
 
     戻り値: (親tweet_id, [各投稿の文字数])。
@@ -2307,8 +2328,10 @@ def post_to_x(text: str, reply_texts: list = None):
         raise ValueError("automatic_replies_disabled")
 
     client = _x_client()
-    resp = client.create_tweet(text=text)
-    parent_id = str(resp.data.get("id"))
+    from x_delivery import publish
+    parent_id = publish({"text": text},
+                        lambda: (client.create_tweet(text=text).data or {}).get("id"),
+                        key=delivery_key, path=path)
     lengths = [_x_len(text)]
 
     return parent_id, lengths
@@ -2436,6 +2459,8 @@ def main():
         )
     stagnation_fallback = LOW_QUALITY_FALLBACK_ENABLED and stagnation_fallback_active(
         history, now_jst, LOW_QUALITY_FALLBACK_HOURS)
+    if os.environ.get('REACH_POLICY_ENABLED','true').lower() != 'false':
+        stagnation_fallback = False
     log(
         f"[INFO] Low-quality fallback after hours: {LOW_QUALITY_FALLBACK_HOURS:g} "
         f"active={str(stagnation_fallback).lower()}"
@@ -2465,7 +2490,13 @@ def main():
             return
 
     # RSS枠では有料のX Searchを呼ばない。X枠では事実確認用RSSも同時取得する。
-    news_items = gather_candidate_news(include_x=True)
+    from candidate_inventory import available, refresh
+    news_items = available(now=now_jst) if _env_bool('REACH_COLLECTION_ENABLED','true') else []
+    if not _env_bool('REACH_COLLECTION_ENABLED','true'):
+        news_items = gather_candidate_news(include_x=True)
+    elif not news_items:
+        news_items = refresh(gather_candidate_news(include_x=True), now=now_jst,
+                             max_age_hours=MAX_NEWS_AGE_HOURS)
     record_local_event("news_monitor", 1, {"slot": slot_dt.isoformat()})
     log(f"[INFO] News items fetched: {len(news_items)}")
 
@@ -2871,15 +2902,8 @@ def main():
         return
 
     # --- 投稿 ---
-    x_reservation, x_budget_reason = reserve_budget(
-        "x", "post_create", "post_create", estimate_x("post_create_per_request", 1), 1,
-        {"is_breaking": btype == "breaking_news"},
-    )
-    if not x_reservation:
-        finalize_skip(x_budget_reason, mark_attempted=False, extra={"title": best.get("title", "")})
-        return
     followers_at_publish = None
-    if _env_bool("FOLLOWER_SNAPSHOT_AT_PUBLISH_ENABLED", "true"):
+    if _env_bool("FOLLOWER_SNAPSHOT_AT_PUBLISH_ENABLED", "true") and not _env_bool('REACH_PRIORITIZE_24H_METRICS','true'):
         try:
             from growth_tracking import capture_follower_snapshot
             snapshot = capture_follower_snapshot(now=now_jst)
@@ -2895,12 +2919,10 @@ def main():
                 f"{type(exc).__name__}")
     log("[INFO] Decision: post")
     try:
-        tweet_id, sent_lengths = post_to_x(tweet_text, reply_texts)
-        finalize_budget(x_reservation, estimate_x("post_create_per_request", 1) or 0, success=True)
+        tweet_id, sent_lengths = post_to_x(tweet_text, reply_texts, delivery_key="scheduled:" + slot_key)
         log(f"[INFO] Posted tweet id: {tweet_id}")
         log(f"[INFO] each_post_length (sent): {sent_lengths}")
     except Exception as e:
-        finalize_budget(x_reservation, 0, success=False, error_type=type(e).__name__)
         # 投稿失敗は一時失敗扱い: attempted に記録しない（=未処理のまま再挑戦できる）
         log(f"[ERROR] post_to_x failed: {e}")
         log_error({"where": "post_to_x", "error": str(e), "slot_key": slot_key})
@@ -2910,7 +2932,7 @@ def main():
             slot=slot_key,
             title=best.get("title", ""),
         )
-        finalize_skip("post_to_x_failed", mark_attempted=False, extra={
+        finalize_skip("post_to_x_failed", mark_attempted=str(e).startswith("x_delivery_"), extra={
             "title": best.get("title", ""), "post_type": btype, "genre": bgenre})
         return
 
@@ -2921,7 +2943,7 @@ def main():
     log("[INFO] Slot marked as posted.")
     post_record = {
         "slot_key": slot_key,
-        "posted_at_jst": now_jst.isoformat(),
+        "posted_at_jst": datetime.now(JST).isoformat(),
         "tweet_id": tweet_id,
         "title": best.get("title", ""),
         "post_type": best.get("post_type", ""),
@@ -2998,6 +3020,8 @@ def main():
     post_record["posted_hour_jst"] = now_jst.hour
     save_post_record(post_record)
     insert_published(best.get("_db_generated_id"), post_record)
+    from reach_policy import record_publication
+    record_publication(best.get('reach_assignment'), tweet_id, now_jst.isoformat())
     if best.get("integrated_research_topic_id"):
         db_write(
             """UPDATE integrated_research_topics

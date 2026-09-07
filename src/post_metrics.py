@@ -20,6 +20,9 @@ WINDOWS = {
     "24h": timedelta(hours=24),
     "72h": timedelta(hours=72),
 }
+# A late cumulative count is never an earlier-window observation. Prioritize
+# the primary outcome within the existing read budget; missed windows stay null.
+WINDOW_TOLERANCE = timedelta(hours=2)
 TWEET_METRIC_FIELDS = [
     "public_metrics", "non_public_metrics", "organic_metrics", "created_at",
 ]
@@ -113,9 +116,11 @@ def due_measurements(history: list[dict], now: datetime, path: Path | None = Non
             continue
         age = now - posted.astimezone(JST)
         for window, delta in WINDOWS.items():
-            if age >= delta and (tweet_id, window) not in existing:
+            if delta <= age <= delta + WINDOW_TOLERANCE and (tweet_id, window) not in existing:
                 due.append((post, window))
-    return due
+    return sorted(due, key=lambda item: (
+        item[1] != "24h", item[1] != "72h",
+        item[0].get("posted_at_jst", ""), str(item[0].get("tweet_id", ""))))
 
 
 def collect(history: list[dict], now: datetime | None = None, client_factory=None,
@@ -132,11 +137,15 @@ def collect(history: list[dict], now: datetime | None = None, client_factory=Non
               (now.date().isoformat() + "%",)).fetchone()[0])
     except Exception:
         pass
-    due = due_measurements(history, now, path)[:max(0, daily_cap - used_today)]
+    enabled_windows = set(os.environ.get('POST_METRIC_WINDOWS', '24h').split(','))
+    pending = [(post, window) for post, window in due_measurements(history, now, path)
+               if window in enabled_windows]
+    ids = list(dict.fromkeys(str(post["tweet_id"]) for post, _ in pending))[:min(100, max(0, daily_cap - used_today))]
+    due = [(post, window) for post, window in pending if str(post["tweet_id"]) in ids]
     if not due:
         return {"collected": 0, "missing": 0}
-    cost = estimate_x("owned_read_per_resource", len(due))
-    reservation, reason = reserve("x", "owned_read", "tweets_lookup", cost, len(due), path=path)
+    cost = estimate_x("owned_read_per_resource", len(ids))
+    reservation, reason = reserve("x", "owned_read", "tweets_lookup", cost, len(ids), path=path)
     if not reservation:
         return {"collected": 0, "skipped": reason}
     try:
@@ -162,7 +171,10 @@ def collect(history: list[dict], now: datetime | None = None, client_factory=Non
                 if measured[name] is not None
             ]
             engagement = sum(engagement_parts) if engagement_parts else None
-            hours = max(WINDOWS[window].total_seconds() / 3600, .25)
+            posted = datetime.fromisoformat(post["posted_at_jst"])
+            if posted.tzinfo is None:
+                posted = posted.replace(tzinfo=JST)
+            hours = max((now - posted).total_seconds() / 3600, .25)
             row = {"tweet_id": str(post["tweet_id"]), "measurement_window": window,
                    "measured_at": now.isoformat(), **measured,
                    "engagement_rate": (
@@ -171,7 +183,7 @@ def collect(history: list[dict], now: datetime | None = None, client_factory=Non
                    "impressions_per_hour": (
                        impressions / hours if impressions is not None else None)}
             if upsert_metric(row, path) is not None: collected += 1
-        finalize(reservation, estimate_x("owned_read_per_resource", len(due)) or 0, success=True, path=path)
+        finalize(reservation, cost or 0, success=True, path=path)
         return {"collected": collected, "missing": missing}
     except Exception as exc:
         finalize(reservation, 0, success=False, error_type=type(exc).__name__, path=path)

@@ -31,6 +31,7 @@ import argparse
 import subprocess
 import atexit
 from pathlib import Path
+from contextlib import closing
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
@@ -600,8 +601,12 @@ def cmd_daemon() -> int:
         post_nxt = next_slot_dt(now)
         review_nxt = next_review_dt(now)
         aux_nxt, aux_name = next_auxiliary_event(now)
+        interval = max(5, min(60, int(os.environ.get('REACH_COLLECTION_INTERVAL_MINUTES', '15'))))
+        collect_nxt = datetime.fromtimestamp((int(now.timestamp()) // (interval*60)+1)*(interval*60), JST)
+        if not env_flag('REACH_COLLECTION_ENABLED', 'true'):
+            collect_nxt = datetime.max.replace(tzinfo=JST)
         nxt, event_name = min(
-            ((post_nxt, "post"), (review_nxt, "daily_review"), (aux_nxt, aux_name)),
+            ((post_nxt, "post"), (review_nxt, "daily_review"), (aux_nxt, aux_name), (collect_nxt, 'candidate_collection')),
             key=lambda item: item[0],
         )
         wait_sec = (nxt - now).total_seconds()
@@ -619,7 +624,14 @@ def cmd_daemon() -> int:
         if stop["flag"]:
             break
 
-        if event_name == "daily_review":
+        if event_name == 'candidate_collection':
+            try:
+                from candidate_inventory import refresh
+                from post import gather_candidate_news, MAX_NEWS_AGE_HOURS
+                refresh(gather_candidate_news(include_x=True), now=nxt, max_age_hours=MAX_NEWS_AGE_HOURS)
+            except Exception as exc:
+                log(f'[WARN] candidate collection failed: {type(exc).__name__}')
+        elif event_name == "daily_review":
             log(f"[INFO] daemon: integrated daily review start ({nxt:%H:%M} JST)")
             try:
                 rc = cmd_report()
@@ -919,6 +931,9 @@ def cmd_report() -> int:
     metrics = {}
     for t in (resp.data or []):
         tid = str(t.id)
+        from x_delivery import reconcile
+        if getattr(t, 'text', None):
+            reconcile({'text': t.text}, tid, published_at=getattr(t,'created_at',None), path=dirs['state'] / 'bot_metrics.db', now=now_jst)
         if tid not in local_by_id:
             continue
         metrics[tid] = extract_tweet_metrics(t)
@@ -933,7 +948,7 @@ def cmd_report() -> int:
     if not metrics:
         try:
             from metrics_db import connect as review_connect, db_path as review_db_path  # noqa: E402
-            with review_connect(review_db_path()) as conn:
+            with closing(review_connect(review_db_path())) as conn:
                 for tid in local_by_id:
                     row = conn.execute("""SELECT * FROM post_metrics WHERE tweet_id=?
                       ORDER BY measured_at DESC LIMIT 1""", (tid,)).fetchone()
@@ -998,7 +1013,7 @@ def cmd_report() -> int:
     external_conversions = None
     try:
         from metrics_db import connect as metrics_connect, db_path as current_db_path  # noqa: E402
-        with metrics_connect(current_db_path()) as conn:
+        with closing(metrics_connect(current_db_path())) as conn:
             snapshots = conn.execute("""SELECT followers_count FROM follower_snapshots
               ORDER BY captured_at DESC LIMIT 2""").fetchall()
             if len(snapshots) == 2:
@@ -1630,7 +1645,14 @@ def cmd_collect_metrics() -> int:
         history = json.loads((dirs["state"] / "posted_urls.json").read_text(encoding="utf-8"))
     except Exception:
         history = []
-    result = collect(history if isinstance(history, list) else [])
+    from metrics_db import connect
+    with closing(connect(dirs['state'] / 'bot_metrics.db')) as connection:
+        history = [dict(row) for row in connection.execute('SELECT tweet_id,posted_at AS posted_at_jst FROM published_posts')]
+    result = collect(history)
+    from reach_report import report
+    end = datetime.now(JST).replace(hour=0, minute=0, second=0, microsecond=0)
+    reach = report(dirs['state'] / 'bot_metrics.db', end)
+    atomic_write_text(dirs['state'] / 'reach_report_latest.json', json.dumps(reach, ensure_ascii=False, indent=2))
     log(f"[INFO] collect-metrics: {json.dumps(result, ensure_ascii=False)}")
     return 0
 

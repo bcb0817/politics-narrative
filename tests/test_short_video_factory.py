@@ -1,4 +1,5 @@
 import os
+import json
 import sqlite3
 import sys
 import tempfile
@@ -137,6 +138,8 @@ class ShortVideoFactoryTests(unittest.TestCase):
                        VALUES (?,?,?,?,?,?)""",
                     (f"safe-{index}", "final", 1, 9.5, "{}",
                      f"2026-07-31T10:{index:02d}:00+09:00"))
+            conn.execute("INSERT INTO short_video_quality_checks (video_id,check_type,passed,score,details_json,checked_at) VALUES (?,'final',1,9.5,?,?)",
+                         (video_id, json.dumps({'measured_editorial_quality': True, 'source': 'test_fixture'}), '2026-07-31T11:00:00+09:00'))
             conn.commit()
 
     def test_x_provider_is_wired_after_all_phase_d_gates(self):
@@ -153,6 +156,19 @@ class ShortVideoFactoryTests(unittest.TestCase):
         self.assertEqual(result["external_post_id"], "tweet-1")
         client.upload.assert_called_once()
         client.publish.assert_called_once()
+
+    def test_fixed_scores_without_editorial_evidence_block_publication(self):
+        video_id = self.factory.project_create(self.topic_id)['video_id']
+        self.factory.script_generate(video_id)
+        self._unlock_phase_d_fixture(video_id)
+        with closing(sqlite3.connect(self.db)) as conn:
+            conn.execute("DELETE FROM short_video_quality_checks WHERE video_id=?", (video_id,))
+            conn.commit()
+        client = Mock()
+        with patch('crosspost.XVideoClient', return_value=client):
+            result = self.factory.publish(video_id, 'x', confirm=True, dry_run=False)
+        self.assertEqual(result['status'], 'blocked')
+        client.publish.assert_not_called()
 
     def test_threads_provider_uses_video_container_and_public_https_url(self):
         video_id = self.factory.project_create(self.topic_id)["video_id"]

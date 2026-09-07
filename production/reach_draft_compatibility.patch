@@ -1,0 +1,204 @@
+--- a/src/politics_news_pipeline.py
++++ b/src/politics_news_pipeline.py
+@@ -7,6 +7,8 @@
+ """
+ from __future__ import annotations
+ import hashlib, json, re, sqlite3, uuid
++from contextlib import closing
++from email.utils import parsedate_to_datetime
+ from datetime import datetime, timedelta, timezone
+ from pathlib import Path
+ 
+@@ -60,7 +62,7 @@
+ 
+ def init_db(path: Path):
+     path.parent.mkdir(parents=True, exist_ok=True)
+-    with sqlite3.connect(path) as c: c.executescript(SCHEMA)
++    with closing(sqlite3.connect(path)) as c, c: c.executescript(SCHEMA)
+ 
+ def validate_candidate(text, source_url="", claims=None, *, theme=None):
+     errors=[]
+@@ -75,12 +77,23 @@
+ def run_pipeline(items, path: Path, *, now=None, dry_run=True, max_items=50):
+     init_db(path); now=_now(now); run_id=f"pn-{now:%Y%m%d%H%M%S}-{uuid.uuid4().hex[:8]}"
+     candidates=[]; held=expired=0; seen=set()
+-    with sqlite3.connect(path) as c:
++    with closing(sqlite3.connect(path)) as c, c:
+         for item in items[:max_items]:
+             key=_topic(item)
+             if key in seen: continue
+             seen.add(key); title=_text(item.get("title")); url=_text(item.get("url") or item.get("source_url") or item.get("link")); st=_source_type(item)
+             published=_text(item.get("pub_date") or item.get("published_at")); expires=now+timedelta(hours=float(item.get("expiry_hours",24)))
++            if published:
++                try:
++                    try: published_time=datetime.fromisoformat(published)
++                    except ValueError: published_time=parsedate_to_datetime(published)
++                    if published_time.tzinfo is None: published_time=published_time.replace(tzinfo=timezone.utc)
++                    expires=min(expires,published_time+timedelta(hours=float(item.get('expiry_hours',24))))
++                except (ValueError,TypeError):
++                    expires=now-timedelta(seconds=1)
++            previous=c.execute('SELECT expires_at FROM pipeline_topics WHERE topic_key=?',(key,)).fetchone()
++            if previous and previous[0]:
++                expires=min(expires,datetime.fromisoformat(previous[0]))
+             c.execute("INSERT INTO pipeline_topics VALUES(?,?,?,?,?,?,?) ON CONFLICT(topic_key) DO UPDATE SET last_seen_at=excluded.last_seen_at,title=excluded.title,status=excluded.status",(key,title,now.isoformat(),now.isoformat(),expires.isoformat(),"active", "rss" if st not in ("social","x_search","xai") else "social"))
+             source_id=hashlib.sha256((key+url).encode()).hexdigest()[:32]
+             provenance="social_demand" if st in ("social","x_search","xai") else "rss_source"
+@@ -119,7 +132,7 @@
+ 
+ def status(path: Path):
+     init_db(path)
+-    with sqlite3.connect(path) as c:
++    with closing(sqlite3.connect(path)) as c, c:
+         names=("pipeline_runs","pipeline_topics","pipeline_sources","pipeline_claims","pipeline_candidates","pipeline_publications","pipeline_measurements")
+         counts={n:c.execute(f"SELECT COUNT(*) FROM {n}").fetchone()[0] for n in names}
+         latest=c.execute("SELECT completed_at,summary_json FROM pipeline_runs ORDER BY started_at DESC LIMIT 1").fetchone()
+@@ -128,6 +141,6 @@
+ def record_measurement(path: Path, candidate_id: int, row: dict):
+     init_db(path)
+     fields={k:row.get(k) for k in ("impressions","likes","replies","reposts","profile_clicks","follows")}
+-    with sqlite3.connect(path) as c:
++    with closing(sqlite3.connect(path)) as c, c:
+         c.execute("INSERT INTO pipeline_measurements(candidate_id,platform,window,measured_at,impressions,likes,replies,reposts,profile_clicks,follows,source) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(candidate_id,platform,window) DO UPDATE SET measured_at=excluded.measured_at,impressions=excluded.impressions,likes=excluded.likes,replies=excluded.replies,reposts=excluded.reposts,profile_clicks=excluded.profile_clicks,follows=excluded.follows,source=excluded.source",(candidate_id,row.get("platform","x"),row.get("window","24h"),row.get("measured_at") or _now().isoformat(),*fields.values(),row.get("source","local_import")))
+         c.commit()
+--- a/src/political_sentiment_agent.py
++++ b/src/political_sentiment_agent.py
+@@ -12,8 +12,8 @@
+ from pathlib import Path
+ from zoneinfo import ZoneInfo
+ 
+-from api_budget import reserve
+-from metrics_db import apply_additive_migrations, db_path, write
++from api_budget import reserve, finalize
++from metrics_db import apply_additive_migrations, connect, db_path, write
+ from xai_cost import ticks_to_usd
+ 
+ JST = ZoneInfo("Asia/Tokyo")
+@@ -235,7 +235,7 @@
+ 
+ 
+ def _record(response, model: str, success: bool, error: str, path: Path,
+-            reserved_cost: float, started_at: datetime | None = None) -> None:
++            reserved_cost: float, started_at: datetime | None = None, reservation=None) -> None:
+     try:
+         usage = getattr(response, "usage", None) if response is not None else None
+         ticks = int(getattr(usage, "cost_in_usd_ticks", 0) or 0)
+@@ -258,6 +258,12 @@
+                         "individual_user_profiles_stored": False}),
+             (started_at or datetime.now(JST)).isoformat(), datetime.now(JST).isoformat(),
+             reserved_cost, actual - reserved_cost, int(ticks > 0)), path)
++        if ticks > 0:
++            from contextlib import closing
++            with closing(connect(path)) as connection:
++                persisted=connection.execute('SELECT 1 FROM xai_usage_events WHERE request_id=?',(request_id,)).fetchone()
++            if persisted:
++                finalize(reservation, actual, success=success, error_type=error, path=path)
+     except (OSError, sqlite3.Error, TypeError, ValueError):
+         # Telemetry is useful but secondary to the fail-open generation path.
+         return
+@@ -332,19 +338,19 @@
+                               "name": "political_sentiment", "strict": True,
+                               "schema": SCHEMA}}, store=False)
+         if _tool_calls(response) < 1:
+-            _record(response, model, False, "x_search_unavailable", path, maximum_cost, started_at)
++            _record(response, model, False, "x_search_unavailable", path, maximum_cost, started_at, reservation)
+             return _failure("x_search_unavailable")
+         try:
+             payload = json.loads(response.output_text)
+         except (ValueError, TypeError):
+-            _record(response, model, False, "malformed_json", path, maximum_cost, started_at)
++            _record(response, model, False, "malformed_json", path, maximum_cost, started_at, reservation)
+             return _failure("malformed_json")
+         try:
+             result = validate_result(payload)
+         except (ValueError, TypeError, KeyError):
+-            _record(response, model, False, "schema_validation_error", path, maximum_cost, started_at)
++            _record(response, model, False, "schema_validation_error", path, maximum_cost, started_at, reservation)
+             return _failure("schema_validation_error")
+-        _record(response, model, True, "", path, maximum_cost, started_at)
++        _record(response, model, True, "", path, maximum_cost, started_at, reservation)
+         if _tool_calls(response) > 1:
+             print("[XAI-POLITICS] Warning: provider exceeded requested X Search call limit")
+         _save_cache(topic, context, news_url, result)
+@@ -364,7 +370,7 @@
+                   "timeout" if "timeout" in name + message else
+                   "network_error" if any(word in name + message for word in ("connection", "network")) else
+                   "xai_unavailable")
+-        _record(response, model, False, reason, path, maximum_cost, started_at)
++        _record(response, model, False, reason, path, maximum_cost, started_at, reservation)
+         return _failure(reason)
+ 
+ 
+--- a/src/shorts_factory/workflow.py
++++ b/src/shorts_factory/workflow.py
+@@ -476,17 +476,23 @@
+             "text_only_ratio":visual["text_only_ratio"] <= .60,"max_static_scene":visual["max_static_scene_seconds"] <= 5,
+             "diagram":visual["diagram_count"] >= 1,"pattern_interrupts":visual["pattern_interrupt_count"] >= 3,
+             "stagnation":review.get("visual_stagnation_score",0) >= 7}
+-        passed = exists and all(gates.values())
++        # These heuristic constants are planning hints, not measured quality.
++        scores = {name: None for name in scores}
++        retention_components = {name: None for name in retention_components}
++        quality = safety = retention = None
++        gates['measured_quality'] = False
++        passed = False
+         features = {"hook_type":script["selected_hook"]["hook_type"],"hook_length":len(script["hook"]),
+             "second_hook_type":"contradiction","open_loop_present":bool(script.get("open_loop")),"payoff_type":"misunderstanding_resolution",
+             **visual,"caption_density":round(sum(len(s["caption"].replace("\n","")) for s in script["segments"])/script["estimated_duration"],2),
+             "duration":script["estimated_duration"],"structure_type":script["structure_type"]}
+         repo.write("INSERT OR REPLACE INTO shorts_feature_metrics(video_id,features_json,created_at) VALUES(?,?,?)",(video_id,_dump(features),_now()),self.path)
+         report = {"video_id": video_id, "passed": passed, "publish_ready":passed,
++            "quality_status":"unknown",
+             "fact_score":scores["fact_strength"],"short_quality_score": quality, "safety_score": safety,
+             "visual_diversity_score":visual["visual_diversity_score"],"predicted_retention_score":retention,
+             "visual_stagnation_score":review.get("visual_stagnation_score",0),"gates":gates,
+-            "checks": {"render_exists": exists, "resolution": [1080,1920], "fps": 30, "captions": True, "safe_zone": review.get("checks",{}).get("safe_zone",False), "numbers_match": True, "unverified_claims": False, "copyright_known": True, "black_frames": review.get("checks",{}).get("black_frames",0), "long_silence": False}, "scores": scores,"retention_components":retention_components,"features":features}
++            "checks": {"render_exists": exists, "resolution": None, "fps": None, "captions": None, "safe_zone": review.get("checks",{}).get("safe_zone"), "numbers_match": None, "unverified_claims": None, "copyright_known": None, "black_frames": review.get("checks",{}).get("black_frames"), "long_silence": None}, "scores": scores,"retention_components":retention_components,"features":features}
+         out = Path(p["output_dir"]); (out/"quality_report.json").write_text(_dump(report), encoding="utf-8")
+         repo.write("INSERT OR REPLACE INTO shorts_quality_checks VALUES(?,?,?,?,?,?)", (video_id,quality,safety,int(passed),_dump(report),_now()), self.path); repo.write("UPDATE shorts_projects SET status=?,quality_score=?,safety_score=?,updated_at=? WHERE video_id=?", ("publish_ready" if passed else "quality_blocked",quality,safety,_now(),video_id), self.path)
+         return report
+--- a/tests/test_politics_news_pipeline.py
++++ b/tests/test_politics_news_pipeline.py
+@@ -1,6 +1,7 @@
+ import json
+ import tempfile
+ import unittest
++from contextlib import closing
+ from datetime import datetime, timezone, timedelta
+ from pathlib import Path
+ 
+@@ -14,7 +15,7 @@
+         with tempfile.TemporaryDirectory() as d:
+             p = Path(d) / "pipeline.db"
+             item = {"title": "税制改正案を閣議決定", "summary": "所得税を10万円引き上げる。政府が発表した。", "url": "https://www.cao.go.jp/a", "source_type": "government_official"}
+-            out = run_pipeline([item], p, now=datetime.now(timezone.utc))
++            out = run_pipeline([item], p, now=datetime(2026,9,7,tzinfo=timezone.utc))
+             self.assertEqual(out["ready"], 1)
+             self.assertEqual(status(p)["tables"]["pipeline_claims"], 2)
+ 
+@@ -25,7 +26,7 @@
+             self.assertEqual(out["held"], 1)
+             record_measurement(p, out["candidates"][0]["candidate_id"], {"platform": "x", "window": "24h", "impressions": None, "source": "fixture"})
+             import sqlite3
+-            with sqlite3.connect(p) as c:
++            with closing(sqlite3.connect(p)) as c:
+                 self.assertIsNone(c.execute("select impressions from pipeline_measurements").fetchone()[0])
+ 
+     def test_duplicate_is_idempotent(self):
+@@ -34,7 +35,7 @@
+             item = {"title": "予算案", "summary": "予算は5兆円。", "url": "https://example.test/1", "source_type": "trusted_media"}
+             run_pipeline([item, item], p)
+             import sqlite3
+-            with sqlite3.connect(p) as c:
++            with closing(sqlite3.connect(p)) as c:
+                 self.assertEqual(c.execute("select count(*) from pipeline_candidates").fetchone()[0], 1)
+ 
+     def test_research_retry_upgrades_previously_unverified_claim(self):
+@@ -46,7 +47,7 @@
+             result = run_pipeline([verified], p)
+             self.assertEqual(result["ready"], 1)
+             import sqlite3
+-            with sqlite3.connect(p) as c:
++            with closing(sqlite3.connect(p)) as c:
+                 self.assertEqual(c.execute("select status from pipeline_claims").fetchone()[0], "supported")
+ 
+     def test_speculation_and_out_of_scope_are_held(self):

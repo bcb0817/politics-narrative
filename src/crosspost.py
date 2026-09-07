@@ -691,6 +691,12 @@ class XVideoClient:
         raise TimeoutError("x_media_processing_timeout")
 
     def publish(self, media_id: str, text: str) -> str:
+        from x_delivery import publish
+        return publish({"text": text, "media": {"media_ids": [media_id]}},
+                       lambda: self._publish_request(media_id, text),
+                       key='video:'+hashlib.sha256(text.encode()).hexdigest())
+
+    def _publish_request(self, media_id: str, text: str) -> str:
         response = self.session.post(
             f"{self.base}/tweets",
             json={"text": text, "media": {"media_ids": [media_id]}},
