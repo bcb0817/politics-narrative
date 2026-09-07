@@ -601,12 +601,15 @@ def cmd_daemon() -> int:
         post_nxt = next_slot_dt(now)
         review_nxt = next_review_dt(now)
         aux_nxt, aux_name = next_auxiliary_event(now)
+        maintenance_nxt = datetime.fromtimestamp(
+            ((int(now.timestamp())-600)//1800+1)*1800+600, JST)
         interval = max(5, min(60, int(os.environ.get('REACH_COLLECTION_INTERVAL_MINUTES', '15'))))
         collect_nxt = datetime.fromtimestamp((int(now.timestamp()) // (interval*60)+1)*(interval*60), JST)
         if not env_flag('REACH_COLLECTION_ENABLED', 'true'):
             collect_nxt = datetime.max.replace(tzinfo=JST)
         nxt, event_name = min(
-            ((post_nxt, "post"), (review_nxt, "daily_review"), (aux_nxt, aux_name), (collect_nxt, 'candidate_collection')),
+            ((post_nxt, "post"), (review_nxt, "daily_review"), (aux_nxt, aux_name),
+             (collect_nxt, 'candidate_collection'), (maintenance_nxt, 'reach_maintenance')),
             key=lambda item: item[0],
         )
         wait_sec = (nxt - now).total_seconds()
@@ -624,7 +627,12 @@ def cmd_daemon() -> int:
         if stop["flag"]:
             break
 
-        if event_name == 'candidate_collection':
+        if event_name == 'reach_maintenance':
+            try:
+                cmd_collect_metrics()
+            except Exception as exc:
+                log(f'[WARN] reach maintenance failed: {type(exc).__name__}')
+        elif event_name == 'candidate_collection':
             try:
                 from candidate_inventory import refresh
                 from post import gather_candidate_news, MAX_NEWS_AGE_HOURS
@@ -1646,12 +1654,13 @@ def cmd_collect_metrics() -> int:
     except Exception:
         history = []
     from metrics_db import connect
+    from reach_audit import sync_publications
+    sync_publications(dirs['state'] / 'bot_metrics.db', datetime.now(JST))
     with closing(connect(dirs['state'] / 'bot_metrics.db')) as connection:
         history = [dict(row) for row in connection.execute('SELECT tweet_id,posted_at AS posted_at_jst FROM published_posts')]
     result = collect(history)
-    from reach_report import report
-    end = datetime.now(JST).replace(hour=0, minute=0, second=0, microsecond=0)
-    reach = report(dirs['state'] / 'bot_metrics.db', end)
+    from reach_maintenance import run
+    reach = run(dirs['state'] / 'bot_metrics.db', datetime.now(JST), dirs['log'] / 'post_attempts.jsonl')
     atomic_write_text(dirs['state'] / 'reach_report_latest.json', json.dumps(reach, ensure_ascii=False, indent=2))
     log(f"[INFO] collect-metrics: {json.dumps(result, ensure_ascii=False)}")
     return 0

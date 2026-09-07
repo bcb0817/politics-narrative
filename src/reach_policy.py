@@ -7,6 +7,8 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from metrics_db import connect, init_db
+from reach_features import evidence_features, eligible_formats
+from reach_storage import ensure
 
 CONFIG = Path(__file__).resolve().parents[1] / 'config' / 'reach_experiments.json'
 JST = ZoneInfo('Asia/Tokyo')
@@ -22,6 +24,7 @@ def settings():
 
 def assign(item, *, now=None, path=None, config=None):
     cfg = config or settings()
+    cfg = json.loads(json.dumps(cfg))
     now = now or datetime.now(JST)
     if not cfg['enabled'] or os.environ.get('REACH_POLICY_ENABLED','true').lower() == 'false':
         return None
@@ -34,22 +37,57 @@ def assign(item, *, now=None, path=None, config=None):
     topic = str(item.get('topic_key') or item.get('title') or source)
     index = int(hashlib.sha256(topic.encode()).hexdigest()[:8],16) % len(cfg['experiments'])
     exp = cfg['experiments'][index]
-    stratum = f"{item.get('genre','unknown')}:{now.hour//6}"
-    init_db(path)
+    from reach_learning import active_model
+    model = active_model(path) if cfg.get('learning',{}).get('enabled') else None
+    model_version = model['version'] if model else 'initial'
+    stratum = f"{item.get('genre','unknown')}:{now.hour//6}:{model_version}"
+    ensure(path)
     with closing(connect(path)) as conn:
         conn.executescript(SCHEMA)
         conn.execute('BEGIN IMMEDIATE')
+        if conn.execute("SELECT 1 FROM reach_incidents WHERE category IN ('correction','duplicate','ambiguous','budget_overrun') AND resolved=0 AND julianday(occurred_at)>=julianday(?) LIMIT 1", (cfg['start'],)).fetchone():
+            return None
         if conn.execute("SELECT 1 FROM sqlite_master WHERE name='x_delivery'").fetchone():
-            if conn.execute("SELECT 1 FROM x_delivery WHERE status='ambiguous' AND created_at>=? LIMIT 1",(cfg['start'],)).fetchone():
+            if conn.execute("SELECT 1 FROM x_delivery WHERE status='ambiguous' AND julianday(created_at)>=julianday(?) LIMIT 1",(cfg['start'],)).fetchone():
                 return None
         row = conn.execute('SELECT * FROM reach_assignments WHERE source_key=?',(key,)).fetchone()
         if row:
             return dict(row)
-        if conn.execute('SELECT COUNT(*) FROM reach_assignments').fetchone()[0] >= cfg['max_assignments']:
+        if conn.execute('SELECT COUNT(*) FROM reach_assignments WHERE julianday(assigned_at)>=julianday(?)',(cfg['start'],)).fetchone()[0] >= cfg['max_assignments']:
             return None
         count = conn.execute('SELECT COUNT(*) FROM reach_assignments WHERE experiment=? AND stratum=?',(exp['id'],stratum)).fetchone()[0]
         seed = int(hashlib.sha256((exp['id']+stratum).encode()).hexdigest()[:8],16)
         arm = ('control','treatment')[(count+seed)%2]
+        decision = {'format': None, 'exploration': False, 'probability': None,
+                    'rank_features': item.get('reach_priority',{}).get('features') or evidence_features(item), 'model_version': model_version}
+        if exp['id'] == 'format_selection':
+            names = eligible_formats(item, cfg)
+            if not names:
+                return None
+            # The hash is stable across restarts; exploration never adds a call.
+            fraction = min(1, max(0, float(cfg['exploration_fraction'])))
+            draw = int(hashlib.sha256((key+cfg['version']+'explore').encode()).hexdigest()[:12],16)/16**12
+            explore = draw < fraction
+            weights = {n: (model or {}).get('format_weights',{}).get(n,1) for n in names}
+            published_formats = []
+            for feature in conn.execute('SELECT features_json FROM reach_features ORDER BY recorded_at DESC LIMIT ?', (cfg.get('diversity',{}).get('history_posts',20),)):
+                published_formats.append(json.loads(feature[0]).get('format'))
+            for n in names:
+                weights[n] /= 1 + cfg.get('diversity',{}).get('format_penalty',.08)*published_formats.count(n)
+            distribution = {n: 1/len(names) if explore else weights[n]/sum(weights.values()) for n in names}
+            sample = int(hashlib.sha256((key+cfg['version']+'format').encode()).hexdigest()[:12],16)/16**12
+            selected = names[-1]
+            for name, probability in distribution.items():
+                sample -= probability
+                if sample < 0:
+                    selected = name
+                    break
+            decision.update(format=selected, exploration=explore,
+                            probability=fraction/len(names)+(1-fraction)*weights[selected]/sum(weights.values()),
+                            eligible_formats=names)
+            if arm == 'control':
+                decision.update(format=None, exploration=False, probability=None)
+        cfg['decision'] = decision
         conn.execute('INSERT INTO reach_assignments VALUES(?,?,?,?,?,?,NULL,NULL)',
                      (key,exp['id'],arm,stratum,now.isoformat(),json.dumps(cfg,ensure_ascii=False,sort_keys=True)))
         conn.commit()
@@ -61,7 +99,9 @@ def instruction(assignment):
         return ''
     cfg=json.loads(assignment['config_json'])
     exp=next(e for e in cfg['experiments'] if e['id']==assignment['experiment'])
-    return ('\n編集実験（安全・事実性・品質基準は同一）：'+exp['treatment']+
+    selected = cfg.get('decision',{}).get('format')
+    form = (' 説明形式：'+cfg['formats'][selected]) if selected else ''
+    return ('\n編集実験（安全・事実性・品質基準は同一）：'+exp['treatment']+form+
             ' 中心メッセージは一つ。条件や例外を削らない。定型質問、反応要求、抽象的な締めは付けない。'+
             ' 資料にないことを資料作成者が公開していないと決めつけない。')
 
@@ -75,21 +115,21 @@ def record_publication(assignment, tweet_id, posted_at, *, path=None):
         conn.commit()
 
 
-def rank_eligible(items, history):
+def rank_eligible(items, history, *, path=None):
     """Only called AFTER the existing relevance/freshness gates."""
     cfg=settings()
     if not cfg['enabled'] or os.environ.get('REACH_POLICY_ENABLED','true').lower()=='false':
         return items
-    weights=cfg['ranking_weights']
+    from reach_learning import active_model
+    model = active_model(path) if cfg.get('learning',{}).get('enabled') else None
+    weights=(model or {}).get('ranking_weights', cfg['ranking_weights'])
     def score(item):
         topic=item.get('topic_key') or item.get('title')
         repeat=sum((r.get('topic_key') or r.get('title'))==topic for r in history[-20:])
-        values={'reader_impact':float(item.get('news_relevance_score') or 0),
-                'freshness':float(item.get('freshness_score') or 0),
-                'observed_demand':item.get('x_attention_score') if item.get('x_post_count',0)>0 and not item.get('xai_topic_match') else None,
-                'explanation_value':None, 'difference':10/(1+repeat)}
+        values=evidence_features(item, history)
         active={k:v for k,v in values.items() if v is not None}
         priority=sum(weights[k]*float(v) for k,v in active.items())/sum(weights[k] for k in active)
-        item['reach_priority']={'version':cfg['version'],'features':values,'score':priority,'hypothesis':True}
+        priority /= 1+cfg.get('diversity',{}).get('topic_penalty',.12)*repeat
+        item['reach_priority']={'version':cfg['version'],'model_version':(model or {}).get('version','initial'),'features':values,'score':priority,'hypothesis':True}
         return priority
     return sorted(items,key=score,reverse=True)

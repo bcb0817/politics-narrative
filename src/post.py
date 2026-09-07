@@ -2058,9 +2058,19 @@ def generate_candidates(
     item = dict(news_item)
     assignment = assign(item)
     item['reach_assignment'] = assignment
-    result = _generate_candidates_existing(item, regeneration_attempt, retries_used)
+    from reach_storage import cost_scope, source_key
+    with cost_scope(source_key=source_key(item), purpose='candidate_generation'):
+        result = _generate_candidates_existing(item, regeneration_attempt, retries_used)
     for candidate in result:
         candidate['reach_assignment'] = assignment
+        from reach_features import evidence_features
+        from reach_policy import settings
+        candidate['reach_feature_context'] = {
+            'source_key':source_key(item), 'news_published_at':item.get('pub_date'),
+            'rank_features':item.get('reach_priority',{}).get('features') or evidence_features(item),
+            'model_version':item.get('reach_priority',{}).get('model_version','initial'),
+            'policy_version':settings()['version'],
+        }
     return result
 
 
@@ -3019,9 +3029,12 @@ def main():
         post_record["primary_topic_key"] = best.get("topic_key", "")
     post_record["posted_hour_jst"] = now_jst.hour
     save_post_record(post_record)
+    post_record['reach_assignment'] = best.get('reach_assignment')
+    post_record['reach_feature_context'] = best.get('reach_feature_context')
+    post_record['post_format'] = 'text_only'
     insert_published(best.get("_db_generated_id"), post_record)
     from reach_policy import record_publication
-    record_publication(best.get('reach_assignment'), tweet_id, now_jst.isoformat())
+    record_publication(best.get('reach_assignment'), tweet_id, post_record['posted_at_jst'])
     if best.get("integrated_research_topic_id"):
         db_write(
             """UPDATE integrated_research_topics

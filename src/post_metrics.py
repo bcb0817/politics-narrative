@@ -126,6 +126,15 @@ def due_measurements(history: list[dict], now: datetime, path: Path | None = Non
 def collect(history: list[dict], now: datetime | None = None, client_factory=None,
             path: Path | None = None) -> dict:
     now = now or datetime.now(JST)
+    result = _collect(history, now, client_factory, path)
+    from reach_storage import collection_run
+    collection_run(now, result.get('requested',0), result.get('usable',0),
+                   result.get('skipped',''), 'fixed_age', path)
+    return result
+
+
+def _collect(history, now, client_factory, path):
+    now = now or datetime.now(JST)
     if os.environ.get("POST_METRICS_ENABLED", "true").lower() not in {"1", "true", "yes"}:
         return {"collected": 0, "skipped": "disabled"}
     daily_cap = int(os.environ.get("X_OWNED_READ_MAX_PER_DAY", "24"))
@@ -143,11 +152,13 @@ def collect(history: list[dict], now: datetime | None = None, client_factory=Non
     ids = list(dict.fromkeys(str(post["tweet_id"]) for post, _ in pending))[:min(100, max(0, daily_cap - used_today))]
     due = [(post, window) for post, window in pending if str(post["tweet_id"]) in ids]
     if not due:
-        return {"collected": 0, "missing": 0}
+        return {"collected": 0, "missing": len(pending), "requested":len(pending),
+                "skipped":'owned_read_daily_cap' if pending else ''}
     cost = estimate_x("owned_read_per_resource", len(ids))
-    reservation, reason = reserve("x", "owned_read", "tweets_lookup", cost, len(ids), path=path)
+    reservation, reason = reserve("x", "owned_read", "tweets_lookup", cost, len(ids),
+                                  {'tweet_ids':ids,'purpose':'fixed_age_metrics'}, path=path)
     if not reservation:
-        return {"collected": 0, "skipped": reason}
+        return {"collected": 0, "requested": len(due), "skipped": reason}
     try:
         if client_factory is None:
             import tweepy
@@ -158,7 +169,7 @@ def collect(history: list[dict], now: datetime | None = None, client_factory=Non
         response = client.get_tweets(
             ids=ids, tweet_fields=TWEET_METRIC_FIELDS, user_auth=True)
         by_id = {str(tweet.id): tweet for tweet in (response.data or [])}
-        collected = 0; missing = 0
+        collected = 0; missing = 0; usable = 0
         for post, window in due:
             tweet = by_id.get(str(post["tweet_id"]))
             if not tweet:
@@ -182,9 +193,11 @@ def collect(history: list[dict], now: datetime | None = None, client_factory=Non
                        if engagement is not None and impressions else None),
                    "impressions_per_hour": (
                        impressions / hours if impressions is not None else None)}
-            if upsert_metric(row, path) is not None: collected += 1
+            if upsert_metric(row, path) is not None:
+                collected += 1
+                if impressions is not None: usable += 1
         finalize(reservation, cost or 0, success=True, path=path)
-        return {"collected": collected, "missing": missing}
+        return {"collected": collected, "missing": missing, "usable":usable, "requested":len(due)}
     except Exception as exc:
         finalize(reservation, 0, success=False, error_type=type(exc).__name__, path=path)
-        return {"collected": 0, "skipped": type(exc).__name__}
+        return {"collected": 0, "requested":len(due), "skipped": type(exc).__name__}

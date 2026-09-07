@@ -627,7 +627,7 @@ def insert_published(generated_id: int | None, row: dict,
     discovered = list(dict.fromkeys(row.get("discovered_via") or []))
     if apply_migrations:
         apply_additive_migrations(path)
-    return write("""INSERT OR IGNORE INTO published_posts
+    result = write("""INSERT OR IGNORE INTO published_posts
       (generated_post_id,tweet_id,text,posted_at,topic_key,post_type,hook_type,critique_axis,
        model,prompt_version,is_breaking,discovered_via_json,xai_topic_match,xai_attention_score,
        xai_velocity_score,xai_discovered_at,xai_cost_allocated_usd,digest_type,digest_date,
@@ -646,6 +646,13 @@ def insert_published(generated_id: int | None, row: dict,
                                            ensure_ascii=False),
         row.get("primary_topic_key") or row.get("topic_key"),
         row.get("posted_hour_jst"), row.get("followers_at_publish")), path)
+    if result is not None:
+        try:
+            from reach_features import capture_publication
+            capture_publication(row, generated_id, path)
+        except Exception as exc:
+            print(f'[WARN] reach feature capture failed: {type(exc).__name__}')
+    return result
 
 
 def upsert_metric(row: dict, path: Path | None = None) -> int | None:

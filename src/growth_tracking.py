@@ -52,9 +52,9 @@ def capture_follower_snapshot(client_factory=None, path: Path | None = None,
         metrics = dict(getattr(response.data, "public_metrics", None) or {})
         row = {
             "timestamp": now.isoformat(),
-            "followers_count": int(metrics.get("followers_count", 0) or 0),
-            "following_count": int(metrics.get("following_count", 0) or 0),
-            "posts_count": int(metrics.get("tweet_count", 0) or 0),
+            "followers_count": int(metrics['followers_count']) if metrics.get('followers_count') is not None else None,
+            "following_count": int(metrics['following_count']) if metrics.get('following_count') is not None else None,
+            "posts_count": int(metrics['tweet_count']) if metrics.get('tweet_count') is not None else None,
             "source": "x_owned_read",
             "estimated": False,
         }
@@ -83,8 +83,8 @@ def follower_status(path: Path | None = None) -> dict:
     except Exception:
         rows = []
     change = None
-    if len(rows) == 2:
-        change = int(rows[0]["followers_count"] or 0) - int(rows[1]["followers_count"] or 0)
+    if len(rows) == 2 and all(row['followers_count'] is not None for row in rows):
+        change = int(rows[0]["followers_count"]) - int(rows[1]["followers_count"])
     return {"latest": rows[0] if rows else None, "previous": rows[1] if len(rows) > 1 else None,
             "follower_change": change, "estimate_note": "time-window estimate; not post-level attribution"}
 

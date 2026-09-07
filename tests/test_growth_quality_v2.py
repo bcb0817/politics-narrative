@@ -28,6 +28,14 @@ from publishing_policy import choose_post_style
 JST = ZoneInfo("Asia/Tokyo")
 
 
+def example_setting(name):
+    # Configuration contract tests read the tracked example, never live .env.
+    for line in (ROOT / '.env.example').read_text(encoding='utf-8').splitlines():
+        if line.startswith(name+'='):
+            return line.partition('=')[2]
+    return None
+
+
 class GrowthQualityV2Tests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
@@ -119,7 +127,7 @@ class GrowthQualityV2Tests(unittest.TestCase):
             self.assertEqual(local_bot._daily_review_time().strftime("%H:%M"), "04:40")
 
     def test_11_daily_review_failure_is_representable_as_local_only(self):
-        self.assertEqual(os.environ.get("OPENAI_MODEL_DAILY_REVIEW_FALLBACK"), "local_only")
+        self.assertEqual(example_setting("OPENAI_MODEL_DAILY_REVIEW_FALLBACK"), "local_only")
 
     def test_12_weekly_review_uses_batch(self):
         with patch.dict(os.environ, {"OPENAI_BATCH_ENABLED": "true",
@@ -228,10 +236,10 @@ class GrowthQualityV2Tests(unittest.TestCase):
         self.assertEqual([clock.strftime("%H:%M") for clock in clocks], ["12:20", "20:20"])
 
     def test_32_quote_auto_post_remains_disabled(self):
-        self.assertEqual(os.environ.get("QUOTE_AUTO_POST_ENABLED"), "false")
+        self.assertEqual(example_setting("QUOTE_AUTO_POST_ENABLED"), "false")
 
     def test_33_reply_auto_post_remains_disabled(self):
-        self.assertEqual(os.environ.get("REPLY_AUTO_POST_ENABLED"), "false")
+        self.assertEqual(example_setting("REPLY_AUTO_POST_ENABLED"), "false")
 
     def test_34_general_accounts_are_excluded_from_quotes(self):
         self.assertNotIn("other", engagement_queue.SAFE_AUTHOR_TYPES)
@@ -277,7 +285,7 @@ class GrowthQualityV2Tests(unittest.TestCase):
         self.assertFalse(exploration)
 
     def test_41_prompt_version_is_v2(self):
-        self.assertEqual(os.environ.get("PROMPT_VERSION"), "x-growth-quality-v2")
+        self.assertEqual(example_setting("PROMPT_VERSION"), "x-growth-quality-v2")
 
     # Data/safety: 42-48
     def test_42_follower_snapshot_table_exists(self):

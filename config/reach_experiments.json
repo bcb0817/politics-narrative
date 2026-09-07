@@ -1,5 +1,5 @@
 {
-  "version": "reach-v1",
+  "version": "reach-v2",
   "enabled": true,
   "start": "2026-09-07T00:00:00+09:00",
   "end": "2026-10-05T00:00:00+09:00",
@@ -8,6 +8,9 @@
   "extra_api_cost_usd": 0,
   "automatic_full_rollout": false,
   "exploration_fraction": 0.2,
+  "learning": {"enabled": true, "minimum_train": 60, "minimum_holdout": 20, "holdout_days": 7, "minimum_per_format": 30, "maximum_missing_rate": 0.35, "minimum_holdout_improvement": 0.05, "maximum_weight_update": 0.2},
+  "diversity": {"topic_penalty": 0.12, "format_penalty": 0.08, "history_posts": 20},
+  "calendar_analytics": {"enabled": true, "account_inventory_complete": false, "daily_max_ids": 20, "minimum_24h_read_reserve": 20},
   "ranking_weights_are_hypotheses": true,
   "ranking_weights": {"reader_impact": 0.35, "freshness": 0.25, "observed_demand": 0.15, "explanation_value": 0.15, "difference": 0.10},
   "formats": {
@@ -20,7 +23,8 @@
   },
   "experiments": [
     {"id":"concrete_opening", "hypothesis":"対象と変化を冒頭に置くと読み始めやすい", "eligibility":"独立した適格ニュース", "factor":"冒頭のみ", "control":"既存の冒頭", "treatment":"冒頭の一文に対象と確認済みの変化を置く。抽象的な批判から始めない。"},
-    {"id":"reader_impact", "hypothesis":"政策の生活への影響を具体化すると説明価値が伝わる", "eligibility":"独立した適格ニュース", "factor":"根拠の説明順序のみ", "control":"既存の説明順", "treatment":"根拠にある範囲で生活への影響と適用条件を先に説明する。資料にない影響や対象者を推測しない。"}
+    {"id":"reader_impact", "hypothesis":"政策の生活への影響を具体化すると説明価値が伝わる", "eligibility":"独立した適格ニュース", "factor":"根拠の説明順序のみ", "control":"既存の説明順", "treatment":"根拠にある範囲で生活への影響と適用条件を先に説明する。資料にない影響や対象者を推測しない。"},
+    {"id":"format_selection", "hypothesis":"テーマに適合する説明形式を選ぶと読まれる説明が増える", "eligibility":"形式の適合条件を満たす独立した適格ニュース", "factor":"説明形式のみ", "control":"既存の形式選定", "treatment":"指定の説明形式で構成する。根拠が不足する比較・意外性・評価を作らない。"}
   ],
   "assignment": "topic hash selects one experiment; seeded alternating arms within genre and 6-hour time band; one persistent assignment per source URL",
   "primary_metric": "impressions observed at age 24 to 26 hours",

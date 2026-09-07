@@ -311,7 +311,8 @@ def reserve(provider: str, operation: str, model_or_endpoint: str, maximum_cost:
     provider_reserve = cfg["provider_reserves"].get(provider, 0.0)
     total_limit = cfg["effective_total_limit"]
     total_reserve = cfg["total_reserve"]
-    metadata = {**(metadata or {}), 'durable_reservation': True}
+    from reach_storage import cost_metadata
+    metadata = {**cost_metadata(), **(metadata or {}), 'durable_reservation': True}
     is_breaking = bool(metadata.get("is_breaking"))
     forecast_result = forecast(path, now)
     current_stage = forecast_result["current_warning_stage"]
