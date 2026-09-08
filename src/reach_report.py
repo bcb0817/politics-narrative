@@ -58,9 +58,13 @@ def report(path, end, days=28):
         if conn.execute("SELECT 1 FROM sqlite_master WHERE name='reach_assignments'").fetchone():
             lookup={r['tweet_id']:r for r in rows}
             groups=defaultdict(list)
-            for r in conn.execute('SELECT experiment,arm,tweet_id FROM reach_assignments'):
-                if r['tweet_id'] in lookup: groups[(r['experiment'],r['arm'])].append(lookup[r['tweet_id']])
-            experiments=[{'experiment':k[0],'arm':k[1],**summarize(v)} for k,v in groups.items()]
+            for r in conn.execute('SELECT experiment,arm,tweet_id,config_json FROM reach_assignments'):
+                version = json.loads(r['config_json'] or '{}').get('version', 'unknown')
+                if r['tweet_id'] in lookup:
+                    post = lookup[r['tweet_id']]
+                    groups[(r['experiment'],r['arm'],version,post.get('prompt_version'))].append(post)
+            experiments=[{'experiment':k[0],'arm':k[1],'policy_version':k[2],
+                          'generation_version':k[3],**summarize(v)} for k,v in groups.items()]
         followers=[dict(r) for r in conn.execute('SELECT captured_at,followers_count FROM follower_snapshots WHERE captured_at>=? AND captured_at<? ORDER BY captured_at',(start.isoformat(),end.isoformat()))]
         from reach_features import enrich
         from reach_audit import expense_report, incident_report

@@ -1,0 +1,26 @@
+{
+  "enabled": true,
+  "version": "topical-astra-v1",
+  "writer_model": "gpt-6-astra",
+  "max_age_hours": 24,
+  "max_articles_per_run": 1,
+  "max_output_tokens": 1600,
+  "max_source_chars": 3600,
+  "quality_minimum": 7,
+  "link_every_n_posts": 10,
+  "minimum_interval_minutes": 90,
+  "daily_post_ceiling": 8,
+  "ranking_weights_are_hypotheses": true,
+  "ranking_weights": {"reader_impact": 0.35, "freshness": 0.30, "observed_demand": 0.10, "explanation_value": 0.15, "difference": 0.10},
+  "categories": {
+    "暮らし・制度": ["料金", "価格", "値上げ", "値下げ", "給付", "申請", "制度", "税", "保険", "学校", "子育て", "交通", "鉄道", "食品"],
+    "経済・仕事": ["賃金", "給与", "雇用", "企業", "経済", "金利", "物価", "働き", "決算", "産業"],
+    "技術・科学": ["技術", "科学", "研究", "AI", "宇宙", "衛星", "電池", "半導体", "通信", "サービス"],
+    "社会・国際": ["政府", "国会", "政策", "首相", "外交", "選挙", "国際", "条約", "環境", "気候", "エネルギー"]
+  },
+  "trusted_hosts": ["news.web.nhk", "www3.nhk.or.jp", "www.nhk.or.jp", "news.yahoo.co.jp", "www.cao.go.jp", "www.kantei.go.jp", "www.mofa.go.jp"],
+  "additional_feeds": [
+    {"name": "NHK社会", "url": "https://www.nhk.or.jp/rss/news/cat1.xml", "source_type": "trusted_media"},
+    {"name": "NHK科学文化", "url": "https://www.nhk.or.jp/rss/news/cat3.xml", "source_type": "trusted_media"}
+  ]
+}

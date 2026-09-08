@@ -428,7 +428,9 @@ def fetch_all_items(include_x=True):
     seen_links = set()
     seen_titles = set()
 
-    for feed in RSS_FEEDS:
+    from topical_editor import enabled, settings
+    feeds = RSS_FEEDS + (settings()["additional_feeds"] if enabled() else [])
+    for feed in feeds:
         try:
             req = urllib.request.Request(
                 feed["url"],
@@ -485,8 +487,9 @@ def fetch_all_items(include_x=True):
                 xai_topics = fetch_xai_radar(
                     candidates=all_items, notify_discord=True)
                 all_items = apply_verified_attention(all_items, xai_topics)
-                all_items.extend(build_integrated_research_candidates(
-                    all_items, xai_topics))
+                if not enabled():
+                    all_items.extend(build_integrated_research_candidates(
+                        all_items, xai_topics))
             elif provider == "native_x" and _env_bool("X_NATIVE_SEARCH_ENABLED", "false") \
                     and _env_bool("X_SEARCH_ENABLED"):
                 all_items = match_topics_to_rss(all_items, fetch_x_search_topics(all_items))

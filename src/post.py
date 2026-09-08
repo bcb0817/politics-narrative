@@ -39,6 +39,7 @@ from email.utils import parsedate_to_datetime
 from zoneinfo import ZoneInfo
 
 import requests
+import topical_editor
 
 from publishing_policy import (
     CRITIQUE_AXES,
@@ -888,6 +889,9 @@ def prefilter_news(items: list, top_n: int = None, allow_low_quality: bool = Fal
     - EXCLUDED_TOPICS に該当するものは大きく減点（実質除外）
     - top_n は環境変数 PREFILTER_TOP_N で変更可能（未指定なら1）
     """
+    if topical_editor.enabled():
+        return topical_editor.select(items, load_post_history(), now=get_jst_now()[0],
+                                     blocked=topical_editor.blocked_keys())
     if top_n is None:
         try:
             top_n = int(os.environ.get("PREFILTER_TOP_N", "1"))
@@ -1497,6 +1501,8 @@ def _candidate_cache_path(news_item: dict) -> Path:
 
 
 def _load_cached_candidates(news_item: dict) -> list[dict]:
+    if topical_editor.enabled():
+        return []  # Only the versioned Astra cache is admissible.
     if not _env_bool("POLITICS_CANDIDATE_CACHE_ENABLED", "true"):
         return []
     path = _candidate_cache_path(news_item)
@@ -1518,6 +1524,8 @@ def _load_cached_candidates(news_item: dict) -> list[dict]:
 
 
 def _save_cached_candidates(news_item: dict, candidates: list[dict]) -> None:
+    if topical_editor.enabled():
+        return
     if (
         not candidates
         or not _env_bool("POLITICS_CANDIDATE_CACHE_ENABLED", "true")
@@ -2056,11 +2064,22 @@ def generate_candidates(
 ) -> list:
     from reach_policy import assign
     item = dict(news_item)
-    assignment = assign(item)
+    assignment = assign(item, config=topical_editor.experiment_settings()) if topical_editor.enabled() else assign(item)
     item['reach_assignment'] = assignment
     from reach_storage import cost_scope, source_key
     with cost_scope(source_key=source_key(item), purpose='candidate_generation'):
-        result = _generate_candidates_existing(item, regeneration_attempt, retries_used)
+        if topical_editor.enabled():
+            try:
+                result = topical_editor.generate(item, load_post_history(), now=get_jst_now()[0])
+            except Exception as exc:
+                global LAST_GENERATION_FAILURE_REASON
+                reason = str(exc)
+                safe_reason = reason if re.fullmatch(r"[a-z_]{1,90}", reason) else type(exc).__name__
+                LAST_GENERATION_FAILURE_REASON = safe_reason
+                log("[WARN] Topical generation held: " + safe_reason)
+                return []
+        else:
+            result = _generate_candidates_existing(item, regeneration_attempt, retries_used)
     for candidate in result:
         candidate['reach_assignment'] = assignment
         from reach_features import evidence_features
@@ -2069,7 +2088,7 @@ def generate_candidates(
             'source_key':source_key(item), 'news_published_at':item.get('pub_date'),
             'rank_features':item.get('reach_priority',{}).get('features') or evidence_features(item),
             'model_version':item.get('reach_priority',{}).get('model_version','initial'),
-            'policy_version':settings()['version'],
+            'policy_version':topical_editor.settings()['version'] if topical_editor.enabled() else settings()['version'],
         }
     return result
 
@@ -2176,6 +2195,11 @@ def effective_score(c: dict, history: list) -> float:
     反応の取りやすさ（引用・保存・初速）を重く見た加重平均を 0〜10 に正規化し、
     BANリスク・未検証数字・ジャンル/型の連続・低信頼ソースで減点する。
     """
+    if topical_editor.enabled():
+        if c.get("openai_model") != topical_editor.MODEL or c.get("prompt_version") != topical_editor.settings()["version"]:
+            return -10.0
+        score = topical_editor.review_score(c.get("topical_review") or {})
+        return score if score is not None else -10.0
     scores = c.get("scores") or {}
     ttype = c.get("post_type", "")
     ban = int(_num(scores, "ban_risk"))
@@ -2326,13 +2350,13 @@ def _x_client():
     )
 
 
-def post_to_x(text: str, reply_texts: list = None, *, delivery_key=None, path=None):
+def post_to_x(text: str, reply_texts: list = None, *, delivery_key=None, path=None, link_context=None):
     """Xへテキスト投稿する。画像アップロード経路は存在しない。
 
     戻り値: (親tweet_id, [各投稿の文字数])。
     reply_texts があれば、親投稿への返信チェーンとして投稿する。
     """
-    if re.search(r"(?i)(?:https?://|www\.)", text or ""):
+    if not topical_editor.public_text_allowed(text, link_context):
         raise ValueError("url_detected_in_post")
     if reply_texts:
         raise ValueError("automatic_replies_disabled")
@@ -2352,6 +2376,12 @@ def post_to_x(text: str, reply_texts: list = None, *, delivery_key=None, path=No
 # ---------------------------------------------------------------------------
 
 def main():
+    if topical_editor.enabled():
+        # Legacy optional generators must never replace the requested writer.
+        os.environ["VERIFIED_LOCAL_FALLBACK_ENABLED"] = "false"
+        if _env_bool("FORCE_POST"):
+            log("[INFO] Topical mode does not permit forced posting")
+            return
     mode = sys.argv[1] if len(sys.argv) > 1 else "diagram"
     if mode in ("link", "test", "normal"):
         # link / test は完全廃止。normal も今回の運用では使わない。
@@ -2469,7 +2499,7 @@ def main():
         )
     stagnation_fallback = LOW_QUALITY_FALLBACK_ENABLED and stagnation_fallback_active(
         history, now_jst, LOW_QUALITY_FALLBACK_HOURS)
-    if os.environ.get('REACH_POLICY_ENABLED','true').lower() != 'false':
+    if topical_editor.enabled() or os.environ.get('REACH_POLICY_ENABLED','true').lower() != 'false':
         stagnation_fallback = False
     log(
         f"[INFO] Low-quality fallback after hours: {LOW_QUALITY_FALLBACK_HOURS:g} "
@@ -2533,7 +2563,7 @@ def main():
         int(value) for value in os.environ.get("DIGEST_HOURS", "6,18").split(",")
         if value.strip().isdigit() and 0 <= int(value) <= 23
     }
-    digest_window = now_jst.hour in digest_hours and slot_dt.minute == 0
+    digest_window = not topical_editor.enabled() and now_jst.hour in digest_hours and slot_dt.minute == 0
     remediation_top_n = max(
         1, int(daily_goal_policy.get("prefilter_top_n", 1) or 1))
     target_news = prefilter_news(
@@ -2555,6 +2585,9 @@ def main():
     log(f"[INFO] News after prefilter: {len(target_news)}")
 
     if not target_news:
+        if topical_editor.enabled():
+            finalize_skip("topical_no_eligible_source", mark_attempted=True)
+            return
         evergreen = _evergreen_candidate(
             history, now_jst,
             max_per_day=daily_goal_policy.get(
@@ -2570,7 +2603,9 @@ def main():
 
     # ニュース監視後、OpenAI生成前に日次上限と投稿間隔を判定する。
     policy_skip = pre_generation_skip_reason(
-        history, now_jst, MAX_DAILY_POSTS, MIN_POST_INTERVAL_MINUTES
+        history, now_jst,
+        min(MAX_DAILY_POSTS, topical_editor.settings()["daily_post_ceiling"]) if topical_editor.enabled() else MAX_DAILY_POSTS,
+        max(MIN_POST_INTERVAL_MINUTES, topical_editor.settings()["minimum_interval_minutes"]) if topical_editor.enabled() else MIN_POST_INTERVAL_MINUTES
     )
     if policy_skip:
         finalize_skip(policy_skip, mark_attempted=True, extra={
@@ -2652,7 +2687,11 @@ def main():
         ties = sum(value == best_hits for value in genre_hits.values())
         enriched["genre"] = best_genre if best_hits else "未分類"
         enriched["classification_confidence"] = 0.9 if best_hits >= 2 and ties == 1 else (0.7 if best_hits == 1 and ties == 1 else 0.4)
-        if _env_bool("PHASE2_ENABLED", "true") and enriched["classification_confidence"] < 0.65:
+        if topical_editor.enabled():
+            enriched.update(genre=item["genre"], post_type="topical_explainer",
+                            hook_type="concrete_change", critique_axis="",
+                            review_strategy_alignment_bonus=0.0)
+        if not topical_editor.enabled() and _env_bool("PHASE2_ENABLED", "true") and enriched["classification_confidence"] < 0.65:
             enriched = _classification_or_local_fallback(enriched)
             if enriched.get("classification_mode") == "local_limit_fallback":
                 log("[INFO] Classifier unavailable; using deterministic local classification")
@@ -2670,7 +2709,7 @@ def main():
         ):
             blocked_for_type_quota = True
             continue
-        if not stagnation_fallback and post_type_quota_reached(
+        if not topical_editor.enabled() and not stagnation_fallback and post_type_quota_reached(
             enriched["post_type"], history, now_jst
         ):
             blocked_for_type_quota = True
@@ -2842,7 +2881,9 @@ def main():
         return
 
     # --- 品質スコアゲート（QUALITY_GATE_ENABLED=true のときだけ有効） ---
-    if not QUALITY_GATE_ENABLED:
+    if topical_editor.enabled():
+        can_post = best_score >= max(MIN_POST_SCORE, topical_editor.settings()["quality_minimum"])
+    elif not QUALITY_GATE_ENABLED:
         log("[INFO] QUALITY_GATE_ENABLED=false -> 品質スコア判定をスキップ（実績学習運用）")
         can_post = True
     else:
@@ -2880,6 +2921,9 @@ def main():
     reply_texts = build_reply_texts(best)
     # Xの上限を超える親投稿は安全長に丸める（文の途中で切らないよう改行境界を優先）
     if _x_len(tweet_text) > X_MAX_CHARS:
+        if topical_editor.enabled():
+            finalize_skip("topical_length", mark_attempted=True)
+            return
         cut = tweet_text[:X_SAFE_CHARS]
         nl = cut.rfind("\n")
         tweet_text = (cut[:nl] if nl >= X_SAFE_CHARS // 2 else cut).rstrip()
@@ -2889,11 +2933,11 @@ def main():
     log(f"[INFO] use_thread: {str(use_thread).lower()}")
     log(f"[INFO] thread_reply_count: {len(reply_texts)}")
     log(f"[INFO] each_post_length: {each_len}")
-    if re.search(r"(?i)(?:https?://|www\.)", tweet_text):
+    if not topical_editor.public_text_allowed(tweet_text, best):
         finalize_skip("url_detected_in_post", mark_attempted=True, extra={"title": best.get("title", "")})
         return
 
-    if _env_bool("PHASE2_ENABLED", "true"):
+    if not topical_editor.enabled() and _env_bool("PHASE2_ENABLED", "true"):
         previews = save_extension_previews(best, ROOT_DIR)
         if previews:
             log(f"[INFO] Preview extensions saved: {len(previews)} (auto-post disabled)")
@@ -2929,7 +2973,13 @@ def main():
                 f"{type(exc).__name__}")
     log("[INFO] Decision: post")
     try:
-        tweet_id, sent_lengths = post_to_x(tweet_text, reply_texts, delivery_key="scheduled:" + slot_key)
+        if topical_editor.enabled():
+            if topical_editor.weighted_length(tweet_text) > 280:
+                raise ValueError("topical_length")
+            tweet_id, sent_lengths = post_to_x(tweet_text, reply_texts,
+                delivery_key="scheduled:" + slot_key, link_context=best)
+        else:
+            tweet_id, sent_lengths = post_to_x(tweet_text, reply_texts, delivery_key="scheduled:" + slot_key)
         log(f"[INFO] Posted tweet id: {tweet_id}")
         log(f"[INFO] each_post_length (sent): {sent_lengths}")
     except Exception as e:
@@ -3028,6 +3078,10 @@ def main():
         ] or [best.get("topic_key", "")]
         post_record["primary_topic_key"] = best.get("topic_key", "")
     post_record["posted_hour_jst"] = now_jst.hour
+    if topical_editor.enabled():
+        post_record["topical_review"] = best.get("topical_review")
+        post_record["link_approved"] = best.get("link_approved")
+        post_record["source_snapshot_sha256"] = best.get("source_snapshot_sha256")
     save_post_record(post_record)
     post_record['reach_assignment'] = best.get('reach_assignment')
     post_record['reach_feature_context'] = best.get('reach_feature_context')

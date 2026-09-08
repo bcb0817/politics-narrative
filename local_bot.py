@@ -326,6 +326,12 @@ def next_auxiliary_event(now: datetime) -> tuple[datetime, str]:
 
 def _run_auxiliary_event(event_name: str, scheduled_at: datetime) -> None:
     """Run a local/owned-read maintenance event at most once per slot."""
+    if str(SRC_DIR) not in sys.path:
+        sys.path.insert(0, str(SRC_DIR))
+    from topical_editor import enabled as topical_enabled
+    if event_name == "x_research_analysis" and topical_enabled():
+        log("[INFO] Legacy research publisher disabled by topical Astra policy")
+        return
     state_path = resolve_dir("STATE_DIR", "data") / "aux_schedule_state.json"
     try:
         state = json.loads(state_path.read_text(encoding="utf-8"))

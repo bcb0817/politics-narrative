@@ -25,9 +25,10 @@ def main():
     with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ,{
         'STATE_DIR':tmp,'LOG_DIR':tmp,'POST_ENABLED':'false',
         'XAI_ENABLED':'false','REACH_POLICY_ENABLED':'false',
+        'TOPICAL_EDITOR_ENABLED':'false',
         'POLITICS_FETCH_ARTICLE_BODY':'false','DISABLE_TIME_API':'true',
     },clear=True), patch.object(Path,'read_text',guarded_read), patch.object(socket.socket,'connect',guarded_connect):
-        modules=sys.argv[1:] or ['tests.test_reach_foundation','tests.test_reach_completion','tests.test_x_private_metrics',
+        modules=sys.argv[1:] or ['tests.test_topical_editor','tests.test_reach_foundation','tests.test_reach_completion','tests.test_x_private_metrics',
             'tests.test_monthly_budget_61','tests.test_article_content',
             'tests.test_politics_post_integration','tests.test_crosspost',
             'tests.test_disaster_updates','tests.test_startup_xai_ledger_v3',
