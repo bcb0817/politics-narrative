@@ -127,6 +127,17 @@ def ensure_dirs() -> dict:
 def log(msg: str) -> None:
     line = f"{datetime.now(JST):%Y-%m-%d %H:%M:%S} {msg}"
     print(line, flush=True)
+    _append_log_line(line)
+
+
+def _append_log_line(line: str) -> None:
+    try:
+        log_dir = resolve_dir("LOG_DIR", "logs")
+        log_dir.mkdir(parents=True, exist_ok=True)
+        with open(log_dir / "bot.log", "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
 
 
 def atomic_write_text(path: Path, text: str) -> None:
@@ -142,15 +153,6 @@ def atomic_write_text(path: Path, text: str) -> None:
         # fallback instead of weakening directory ACLs.
         fallback = path.with_name(f"{path.stem}.local{path.suffix}")
         os.replace(temporary, fallback)
-    try:
-        log_dir = resolve_dir("LOG_DIR", "logs")
-        log_dir.mkdir(parents=True, exist_ok=True)
-        with open(log_dir / "bot.log", "a", encoding="utf-8") as f:
-            f.write(line + "\n")
-    except Exception:
-        pass
-
-
 def env_flag(name: str, default: str = "false") -> bool:
     return os.environ.get(name, default).strip().lower() in ("true", "1", "yes")
 
