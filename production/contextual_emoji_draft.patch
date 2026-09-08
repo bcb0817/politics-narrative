@@ -1,0 +1,16 @@
+--- a/src/post.py
++++ b/src/post.py
+@@ -13,12 +13,7 @@
+     serious = _is_serious_news(news_item)
+     if serious:
+         text = _EMOJI_PATTERN.sub("", text).strip()
+-    elif (
+-        os.environ.get("EMOJI_REQUIRED", "true").strip().lower()
+-        in {"1", "true", "yes", "on"}
+-        and not _EMOJI_PATTERN.search(text)
+-    ):
+-        text = "📌 " + text
++    text = re.sub(r"^\s*📌[\ufe0f\s]*", "", text)
+     if "\n\n" not in text:
+         lines = [line.strip() for line in text.splitlines() if line.strip()]
+         if len(lines) >= 2:

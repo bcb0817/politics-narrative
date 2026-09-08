@@ -1468,13 +1468,8 @@ def _candidate_quality_violations(candidate: dict, news_item: dict) -> list[str]
     if len(emojis) > max(0, _env_int("EMOJI_MAX_PER_POST", 1)):
         violations.append("too_many_emojis")
     serious = _is_serious_news(news_item)
-    if (
-        not serious
-        and os.environ.get("EMOJI_REQUIRED", "true").strip().lower()
-        in {"1", "true", "yes", "on"}
-        and not emojis
-    ):
-        violations.append("emoji_required")
+    if text.lstrip().startswith("📌"):
+        violations.append("fixed_pin_opening")
     if serious and emojis:
         violations.append("emoji_on_serious_news")
     if "\n\n" not in text:
@@ -1738,17 +1733,6 @@ def _generate_candidates_legacy(news_item: dict, regeneration_attempt: int = 0, 
                 c["tweet_text"] = "\n\n".join(nonempty_lines)
         if not c["tweet_text"]:
             continue
-        if (
-            not _is_serious_news(news_item)
-            and os.environ.get("EMOJI_REQUIRED", "true").strip().lower()
-            in {"1", "true", "yes", "on"}
-            and not _EMOJI_PATTERN.search(c["tweet_text"])
-        ):
-            c["tweet_text"] = "📌 " + c["tweet_text"]
-            if lines:
-                lines[0] = "📌 " + str(lines[0])
-                c["tweet_lines"] = lines
-            c["final_text"] = c["tweet_text"]
         violations = _candidate_quality_violations(c, news_item)
         social_review = evaluate_social_anger_candidate(
             news_item, c["tweet_text"], platform="x", persist=True)
