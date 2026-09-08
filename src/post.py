@@ -2359,6 +2359,18 @@ def post_to_x(text: str, reply_texts: list = None, *, delivery_key=None, path=No
 # 8. メイン
 # ---------------------------------------------------------------------------
 
+def _daily_goal_policy(now_jst):
+    """Return a legacy remediation policy only outside the Astra route."""
+    try:
+        from daily_post_goal import load_active_remediation
+        policy = load_active_remediation(STATE_DIR / "daily_post_goal", now=now_jst)
+    except Exception:
+        return {}
+    # The retired 20-post remediation policy must never influence Astra
+    # selection. Astra has its own 8-post ceiling and 90-minute interval.
+    return {} if topical_editor.enabled() else policy
+
+
 def main():
     if topical_editor.enabled():
         # Legacy optional generators must never replace the requested writer.
@@ -2469,12 +2481,7 @@ def main():
 
     # --- 素材収集 ---
     history = load_post_history()
-    try:
-        from daily_post_goal import load_active_remediation
-        daily_goal_policy = load_active_remediation(
-            STATE_DIR / "daily_post_goal", now=now_jst)
-    except Exception:
-        daily_goal_policy = {}
+    daily_goal_policy = _daily_goal_policy(now_jst)
     if daily_goal_policy:
         log(
             "[INFO] Daily 20-post remediation active: "
