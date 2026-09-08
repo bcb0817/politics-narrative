@@ -59,6 +59,7 @@ def experiment_settings():
     cfg = reach_settings()
     cfg.update(version=settings()["version"], start="2026-09-08T00:00:00+09:00", end="2026-10-06T00:00:00+09:00")
     cfg["learning"]["enabled"] = False  # Do not import the old political cohort's model.
+    cfg["generation_version"] = settings()["version"]
     cfg["experiments"] = [e for e in cfg["experiments"] if e["id"] in {"reader_impact", "format_selection"}]
     return cfg
 
@@ -69,6 +70,9 @@ def select(items, history, *, now, cfg=None, blocked=None):
     from reach_features import evidence_features
     cfg = cfg or settings()
     urls = {h.get("source_url") for h in history}
+    # All publication history remains a duplicate barrier, not editorial training.
+    editorial_history = [h for h in history if h.get("prompt_version") == cfg["version"]
+                         and h.get("openai_model") == MODEL]
     titles = set()
     result = []
     for original in items:
@@ -94,11 +98,11 @@ def select(items, history, *, now, cfg=None, blocked=None):
                     freshness_score=10 * (1 - age / cfg["max_age_hours"]),
                     post_type="topical_explainer", hook_type="concrete_change", critique_axis="",
                     source_reliability_score=9 if "nhk" in urlsplit(source).hostname else 7.5)
-        features = evidence_features(item, history)
+        features = evidence_features(item, editorial_history)
         weights = cfg["ranking_weights"]
         observed = {k: v for k, v in features.items() if isinstance(v, (int, float)) and math.isfinite(v)}
         score = sum(weights[k] * v for k, v in observed.items()) / sum(weights[k] for k in observed)
-        score -= .5 * sum(h.get("genre") == category for h in history[-5:])
+        score -= .5 * sum(h.get("genre") == category for h in editorial_history[-5:])
         item["reach_priority"] = {"features": features, "score": score, "model_version": cfg["version"]}
         item["final_news_score"] = score
         result.append(item)

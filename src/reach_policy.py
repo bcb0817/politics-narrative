@@ -52,10 +52,18 @@ def assign(item, *, now=None, path=None, config=None):
                 return None
         row = conn.execute('SELECT * FROM reach_assignments WHERE source_key=?',(key,)).fetchone()
         if row:
-            return dict(row)
-        if conn.execute('SELECT COUNT(*) FROM reach_assignments WHERE julianday(assigned_at)>=julianday(?)',(cfg['start'],)).fetchone()[0] >= cfg['max_assignments']:
+            old_cfg = json.loads(row['config_json'] or '{}')
+            if not cfg.get('generation_version') or old_cfg.get('generation_version') == cfg['generation_version']:
+                return dict(row)
+            # Retain historical publication assignments; never recycle them.
+            if row['tweet_id']:
+                return None
+            conn.execute('DELETE FROM reach_assignments WHERE source_key=?', (key,))
+        if conn.execute('SELECT COUNT(*) FROM reach_assignments WHERE julianday(assigned_at)>=julianday(?) AND (? IS NULL OR json_extract(config_json,\'$.generation_version\')=?)',
+                        (cfg['start'],cfg.get('generation_version'),cfg.get('generation_version'))).fetchone()[0] >= cfg['max_assignments']:
             return None
-        count = conn.execute('SELECT COUNT(*) FROM reach_assignments WHERE experiment=? AND stratum=?',(exp['id'],stratum)).fetchone()[0]
+        count = conn.execute('SELECT COUNT(*) FROM reach_assignments WHERE experiment=? AND stratum=? AND (? IS NULL OR json_extract(config_json,\'$.generation_version\')=?)',
+                             (exp['id'],stratum,cfg.get('generation_version'),cfg.get('generation_version'))).fetchone()[0]
         seed = int(hashlib.sha256((exp['id']+stratum).encode()).hexdigest()[:8],16)
         arm = ('control','treatment')[(count+seed)%2]
         decision = {'format': None, 'exploration': False, 'probability': None,
@@ -70,7 +78,8 @@ def assign(item, *, now=None, path=None, config=None):
             explore = draw < fraction
             weights = {n: (model or {}).get('format_weights',{}).get(n,1) for n in names}
             published_formats = []
-            for feature in conn.execute('SELECT features_json FROM reach_features ORDER BY recorded_at DESC LIMIT ?', (cfg.get('diversity',{}).get('history_posts',20),)):
+            for feature in conn.execute('SELECT features_json FROM reach_features WHERE (? IS NULL OR json_extract(features_json,\'$.generation_version\')=?) ORDER BY recorded_at DESC LIMIT ?',
+                                        (cfg.get('generation_version'),cfg.get('generation_version'),cfg.get('diversity',{}).get('history_posts',20))):
                 published_formats.append(json.loads(feature[0]).get('format'))
             for n in names:
                 weights[n] /= 1 + cfg.get('diversity',{}).get('format_penalty',.08)*published_formats.count(n)
