@@ -1300,8 +1300,9 @@ def cmd_report() -> int:
     from integrated_research import (  # noqa: E402
         daily_review_summary as integrated_daily_review_summary,
     )
+    from metrics_db import db_path as review_summary_db_path
     review_payload["integrated_research"] = (
-        integrated_daily_review_summary(days=1, path=review_db)
+        integrated_daily_review_summary(days=1, path=review_summary_db_path())
     )
     from review_strategy import (  # noqa: E402
         activate_strategy,
