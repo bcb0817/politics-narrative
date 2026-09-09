@@ -31,8 +31,10 @@ class ReviewStrategyTests(unittest.TestCase):
         self.payload = {
             "reviewed_count": 4,
             "all_posts": [
-                {"tweet_id": "1"}, {"tweet_id": "2"},
-                {"tweet_id": "3"}, {"tweet_id": "4"},
+                {"tweet_id": "1", "model": "gpt-6-astra", "prompt_version": "topical-astra-v1"},
+                {"tweet_id": "2", "model": "gpt-6-astra", "prompt_version": "topical-astra-v1"},
+                {"tweet_id": "3", "model": "gpt-6-astra", "prompt_version": "topical-astra-v1"},
+                {"tweet_id": "4", "model": "gpt-6-astra", "prompt_version": "topical-astra-v1"},
             ],
         }
         self.analysis = {
@@ -79,7 +81,7 @@ class ReviewStrategyTests(unittest.TestCase):
             self.analysis, self.payload, root_dir=self.root, now=self.now)
 
     def test_01_activation_requires_minimum_samples(self):
-        payload = {**self.payload, "reviewed_count": 2}
+        payload = {**self.payload, "all_posts": self.payload["all_posts"][:2]}
         result = review_strategy.activate_strategy(
             self.analysis, payload, root_dir=self.root, now=self.now)
         self.assertFalse(result["activated"])
@@ -98,6 +100,23 @@ class ReviewStrategyTests(unittest.TestCase):
         self.assertTrue(result["activated"])
         self.assertTrue(
             (self.root / review_strategy.STRATEGY_FILE).exists())
+
+    def test_03b_legacy_rows_cannot_activate_editorial_strategy(self):
+        payload = json.loads(json.dumps(self.payload))
+        payload["all_posts"][0]["model"] = "gpt-5.4-mini"
+        result = review_strategy.activate_strategy(
+            self.analysis, payload, root_dir=self.root, now=self.now)
+        self.assertFalse(result["activated"])
+        self.assertEqual(result["reason"], "ineligible_editorial_cohort")
+
+    def test_03c_strategy_without_astra_cohort_is_not_loaded(self):
+        result = self.activate()
+        strategy_path = self.root / review_strategy.STRATEGY_FILE
+        saved = result["policy"]
+        saved.pop("editorial_cohort")
+        strategy_path.write_text(json.dumps(saved), encoding="utf-8")
+        self.assertEqual(
+            review_strategy.load_active_strategy(self.root, now=self.now), {})
 
     def test_04_unknown_enums_are_removed(self):
         policy = self.activate()["policy"]

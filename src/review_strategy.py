@@ -42,6 +42,8 @@ STRATEGY_MARKDOWN = (
     Path("knowledge") / "viral_patterns" / "chatgpt_strategy.md"
 )
 STRATEGY_HISTORY = Path("data") / "chatgpt_strategy_history.jsonl"
+ASTRA_MODEL = "gpt-6-astra"
+ASTRA_PROMPT_VERSION = "topical-astra-v1"
 
 
 def _bool(name: str, default: bool) -> bool:
@@ -261,6 +263,22 @@ def _safe_evidence(strategy: dict, valid_tweet_ids: set[str]) -> list[dict]:
     return output
 
 
+def _is_astra_editorial_row(row: dict) -> bool:
+    """Only the post-cutover Astra cohort may supply editorial evidence."""
+    return (
+        str(row.get("model") or row.get("openai_model") or "") == ASTRA_MODEL
+        and str(row.get("prompt_version") or "") == ASTRA_PROMPT_VERSION
+    )
+
+
+def _has_astra_editorial_cohort(strategy: dict) -> bool:
+    cohort = strategy.get("editorial_cohort") or {}
+    return (
+        cohort.get("model") == ASTRA_MODEL
+        and cohort.get("prompt_version") == ASTRA_PROMPT_VERSION
+    )
+
+
 def activate_strategy(
     analysis: dict | None,
     review_payload: dict,
@@ -272,7 +290,9 @@ def activate_strategy(
     now = now or datetime.now(JST)
     enabled = _bool("CHATGPT_DAILY_STRATEGY_ENABLED", True)
     auto_apply = _bool("CHATGPT_DAILY_STRATEGY_AUTO_APPLY", True)
-    reviewed_count = int(review_payload.get("reviewed_count", 0) or 0)
+    all_posts = review_payload.get("all_posts", [])
+    eligible_posts = [row for row in all_posts if _is_astra_editorial_row(row)]
+    reviewed_count = len(eligible_posts)
     minimum_samples = _int(
         "CHATGPT_DAILY_STRATEGY_MIN_POSTS", 3, 2, 20)
     result = {
@@ -284,6 +304,9 @@ def activate_strategy(
     }
     if not enabled or not auto_apply:
         result["reason"] = "strategy_disabled"
+        return result
+    if len(eligible_posts) != len(all_posts):
+        result["reason"] = "ineligible_editorial_cohort"
         return result
     if reviewed_count < minimum_samples:
         result["reason"] = "insufficient_review_samples"
@@ -310,7 +333,7 @@ def activate_strategy(
         result["reason"] = "strategy_missing"
         return result
     valid_ids = {
-        str(row.get("tweet_id")) for row in review_payload.get("all_posts", [])
+        str(row.get("tweet_id")) for row in eligible_posts
         if row.get("tweet_id")
     }
     evidence = _safe_evidence(proposed, valid_ids)
@@ -363,6 +386,10 @@ def activate_strategy(
         "generated_at": generated_at,
         "expires_at": (now + timedelta(hours=expires_hours)).isoformat(),
         "reviewed_count": reviewed_count,
+        "editorial_cohort": {
+            "model": ASTRA_MODEL,
+            "prompt_version": ASTRA_PROMPT_VERSION,
+        },
         "objective": "maximize_impressions_with_safety_and_trust_unchanged",
         "summary": str(proposed.get("summary") or "")[:500],
         "evidence": evidence,
@@ -416,6 +443,8 @@ def load_active_strategy(
         data = json.loads(
             (root_dir / STRATEGY_FILE).read_text(encoding="utf-8"))
         if data.get("active", True) is not True:
+            return {}
+        if not _has_astra_editorial_cohort(data):
             return {}
         expires = datetime.fromisoformat(str(data.get("expires_at") or ""))
         if expires.tzinfo is None:
