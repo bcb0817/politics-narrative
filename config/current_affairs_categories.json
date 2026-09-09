@@ -1,0 +1,64 @@
+{
+  "bot_definition": "政治・経済・重大事件・AIニュースを、制度・お金・責任・安全の視点から整理する時事解説AI",
+  "categories": {
+    "politics_policy": {
+      "display_name": "政治",
+      "subcategories": ["national_politics", "legislation", "tax", "social_security", "public_finance", "elections", "local_government", "judiciary", "immigration_policy", "energy_policy"],
+      "quality_threshold": 7.0
+    },
+    "economy_business": {
+      "display_name": "経済・企業",
+      "subcategories": ["macro_economy", "corporate_earnings", "corporate_failure", "bankruptcy", "merger_acquisition", "employment", "wages_prices", "housing", "financial_markets", "corporate_strategy"],
+      "quality_threshold": 7.0
+    },
+    "major_incidents": {
+      "display_name": "重大事案",
+      "subcategories": ["major_crime", "transportation_accident", "industrial_accident", "large_fire", "building_collapse", "financial_system_incident", "public_safety_failure"],
+      "quality_threshold": 0,
+      "uses_existing_critical_pipeline": true
+    },
+    "technology_ai": {
+      "display_name": "AI・技術",
+      "subcategories": ["generative_ai", "robotics", "automation", "semiconductors", "digital_government", "autonomous_driving", "platform_regulation", "data_privacy", "technology_policy"],
+      "quality_threshold": 7.0
+    },
+    "cybersecurity": {
+      "display_name": "サイバー安全",
+      "subcategories": ["data_breach", "ransomware", "service_outage", "account_takeover", "financial_cybercrime", "critical_infrastructure_attack", "supply_chain_attack"],
+      "quality_threshold": 7.5
+    },
+    "society_living": {
+      "display_name": "社会・生活",
+      "subcategories": ["education", "childcare", "healthcare", "nursing_care", "food_safety", "tourism", "transport", "demographics", "labor", "consumer_protection"],
+      "quality_threshold": 7.0
+    },
+    "security_defense": {
+      "display_name": "安全保障",
+      "subcategories": ["national_security", "economic_security", "defense_policy", "foreign_affairs", "trade_security", "energy_security", "taiwan_china", "alliance_policy"],
+      "quality_threshold": 7.0
+    },
+    "disaster_infrastructure": {
+      "display_name": "災害・インフラ",
+      "subcategories": ["earthquake", "flood", "typhoon", "wildfire", "power_outage", "telecom_outage", "water_supply", "rail_disruption", "road_disruption", "public_transport"],
+      "quality_threshold": 0,
+      "certainty_over_quality": true
+    },
+    "governance_accountability": {
+      "display_name": "統治・責任",
+      "secondary_only": true,
+      "subcategories": ["corporate_governance", "internal_controls", "fraud", "regulatory_failure", "administrative_failure", "audit_failure", "executive_responsibility", "public_procurement", "whistleblowing"],
+      "quality_threshold": 7.0
+    }
+  },
+  "mix": {
+    "politics_policy": 0.35,
+    "economy_business": 0.20,
+    "major_incidents": 0.15,
+    "technology_ai": 0.10,
+    "society_living": 0.10,
+    "security_defense": 0.05,
+    "disaster_infrastructure": 0.05
+  },
+  "politics_min_weekly_ratio": 0.25,
+  "max_single_category_ratio": 0.45
+}

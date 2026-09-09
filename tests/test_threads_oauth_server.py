@@ -238,6 +238,8 @@ class ThreadsOAuthServerTests(unittest.TestCase):
                 "https://bot.example/threads/deauthorize",
             "data_deletion_request_url":
                 "https://bot.example/threads/data-deletion",
+            "privacy_policy_url":
+                "https://bot.example/threads/privacy",
         })
 
     def test_23_public_base_must_be_https(self):
@@ -294,6 +296,22 @@ class ThreadsOAuthServerTests(unittest.TestCase):
                 headers={"X-Forwarded-Proto": "http"})
         self.assertEqual(response.get_json(), {
             "error": "https_required"})
+
+    def test_29_privacy_policy_is_public_and_secret_free(self):
+        response = self.client.get("/threads/privacy")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.mimetype, "text/html")
+        self.assertIn(
+            b"Kuze Yui Threads Integration Privacy Policy", response.data)
+        self.assertNotIn(b"access-secret", response.data)
+        self.assertNotIn(b"app-secret", response.data)
+
+    def test_30_privacy_contact_is_escaped(self):
+        with patch.dict(os.environ, {
+            "THREADS_PRIVACY_CONTACT": "<script>alert(1)</script>"}):
+            response = self.client.get("/threads/privacy")
+        self.assertNotIn(b"<script>", response.data)
+        self.assertIn(b"&lt;script&gt;", response.data)
 
 
 if __name__ == "__main__":

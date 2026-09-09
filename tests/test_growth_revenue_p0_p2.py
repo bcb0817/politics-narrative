@@ -250,10 +250,11 @@ class GrowthRevenueP0P2Tests(unittest.TestCase):
         self.assertNotIn("Unregister-ScheduledTask", text)
 
     def test_21_stale_model_scripts_are_quarantined(self):
-        directory = ROOT / "archive" / "deprecated" / "model_migrations"
-        self.assertTrue((directory /
-            "DEPRECATED_DO_NOT_RUN_update_openai_models.ps1").exists())
+        # The optional ignored local archive is not part of a clean checkout.
+        # The safety contract is absence from executable production locations.
         self.assertFalse((ROOT / "production" / "update_openai_models.ps1").exists())
+        self.assertFalse((ROOT / "update_openai_models.ps1").exists())
+        self.assertIn('archive/', (ROOT / '.gitignore').read_text(encoding='utf-8'))
 
     def test_22_content_pipeline_has_no_publish_clients(self):
         text = (ROOT / "src" / "content_pipeline.py").read_text(encoding="utf-8")

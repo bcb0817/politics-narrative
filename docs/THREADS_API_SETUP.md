@@ -86,6 +86,7 @@ Tunnel等が別途必要です。TLS終端側から`X-Forwarded-Proto: https`を
 - `GET /threads/callback`
 - `POST /threads/deauthorize`
 - `POST /threads/data-deletion`
+- `GET /threads/privacy`
 
 解除・削除要求はMetaの`signed_request`をApp SecretによるHMAC-SHA256で
 検証します。署名不正の場合はトークンや履歴を変更しません。
@@ -104,6 +105,33 @@ Remove-Item Env:THREADS_POST_ENABLED -ErrorAction SilentlyContinue
 
 Phase Bへの移行は、OAuth、ドラフト品質、重複防止、予算、Insights収集を
 確認した後、人間が `.env` の `THREADS_POST_ENABLED=true` を明示して行います。
+
+## 追加分析権限
+
+公式APIの返信・メンション・検索・削除・位置・プロフィール発見を使う場合は、現在の権限を確認してから追加認証します。
+
+```powershell
+.\.venv\Scripts\python.exe local_bot.py threads-permissions
+.\.venv\Scripts\python.exe local_bot.py threads-auth-url --scope-profile full-analysis
+```
+
+追加候補はMeta公式で確認できた次の権限だけです。
+
+- `threads_read_replies`
+- `threads_manage_replies`
+- `threads_keyword_search`
+- `threads_manage_mentions`
+- `threads_delete`
+- `threads_location_tagging`
+- `threads_profile_discovery`
+
+Meta管理画面でApp Reviewや高度なアクセスが必要と表示された場合は、人間が用途説明と審査を行います。Botは既存トークンを自動破棄せず、ブラウザを自動操作しません。
+
+不足している`.env`キーだけを追加するには次を使います。既存値は上書きしません。
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\production\add_threads_full_env_defaults.ps1
+```
 
 ## Windowsタスク
 

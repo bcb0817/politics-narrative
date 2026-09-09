@@ -162,6 +162,39 @@ class XAttentionTests(unittest.TestCase):
             self.assertEqual(len(history), 1)
             self.assertEqual(json.loads(latest.read_text(encoding="utf-8"))["topic_count"], 1)
 
+    def test_x_search_result_can_notify_discord_once(self):
+        topics = [{
+            "topic_key": "消費税",
+            "x_attention_score": 8.4,
+            "velocity_score": 7.2,
+            "x_post_count": 4,
+            "unique_accounts": 3,
+            "externally_corroborated": True,
+        }]
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {
+            "STATE_DIR": tmp,
+            "X_DISCORD_RESEARCH_ENABLED": "true",
+        }, clear=False), patch(
+            "discord_notify.notify_x_research", return_value=True
+        ) as notify:
+            news._save_x_search_results(
+                topics,
+                [{"label": "税制", "dynamic": False}],
+                resources=6,
+                representative_posts=[{
+                    "post_id": "123", "text": "消費税をめぐる議論",
+                }],
+                notify_discord=True,
+            )
+        notify.assert_called_once()
+        report = notify.call_args.args[0]
+        self.assertEqual(report["resource_count"], 6)
+        self.assertEqual(report["corroborated_topic_count"], 1)
+        self.assertEqual(
+            report["representative_posts"][0]["text"],
+            "消費税をめぐる議論",
+        )
+
     def test_secret_is_not_written_to_x_error_log(self):
         secret = "secret-bearer-value"
 

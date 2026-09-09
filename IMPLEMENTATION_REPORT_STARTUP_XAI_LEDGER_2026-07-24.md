@@ -6,7 +6,7 @@
 
 ## 1. バックアップ先
 
-`D:\SNS Bot\politics-narrative-backup-20260724-013738`
+`D:\SNS Bot\politics-narrative\backups\politics-narrative-backup-20260724-013738`
 
 未コミット差分、`.env`、SQLite、JSON履歴、ログを含むリポジトリ全体を
 変更前にコピーした。
@@ -299,7 +299,7 @@ Set-Location "D:\SNS Bot\politics-narrative"
 
 復元元:
 
-`D:\SNS Bot\politics-narrative-backup-20260724-013738`
+`D:\SNS Bot\politics-narrative\backups\politics-narrative-backup-20260724-013738`
 
 ## 34. 投稿安全仕様
 

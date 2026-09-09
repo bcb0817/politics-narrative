@@ -1,0 +1,48 @@
+{
+  "master": {
+    "width": 1080,
+    "height": 1920,
+    "fps": 30,
+    "video_codec": "h264",
+    "audio_codec": "aac",
+    "audio_sample_rate": 48000,
+    "minimum_duration_seconds": 45,
+    "maximum_duration_seconds": 60
+  },
+  "youtube": {
+    "width": 1080,
+    "height": 1920,
+    "fps": 30,
+    "burned_captions": true,
+    "srt": true,
+    "default_privacy": "private"
+  },
+  "x": {
+    "width": 720,
+    "height": 1280,
+    "fps": 30,
+    "maximum_file_size_bytes": 536870912,
+    "media_category": "tweet_video"
+  },
+  "threads": {
+    "width": 1080,
+    "height": 1920,
+    "fps": 30,
+    "public_https_url_required": true,
+    "alt_text": true
+  },
+  "instagram": {
+    "width": 1080,
+    "height": 1920,
+    "fps": 30,
+    "maximum_video_bitrate_mbps": 25,
+    "maximum_file_size_bytes": 1073741824,
+    "professional_account_required": true
+  },
+  "safe_area_percent": {
+    "left": 8,
+    "right": 8,
+    "top": 12,
+    "bottom": 22
+  }
+}

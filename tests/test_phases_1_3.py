@@ -34,48 +34,64 @@ def history_rows(now, normal=0, breaking=0):
     rows = []
     for idx in range(normal):
         rows.append({"tweet_id": f"n{idx}", "post_type": "strong_opinion",
-                     "posted_at_jst": (now - timedelta(hours=idx + 1)).isoformat()})
+                     "posted_at_jst": (now - timedelta(minutes=idx + 1)).isoformat()})
     for idx in range(breaking):
         rows.append({"tweet_id": f"b{idx}", "post_type": "breaking_news",
-                     "posted_at_jst": (now - timedelta(hours=idx + 1)).isoformat()})
+                     "posted_at_jst": (now - timedelta(minutes=normal + idx + 1)).isoformat()})
     return rows
 
 
 class FakeMetricClient:
     missing = False
+    last_tweet_fields = []
     def __init__(self, **kwargs): pass
     def get_tweets(self, ids, **kwargs):
-        data = [] if self.missing else [SimpleNamespace(id=value, public_metrics={
-            "impression_count": 100, "like_count": 5, "retweet_count": 2,
-            "reply_count": 1, "quote_count": 1, "bookmark_count": 1,
-            "user_profile_clicks": 3, "url_link_clicks": 0}) for value in ids]
+        type(self).last_tweet_fields = list(kwargs.get("tweet_fields") or [])
+        data = [] if self.missing else [SimpleNamespace(
+            id=value,
+            public_metrics={
+                "like_count": 5, "retweet_count": 2, "reply_count": 1,
+                "quote_count": 1, "bookmark_count": 1,
+            },
+            non_public_metrics={
+                "impression_count": 100,
+                "user_profile_clicks": 3,
+                "url_link_clicks": 0,
+            },
+            organic_metrics={},
+        ) for value in ids]
         return SimpleNamespace(data=data)
 
 
 class Phase1Tests(unittest.TestCase):
     def setUp(self): self.now = datetime(2026, 7, 21, 18, 0, tzinfo=JST)
 
-    def test_01_monitor_interval_is_60_minutes(self):
-        self.assertEqual(int(os.environ.get("MONITOR_INTERVAL_MINUTES", "60")), 60)
+    def test_01_monitor_interval_is_45_minutes(self):
+        with patch.dict(os.environ, {"MONITOR_INTERVAL_MINUTES": "45"}):
+            self.assertEqual(local_bot._slot_interval_minutes(), 45)
 
     def test_02_x_search_only_at_three_times(self):
         with patch.dict(os.environ, {"X_SEARCH_SCHEDULE": "06:00,12:00,18:00"}):
             self.assertTrue(news.should_run_x_search(self.now))
             self.assertFalse(news.should_run_x_search(self.now.replace(hour=17, minute=30)))
 
-    def test_03_normal_posts_stop_at_eight(self):
-        self.assertTrue(phase_daily_limit_reached(history_rows(self.now, normal=8), self.now, False))
+    def test_03_normal_posts_stop_at_twenty(self):
+        self.assertFalse(phase_daily_limit_reached(history_rows(self.now, normal=19), self.now, False))
+        self.assertTrue(phase_daily_limit_reached(history_rows(self.now, normal=20), self.now, False))
 
-    def test_04_total_posts_stop_at_ten(self):
-        self.assertTrue(phase_daily_limit_reached(history_rows(self.now, 8, 2), self.now, True))
+    def test_04_total_posts_stop_at_twenty(self):
+        self.assertTrue(phase_daily_limit_reached(history_rows(self.now, 18, 2), self.now, True))
 
     def test_05_minimum_is_not_a_quota(self):
         self.assertEqual(post.prefilter_news([{"title": "芸能ニュース", "url": "x", "source_name": "unknown"}]), [])
 
-    def test_06_sixty_minute_interval(self):
+    def test_06_forty_five_minute_interval(self):
         rows = history_rows(self.now, 1)
-        rows[0]["posted_at_jst"] = (self.now - timedelta(minutes=59)).isoformat()
-        self.assertEqual(pre_generation_skip_reason(rows, self.now, 12, 60), "minimum_post_interval")
+        rows[0]["posted_at_jst"] = (self.now - timedelta(minutes=44)).isoformat()
+        self.assertEqual(pre_generation_skip_reason(rows, self.now, 20, 45), "minimum_post_interval")
+
+    def test_06b_low_quality_fallback_starts_after_ninety_minutes(self):
+        self.assertEqual(float(os.environ["LOW_QUALITY_FALLBACK_HOURS"]), 1.5)
 
     def test_07_topic_cooldown(self):
         recent = [{"topic_key": "防衛予算", "last_posted_at": (self.now - timedelta(hours=2)).isoformat(), "news_title": "防衛予算を検討"}]
@@ -85,7 +101,22 @@ class Phase1Tests(unittest.TestCase):
         self.assertTrue(is_significant_update("法案が可決", "法案を審議"))
 
     def test_09_post_disabled_is_default_for_test(self):
-        self.assertFalse(post.POST_ENABLED)
+        with patch.object(post, "POST_ENABLED", False):
+            self.assertFalse(post.POST_ENABLED)
+
+    def test_09b_classifier_limit_keeps_local_metadata_candidate(self):
+        source = {
+            "topic_key": "税制改正",
+            "genre": "税財政",
+            "classification_confidence": 0.4,
+            "verified": True,
+        }
+        result = post._classification_or_local_fallback(
+            source, classifier=lambda _: None
+        )
+        self.assertEqual(result["topic_key"], "税制改正")
+        self.assertEqual(result["classification_mode"], "local_limit_fallback")
+        self.assertGreaterEqual(result["classification_confidence"], 0.65)
 
     def test_10_url_is_rejected(self):
         candidate = {"tweet_text": "🚨 見出し\n\n本文 https://example.com " + "説明" * 60}
@@ -145,7 +176,9 @@ class Phase3Tests(unittest.TestCase):
             path = Path(td) / "db.sqlite"; now = datetime.now(JST)
             rows = [{"tweet_id": "1", "posted_at_jst": (now - timedelta(hours=80)).isoformat()}]
             result = post_metrics.collect(rows, now, FakeMetricClient, path)
-            self.assertEqual(result["collected"], 3)
+            self.assertEqual(result["collected"], 5)
+            self.assertIn("non_public_metrics", FakeMetricClient.last_tweet_fields)
+            self.assertIn("organic_metrics", FakeMetricClient.last_tweet_fields)
 
     def test_22_same_window_is_not_collected_twice(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
@@ -159,7 +192,7 @@ class Phase3Tests(unittest.TestCase):
         try:
             with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
                 now = datetime.now(JST); rows = [{"tweet_id": "1", "posted_at_jst": (now-timedelta(hours=2)).isoformat()}]
-                self.assertEqual(post_metrics.collect(rows, now, FakeMetricClient, Path(td)/"db.sqlite")["missing"], 1)
+                self.assertEqual(post_metrics.collect(rows, now, FakeMetricClient, Path(td)/"db.sqlite")["missing"], 2)
         finally: FakeMetricClient.missing = False
 
     def test_24_top_and_bottom_three(self):
@@ -202,7 +235,9 @@ class CostAndSafetyTests(unittest.TestCase):
 
     def test_31_x_daily_cap_configuration(self): self.assertEqual(int(os.environ.get("X_SEARCH_MAX_POST_READS_PER_DAY", "54")), 54)
     def test_32_x_monthly_cap_configuration(self): self.assertEqual(int(os.environ.get("X_SEARCH_MAX_POST_READS_PER_MONTH", "1620")), 1620)
-    def test_33_x_create_cap_matches_total_posts(self): self.assertEqual(int(os.environ.get("X_POST_CREATE_MAX_PER_DAY", "10")), 10)
+    def test_33_x_create_cap_matches_total_posts(self):
+        with patch.dict(os.environ, {"X_POST_CREATE_MAX_PER_DAY": "20"}):
+            self.assertEqual(int(os.environ["X_POST_CREATE_MAX_PER_DAY"]), 20)
 
     def test_34_openai_budget_guard(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td, patch.dict(os.environ, {"OPENAI_MONTHLY_BUDGET_USD": "1", "OPENAI_BUDGET_RESERVE_USD": "0"}):

@@ -1,0 +1,10 @@
+{
+  "volume_growth": 0.25,
+  "unique_author_growth": 0.20,
+  "velocity": 0.15,
+  "cross_source_match": 0.15,
+  "reply_presence": 0.10,
+  "quote_presence": 0.05,
+  "verified_diversity": 0.05,
+  "novelty": 0.05
+}

@@ -3,7 +3,7 @@
 ## 1. バックアップ先
 
 - リポジトリ全体:
-  `D:\SNS Bot\politics-narrative-backup-20260725-041802`
+  `D:\SNS Bot\politics-narrative\backups\politics-narrative-backup-20260725-041802`
 - `.env`:
   `D:\SNS Bot\politics-narrative\archive\config_backups\.env.20260725-042115.backup`
 
@@ -224,7 +224,7 @@ Start-ScheduledTask -TaskName "PoliticsNarrativeBot"
 2. `.env`だけ戻す場合は
    `archive\config_backups\.env.20260725-042115.backup` を `.env` へ復元する。
 3. 全体を戻す場合は
-   `D:\SNS Bot\politics-narrative-backup-20260725-041802` を使用する。
+   `D:\SNS Bot\politics-narrative\backups\politics-narrative-backup-20260725-041802` を使用する。
 4. `budget_change_events` とJSON履歴は監査証跡として残す。
 5. 構文検査・テスト・`budget-status`を確認する。
 6. 人間の確認後にだけタスクを1回起動する。

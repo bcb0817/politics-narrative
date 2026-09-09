@@ -20,6 +20,7 @@ $Settings = New-ScheduledTaskSettingsSet `
     -StartWhenAvailable `
     -RestartCount 99 `
     -RestartInterval (New-TimeSpan -Minutes 1) `
+    -ExecutionTimeLimit ([TimeSpan]::Zero) `
     -MultipleInstances IgnoreNew
 
 $Principal = New-ScheduledTaskPrincipal `

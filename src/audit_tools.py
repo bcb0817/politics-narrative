@@ -133,9 +133,15 @@ def verify_xai_ledger(path: Path | None = None,
               OR COALESCE(estimated_cost_usd,0)<>0)""").fetchone()[0])
         cost_rows = conn.execute("""SELECT cost_in_usd_ticks,actual_cost_usd,
             estimated_cost_usd,cost_source,tool_call_count,
-            successful_tool_call_count,success FROM xai_usage_events""").fetchall()
+            successful_tool_call_count,success,started_at,cost_verified
+            FROM xai_usage_events""").fetchall()
         month_rows = int(conn.execute("""SELECT COUNT(*) FROM xai_usage_events
             WHERE timestamp LIKE ?""", (month,)).fetchone()[0])
+        phase_a_verified = int(conn.execute(
+            """SELECT COUNT(*) FROM xai_usage_events
+               WHERE started_at IS NOT NULL AND started_at<>''
+               AND cost_verified=1 AND success=1"""
+        ).fetchone()[0])
 
     conversion_errors = 0
     source_errors = 0
@@ -149,13 +155,17 @@ def verify_xai_ledger(path: Path | None = None,
             conversion_errors += 1
         if source == "actual":
             source_errors += int(ticks <= 0)
-        elif source == "estimated":
+        elif source in {"estimated", "unverified_estimate"}:
             source_errors += int(ticks != 0 or actual != 0 or estimated < 0)
         else:
             source_errors += 1
         tools = int(row["tool_call_count"] or 0)
         successful = int(row["successful_tool_call_count"] or 0)
-        if tools > 1 or successful > tools or tools < 0 or successful < 0:
+        # Historical rows predate the bounded Phase A agentic loop and are
+        # retained for audit. New rows must respect the three-call hard cap.
+        if row["started_at"] and (
+                tools > 3 or successful > tools
+                or tools < 0 or successful < 0):
             tool_errors += 1
 
     sample_ok = (
@@ -186,7 +196,19 @@ def verify_xai_ledger(path: Path | None = None,
         "pass": source_errors == 0, "details": {"row_errors": source_errors},
     }
     checks["tool_call_count"] = {
-        "pass": tool_errors == 0, "details": {"row_errors": tool_errors, "maximum": 1},
+        "pass": tool_errors == 0,
+        "details": {
+            "row_errors": tool_errors,
+            "maximum": 3,
+            "legacy_rows_excluded_from_cap_check": True,
+        },
+    }
+    checks["phase_a_actual_samples"] = {
+        "pass": total == 0 or phase_a_verified >= 2,
+        "details": {
+            "required_when_legacy_rows_exist": 2,
+            "verified_phase_a_samples": phase_a_verified,
+        },
     }
     passed = all(item["pass"] for item in checks.values())
     return {

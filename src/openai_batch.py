@@ -104,13 +104,21 @@ def submit_analysis(
     if not reservation_id:
         return {"pending": False, "error": reason, "job": None}
 
+    instructions = (
+        "You analyze performance data for a Japanese political-news X bot. "
+        "Use only supplied metrics. Separate observations from recommendations. "
+        "Do not invent political facts, model details, prices, or credentials."
+    )
+    if task_type == "daily_review":
+        instructions += (
+            " Maximize next-day impressions without weakening factuality, safety, "
+            "trust, or account health. Cite supplied tweet IDs and metrics for each "
+            "strategy finding. Recommend presentation choices only; never change "
+            "political positions, safety thresholds, budgets, or posting limits."
+        )
     body = {
         "model": model,
-        "instructions": (
-            "You analyze performance data for a Japanese political-news X bot. "
-            "Use only supplied metrics. Separate observations from recommendations. "
-            "Do not invent political facts, model details, prices, or credentials."
-        ),
+        "instructions": instructions,
         "input": json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
         "max_output_tokens": int(max_output_tokens),
         "text": {"format": {"type": "json_schema", "name": "performance_analysis",

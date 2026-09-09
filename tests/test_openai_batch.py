@@ -38,6 +38,20 @@ class FakeFiles:
         analysis = {
             "summary": "summary", "strengths": ["s"], "weaknesses": ["w"],
             "recommendations": ["r"], "timing_findings": ["t"],
+            "operational_findings": [],
+            "impression_strategy": {
+                "summary": "test", "evidence": [],
+                "next_day_policy": {
+                    "post_type_priority": ["issue_diagram"],
+                    "hook_type_priority": ["conclusion_first"],
+                    "preferred_hours_jst": [12],
+                    "target_text_min": 120, "target_text_max": 220,
+                    "body_structure":
+                        "fact_impact_accountability_improvement",
+                    "cta_style": "specific_accountability_question",
+                    "experiment_name": "test",
+                },
+            },
         }
         body = {
             "output": [{"content": [{"type": "output_text", "text": json.dumps(analysis)}]}],

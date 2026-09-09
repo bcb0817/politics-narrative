@@ -87,8 +87,8 @@ class NewRequirementsTests(unittest.TestCase):
             self.assertFalse(xai_radar.should_run(datetime(2026, 7, 21, 7, 0, tzinfo=JST)))
             self.assertTrue(xai_radar.should_run(datetime(2026, 7, 21, 12, 0, tzinfo=JST)))
 
-    def test_04_xai_daily_calls_capped_at_three(self):
-        self.assertEqual(int(os.environ.get("XAI_SEARCH_MAX_CALLS_PER_DAY", "3")), 3)
+    def test_04_xai_daily_calls_capped_at_six(self):
+        self.assertEqual(int(os.environ.get("XAI_SEARCH_MAX_CALLS_PER_DAY", "6")), 6)
 
     def test_05_xai_ticks_are_saved_as_actual_cost(self):
         with tempfile.TemporaryDirectory() as td, patch.dict(os.environ, {
@@ -98,6 +98,34 @@ class NewRequirementsTests(unittest.TestCase):
             path = Path(td) / "db.sqlite"
             xai_radar.search(datetime(2026, 7, 21, 6, 0, tzinfo=JST), FakeXAIClient, path)
             self.assertAlmostEqual(api_budget.usage_totals(path)["xai"], .001, places=6)
+
+    def test_05b_xai_research_notifies_only_when_explicitly_enabled(self):
+        with tempfile.TemporaryDirectory() as td, patch.dict(os.environ, {
+            "XAI_ENABLED": "true", "X_TOPIC_DISCOVERY_PROVIDER": "xai",
+            "XAI_API_KEY": "dummy", "XAI_SEARCH_SCHEDULE": "06:00",
+            "XAI_ADAPTIVE_SCHEDULE_ENABLED": "false",
+            "XAI_MONTHLY_BUDGET_USD": "2", "XAI_BUDGET_RESERVE_USD": "0",
+            "X_DISCORD_RESEARCH_ENABLED": "true",
+        }), patch.object(
+            xai_radar, "_state_dir", return_value=Path(td)
+        ), patch(
+            "discord_notify.notify_x_research", return_value=True
+        ) as notify:
+            xai_radar.search(
+                datetime(2026, 7, 21, 6, 0, tzinfo=JST),
+                FakeXAIClient,
+                Path(td) / "db.sqlite",
+                candidates=[{
+                    "title": "防衛予算",
+                    "topic_key": "防衛予算",
+                    "summary": "政府が公式資料を公表",
+                }],
+                notify_discord=True,
+            )
+        notify.assert_called_once()
+        report = notify.call_args.args[0]
+        self.assertEqual(report["provider"], "xAI X Search")
+        self.assertEqual(report["corroborated_topic_count"], 1)
 
     def test_06_xai_budget_two_dollars_stops_search(self):
         with tempfile.TemporaryDirectory() as td, patch.dict(os.environ, {
@@ -119,17 +147,17 @@ class NewRequirementsTests(unittest.TestCase):
         self.assertIn('provider == "xai"', source)
         self.assertIn('provider == "native_x"', source)
 
-    def test_10_normal_automated_posts_stop_at_eight(self):
+    def test_10_normal_automated_posts_stop_at_twelve(self):
         now = datetime.now(JST).replace(hour=12, minute=0, second=0, microsecond=0)
         rows = [{"tweet_id": str(i), "post_type": "strong_opinion",
-                 "posted_at_jst": (now - timedelta(minutes=61 + i)).isoformat()} for i in range(8)]
-        self.assertTrue(phase_daily_limit_reached(rows, now, False, 8, 2, 10))
+                 "posted_at_jst": (now - timedelta(minutes=61 + i)).isoformat()} for i in range(20)]
+        self.assertTrue(phase_daily_limit_reached(rows, now, False, 20, 2, 20))
 
-    def test_11_total_automated_posts_stop_at_ten(self):
+    def test_11_total_automated_posts_stop_at_twelve(self):
         now = datetime.now(JST).replace(hour=12, minute=0, second=0, microsecond=0)
-        rows = [{"tweet_id": str(i), "post_type": "strong_opinion" if i < 8 else "breaking_news",
-                 "posted_at_jst": (now - timedelta(minutes=61 + i)).isoformat()} for i in range(10)]
-        self.assertTrue(phase_daily_limit_reached(rows, now, True, 8, 2, 10))
+        rows = [{"tweet_id": str(i), "post_type": "strong_opinion" if i < 10 else "breaking_news",
+                 "posted_at_jst": (now - timedelta(minutes=61 + i)).isoformat()} for i in range(20)]
+        self.assertTrue(phase_daily_limit_reached(rows, now, True, 20, 2, 20))
 
     def test_12_three_same_styles_are_avoided(self):
         now = datetime.now(JST); history = [{"post_type": "strong_opinion",
@@ -146,14 +174,19 @@ class NewRequirementsTests(unittest.TestCase):
         self.assertIn("emoji_on_serious_news", post._candidate_quality_violations(
             {"tweet_text": text}, {"title": "裁判の重要判決"}))
 
-    def test_15_three_hour_silence_never_lowers_quality(self):
-        self.assertFalse(post._score_gate_allows(3, False, False, True))
+    def test_15_silence_fallback_uses_bounded_quality_relaxation(self):
+        with patch.dict(os.environ, {"LOW_QUALITY_FALLBACK_MIN_SCORE": "4.5"}):
+            self.assertTrue(post._score_gate_allows(5, False, False, True))
+            self.assertFalse(post._score_gate_allows(3, False, False, True))
 
-    def test_16_evergreen_daily_limit_is_one(self):
+    def test_16_evergreen_daily_limit_is_two(self):
         now = datetime.now(JST).replace(hour=12, minute=0, second=0, microsecond=0)
-        history = [{"tweet_id": "1", "post_type": "evergreen_explainer",
-                    "posted_at_jst": (now - timedelta(hours=4)).isoformat()}]
-        with patch.dict(os.environ, {"EVERGREEN_FALLBACK_ENABLED": "true", "EVERGREEN_MAX_PER_DAY": "1"}):
+        history = [
+            {"tweet_id": str(index), "post_type": "evergreen_explainer",
+             "posted_at_jst": (now - timedelta(hours=4 + index)).isoformat()}
+            for index in range(2)
+        ]
+        with patch.dict(os.environ, {"EVERGREEN_FALLBACK_ENABLED": "true", "EVERGREEN_MAX_PER_DAY": "2"}):
             self.assertIsNone(post._evergreen_candidate(history, now))
 
     def test_17_steelman_prompt_forbids_distortion(self):
@@ -243,8 +276,8 @@ class NewRequirementsTests(unittest.TestCase):
         self.assertNotIn("selenium", text.lower())
         self.assertNotIn("playwright", text.lower())
 
-    def test_34_total_budget_is_thirty_six(self):
-        self.assertEqual(float(os.environ.get("TOTAL_MONTHLY_API_BUDGET_USD", "36")), 36)
+    def test_34_total_budget_is_sixty_one(self):
+        self.assertEqual(float(os.environ.get("TOTAL_MONTHLY_API_BUDGET_USD", "61")), 61)
 
     def test_35_restriction_stage_pauses_xai(self):
         with tempfile.TemporaryDirectory() as td, patch.dict(os.environ, {
@@ -260,13 +293,13 @@ class NewRequirementsTests(unittest.TestCase):
             self.assertTrue(path.exists())
             self.assertIn("プロフィール変更は行っていません", path.read_text(encoding="utf-8"))
 
-    def test_37_xai_request_caps_tool_calls_at_one(self):
+    def test_37_standard_xai_request_caps_tool_calls_at_two(self):
         with tempfile.TemporaryDirectory() as td, patch.dict(os.environ, {
             "XAI_ENABLED": "true", "X_TOPIC_DISCOVERY_PROVIDER": "xai", "XAI_API_KEY": "dummy",
             "XAI_SEARCH_SCHEDULE": "06:00", "XAI_MONTHLY_BUDGET_USD": "2",
             "XAI_BUDGET_RESERVE_USD": "0"}), patch.object(xai_radar, "_state_dir", return_value=Path(td)):
             xai_radar.search(datetime(2026, 7, 21, 6, 0, tzinfo=JST), FakeXAIClient, Path(td) / "db.sqlite")
-            self.assertEqual(FakeXAIClient.last_kwargs["max_tool_calls"], 1)
+            self.assertEqual(FakeXAIClient.last_kwargs["max_tool_calls"], 2)
 
     def test_38_xai_search_is_required(self):
         with tempfile.TemporaryDirectory() as td, patch.dict(os.environ, {
@@ -297,13 +330,13 @@ class NewRequirementsTests(unittest.TestCase):
         )
         self.assertEqual(xai_radar._tool_call_count(response), 1)
 
-    def test_41_xai_agentic_turns_are_capped_at_one(self):
+    def test_41_standard_xai_agentic_turns_are_capped_at_two(self):
         with tempfile.TemporaryDirectory() as td, patch.dict(os.environ, {
             "XAI_ENABLED": "true", "X_TOPIC_DISCOVERY_PROVIDER": "xai", "XAI_API_KEY": "dummy",
             "XAI_SEARCH_SCHEDULE": "06:00", "XAI_MONTHLY_BUDGET_USD": "2",
             "XAI_BUDGET_RESERVE_USD": "0"}), patch.object(xai_radar, "_state_dir", return_value=Path(td)):
             xai_radar.search(datetime(2026, 7, 21, 6, 0, tzinfo=JST), FakeXAIClient, Path(td) / "db.sqlite")
-            self.assertEqual(FakeXAIClient.last_kwargs["extra_body"], {"max_turns": 1})
+            self.assertEqual(FakeXAIClient.last_kwargs["extra_body"], {"max_turns": 2})
 
 
 if __name__ == "__main__":

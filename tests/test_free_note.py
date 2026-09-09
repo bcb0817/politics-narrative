@@ -95,7 +95,8 @@ class FreeNoteTests(unittest.TestCase):
 
     def test_03_sources_meet_primary_minimum(self):
         _, primary, _, _, _ = self.article()
-        self.assertEqual(len(primary), 2)
+        self.assertGreaterEqual(len(primary), 2)
+        self.assertLessEqual(len(primary), 5)
 
     def test_related_books_are_ranked_manual_candidates(self):
         selected = self.selection()
@@ -110,12 +111,13 @@ class FreeNoteTests(unittest.TestCase):
         ))
         self.assertTrue(all(not row.get("amazon_url") for row in books))
 
-    def test_article_has_two_primary_links_and_manual_placeholders(self):
+    def test_article_has_two_to_five_primary_links_and_manual_placeholders(self):
         selected, primary, secondary, _, article = self.article()
         article_urls = __import__("re").findall(
             r"https?://[^\s)>\]]+", article)
         primary_urls = {row["url"] for row in primary}
-        self.assertEqual(len(article_urls), 2)
+        self.assertGreaterEqual(len(article_urls), 2)
+        self.assertLessEqual(len(article_urls), 5)
         self.assertEqual(set(article_urls), primary_urls)
         self.assertGreaterEqual(article.count("AMAZON_LINK_PENDING:"), 1)
         self.assertLessEqual(article.count("AMAZON_LINK_PENDING:"), 3)

@@ -1,0 +1,28 @@
+{
+  "policy": {
+    "automatic_acquisition": "official_rss_api_or_public_feed_only",
+    "html_scraping": false,
+    "browser_automation": false,
+    "unofficial_api": false,
+    "social_media_is_fact_source": false,
+    "news_role": "background_context_and_multiple_perspectives_only"
+  },
+  "sources": [
+    {"source_id":"egov","source_name":"e-Gov","category":"politics_policy","authority_level":5,"source_type":"official_api_feed","feed_url":"https://public-comment.e-gov.go.jp/","api_url":"","enabled":true,"update_frequency":"hourly","last_success_at":"","failure_count":0,"cost":0,"terms_checked_at":"2026-07-28"},
+    {"source_id":"diet-records","source_name":"国会会議録検索システム","category":"politics_policy","authority_level":5,"source_type":"official_api","feed_url":"","api_url":"https://kokkai.ndl.go.jp/api.html","enabled":true,"update_frequency":"daily","last_success_at":"","failure_count":0,"cost":0,"terms_checked_at":"2026-07-28"},
+    {"source_id":"tdnet","source_name":"TDnet","category":"economy_business","authority_level":5,"source_type":"official_disclosure","feed_url":"","api_url":"","enabled":false,"update_frequency":"hourly","last_success_at":"","failure_count":0,"cost":0,"terms_checked_at":"2026-07-28"},
+    {"source_id":"edinet","source_name":"EDINET","category":"economy_business","authority_level":5,"source_type":"official_api","feed_url":"","api_url":"https://disclosure.edinet-fsa.go.jp/api/","enabled":false,"update_frequency":"daily","last_success_at":"","failure_count":0,"cost":0,"terms_checked_at":"2026-07-28"},
+    {"source_id":"boj","source_name":"日本銀行","category":"economy_business","authority_level":5,"source_type":"official_feed","feed_url":"","api_url":"","enabled":false,"update_frequency":"daily","last_success_at":"","failure_count":0,"cost":0,"terms_checked_at":"2026-07-28"},
+    {"source_id":"jtsb","source_name":"運輸安全委員会","category":"major_incidents","authority_level":5,"source_type":"official_feed","feed_url":"https://jtsb.mlit.go.jp/","api_url":"","enabled":false,"update_frequency":"hourly","last_success_at":"","failure_count":0,"cost":0,"terms_checked_at":"2026-07-28"},
+    {"source_id":"digital-agency","source_name":"デジタル庁","category":"technology_ai","authority_level":5,"source_type":"official_feed","feed_url":"https://www.digital.go.jp/","api_url":"","enabled":false,"update_frequency":"daily","last_success_at":"","failure_count":0,"cost":0,"terms_checked_at":"2026-07-28"},
+    {"source_id":"ipa","source_name":"IPA","category":"cybersecurity","authority_level":5,"source_type":"official_feed","feed_url":"https://www.ipa.go.jp/security/","api_url":"","enabled":false,"update_frequency":"hourly","last_success_at":"","failure_count":0,"cost":0,"terms_checked_at":"2026-07-28"},
+    {"source_id":"jpcert","source_name":"JPCERT/CC","category":"cybersecurity","authority_level":5,"source_type":"official_feed","feed_url":"https://www.jpcert.or.jp/","api_url":"","enabled":false,"update_frequency":"hourly","last_success_at":"","failure_count":0,"cost":0,"terms_checked_at":"2026-07-28"},
+    {"source_id":"jma","source_name":"気象庁","category":"disaster_infrastructure","authority_level":5,"source_type":"official_feed","feed_url":"https://www.jma.go.jp/","api_url":"","enabled":false,"update_frequency":"frequent","last_success_at":"","failure_count":0,"cost":0,"terms_checked_at":"2026-07-28"},
+    {"source_id":"fdma","source_name":"消防庁","category":"disaster_infrastructure","authority_level":5,"source_type":"official_feed","feed_url":"https://www.fdma.go.jp/","api_url":"","enabled":false,"update_frequency":"hourly","last_success_at":"","failure_count":0,"cost":0,"terms_checked_at":"2026-07-28"},
+    {"source_id":"trusted-national-news","source_name":"全国報道（複数社）","category":"cross_category","authority_level":3,"source_type":"licensed_or_public_feed","feed_url":"","api_url":"","enabled":false,"update_frequency":"hourly","last_success_at":"","failure_count":0,"cost":0,"terms_checked_at":"2026-07-28"},
+    {"source_id":"trusted-economic-news","source_name":"経済報道（複数社）","category":"economy_business","authority_level":3,"source_type":"licensed_or_public_feed","feed_url":"","api_url":"","enabled":false,"update_frequency":"hourly","last_success_at":"","failure_count":0,"cost":0,"terms_checked_at":"2026-07-28"},
+    {"source_id":"trusted-regional-news","source_name":"地域報道（複数社）","category":"cross_category","authority_level":3,"source_type":"licensed_or_public_feed","feed_url":"","api_url":"","enabled":false,"update_frequency":"hourly","last_success_at":"","failure_count":0,"cost":0,"terms_checked_at":"2026-07-28"},
+    {"source_id":"trusted-international-news","source_name":"国際報道（複数社）","category":"security_defense","authority_level":3,"source_type":"licensed_or_public_feed","feed_url":"","api_url":"","enabled":false,"update_frequency":"hourly","last_success_at":"","failure_count":0,"cost":0,"terms_checked_at":"2026-07-28"},
+    {"source_id":"trusted-industry-news","source_name":"業界専門媒体（複数社）","category":"cross_category","authority_level":3,"source_type":"licensed_or_public_feed","feed_url":"","api_url":"","enabled":false,"update_frequency":"daily","last_success_at":"","failure_count":0,"cost":0,"terms_checked_at":"2026-07-28"}
+  ]
+}

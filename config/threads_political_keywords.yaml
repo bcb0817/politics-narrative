@@ -1,0 +1,151 @@
+# Editable official Threads API search dictionary.
+# Names and office holders must be maintained here, never in source code.
+keywords:
+  - keyword: 政府
+    aliases: [内閣, 官邸, 閣議]
+    category: government
+    priority: high
+    enabled: true
+    search_interval_minutes: 60
+    official_source_required: true
+    sensitive: false
+    topic_key: government
+  - keyword: 国会
+    aliases: [衆議院, 参議院, 法案, 採決]
+    category: government
+    priority: high
+    enabled: true
+    search_interval_minutes: 60
+    official_source_required: true
+    sensitive: false
+    topic_key: legislature
+  - keyword: 政党
+    aliases: [与党, 野党, 党首, 公約]
+    category: political_parties
+    priority: high
+    enabled: true
+    search_interval_minutes: 60
+    official_source_required: true
+    sensitive: true
+    topic_key: political_parties
+  - keyword: 選挙
+    aliases: [投票, 候補者, 選挙区, 比例代表]
+    category: elections
+    priority: high
+    enabled: true
+    search_interval_minutes: 60
+    official_source_required: true
+    sensitive: true
+    topic_key: elections
+  - keyword: 税金
+    aliases: [増税, 減税, 所得税, 消費税]
+    category: tax
+    priority: high
+    enabled: true
+    search_interval_minutes: 60
+    official_source_required: true
+    sensitive: false
+    topic_key: tax
+  - keyword: 社会保険料
+    aliases: [年金, 医療保険, 介護保険, 保険料負担]
+    category: social_security
+    priority: high
+    enabled: true
+    search_interval_minutes: 60
+    official_source_required: true
+    sensitive: false
+    topic_key: social_security
+  - keyword: 経済政策
+    aliases: [物価, 賃金, GDP, 景気]
+    category: economy
+    priority: high
+    enabled: true
+    search_interval_minutes: 60
+    official_source_required: true
+    sensitive: false
+    topic_key: economy
+  - keyword: 外交
+    aliases: [首脳会談, 条約, 外交合意, 制裁]
+    category: foreign_policy
+    priority: high
+    enabled: true
+    search_interval_minutes: 60
+    official_source_required: true
+    sensitive: true
+    topic_key: foreign_policy
+  - keyword: 安全保障
+    aliases: [防衛, 自衛隊, 防衛費, 停戦]
+    category: security
+    priority: high
+    enabled: true
+    search_interval_minutes: 60
+    official_source_required: true
+    sensitive: true
+    topic_key: security
+  - keyword: 憲法
+    aliases: [憲法改正, 国民投票]
+    category: constitution
+    priority: medium
+    enabled: true
+    search_interval_minutes: 120
+    official_source_required: true
+    sensitive: true
+    topic_key: constitution
+  - keyword: 自治体
+    aliases: [都道府県, 市区町村, 地方議会]
+    category: local_government
+    priority: medium
+    enabled: true
+    search_interval_minutes: 120
+    official_source_required: true
+    sensitive: false
+    topic_key: local_government
+  - keyword: 入管
+    aliases: [移民, 難民, 在留資格]
+    category: immigration
+    priority: medium
+    enabled: true
+    search_interval_minutes: 120
+    official_source_required: true
+    sensitive: true
+    topic_key: immigration
+  - keyword: エネルギー政策
+    aliases: [原発, 再エネ, 電気料金]
+    category: energy
+    priority: medium
+    enabled: true
+    search_interval_minutes: 120
+    official_source_required: true
+    sensitive: false
+    topic_key: energy
+  - keyword: AI政策
+    aliases: [デジタル庁, 個人情報, サイバーセキュリティ]
+    category: technology_policy
+    priority: medium
+    enabled: true
+    search_interval_minutes: 120
+    official_source_required: true
+    sensitive: false
+    topic_key: technology_policy
+  - keyword: 政治資金
+    aliases: [収支報告書, 献金, 裏金, 不記載]
+    category: scandals
+    priority: high
+    enabled: true
+    search_interval_minutes: 60
+    official_source_required: true
+    sensitive: true
+    topic_key: political_funds
+  - keyword: 災害対応
+    aliases: [地震, 豪雨, 避難, 災害対策本部]
+    category: disasters
+    priority: high
+    enabled: true
+    search_interval_minutes: 60
+    official_source_required: true
+    sensitive: true
+    topic_key: disasters
+
+people: []
+parties: []
+policies: []

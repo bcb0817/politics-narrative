@@ -3,7 +3,7 @@
 ## 1. バックアップ
 
 ```text
-D:\SNS Bot\politics-narrative-backup-20260725-044215
+D:\SNS Bot\politics-narrative\backups\politics-narrative-backup-20260725-044215
 ```
 
 ## 2. 既存コード調査

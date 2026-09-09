@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import html
 import json
 import logging
 import os
@@ -90,7 +91,77 @@ def endpoint_urls() -> dict:
         "oauth_redirect_url": f"{base}/threads/callback",
         "deauthorize_callback_url": f"{base}/threads/deauthorize",
         "data_deletion_request_url": f"{base}/threads/data-deletion",
+        "privacy_policy_url": f"{base}/threads/privacy",
     }
+
+
+def _privacy_policy_html() -> str:
+    contact = html.escape(
+        os.environ.get(
+            "THREADS_PRIVACY_CONTACT",
+            "Use Meta's Threads deauthorization or data-deletion controls.",
+        ).strip(),
+        quote=True,
+    )
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kuze Yui Threads Integration Privacy Policy</title>
+</head>
+<body>
+  <main>
+    <h1>Kuze Yui Threads Integration Privacy Policy</h1>
+    <p>Last updated: July 30, 2026</p>
+    <p>
+      This policy explains how the Kuze Yui Threads integration processes
+      information obtained through Meta's official Threads API.
+    </p>
+    <h2>Information processed</h2>
+    <ul>
+      <li>Threads user ID, username, profile information, and OAuth token.</li>
+      <li>Posts, replies, mentions, and insights authorized by the user.</li>
+      <li>Public Threads posts returned by authorized keyword searches.</li>
+      <li>Operational metadata needed for security, reliability, and audits.</li>
+    </ul>
+    <h2>Purposes</h2>
+    <ul>
+      <li>Manage the authenticated user's Threads presence.</li>
+      <li>Create, publish, review, and measure authorized posts.</li>
+      <li>Identify relevant public conversations through keyword search.</li>
+      <li>Produce aggregated or de-identified operational analysis.</li>
+    </ul>
+    <h2>Storage and retention</h2>
+    <p>
+      Credentials are stored locally and are never written to application
+      logs. Raw API responses are retained for up to 30 days, search results
+      for up to 90 days, personal data for up to 90 days, and aggregated
+      analytics for up to 730 days unless deletion is requested sooner.
+    </p>
+    <h2>Sharing</h2>
+    <p>
+      Personal information is not sold. Limited information may be processed
+      by service providers used for content generation, operational alerts,
+      and hosting only when needed to operate the integration.
+    </p>
+    <h2>Security</h2>
+    <p>
+      OAuth state validation, HTTPS, access controls, secret redaction, and
+      signed Meta callback verification are used to protect information.
+    </p>
+    <h2>Deletion and deauthorization</h2>
+    <p>
+      A user may remove the app from Threads or use Meta's data-deletion
+      control. Deauthorization deletes the stored access token and stops
+      Threads posting. A data-deletion request also removes the association
+      between the Threads user and stored post history.
+    </p>
+    <h2>Contact</h2>
+    <p>{contact}</p>
+  </main>
+</body>
+</html>"""
 
 
 def _request_is_https() -> bool:
@@ -171,6 +242,12 @@ def create_app(path: Path | None = None,
         return Response(
             "Threads authorization completed. You may close this window.",
             status=200, mimetype="text/plain")
+
+    @app.get("/threads/privacy")
+    def privacy_policy():
+        return Response(
+            _privacy_policy_html(), status=200,
+            content_type="text/html; charset=utf-8")
 
     @app.post("/threads/deauthorize")
     def deauthorize():

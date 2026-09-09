@@ -132,7 +132,7 @@ class StartupLedgerV3Tests(unittest.TestCase):
                           return_value={"projected": {"xai": 0}}):
             self.assertEqual(len(xai_radar.effective_schedule(path=self.db)), 3)
 
-    def test_15_low_volatility_has_two_slots(self):
+    def test_15_low_volatility_has_three_slots(self):
         with patch.dict(os.environ, {
             "XAI_SEARCH_SCHEDULE": "06:00,12:00,18:00",
             "XAI_ADAPTIVE_SCHEDULE_ENABLED": "true",
@@ -141,7 +141,7 @@ class StartupLedgerV3Tests(unittest.TestCase):
                           return_value={"projected": {"xai": 0}}), \
              patch.object(xai_radar, "local_volatility_score", return_value=1):
             self.assertEqual(xai_radar.effective_schedule(path=self.db),
-                             {"06:00", "18:00"})
+                             {"06:00", "12:00", "18:00"})
 
     def test_16_schema_has_representative_post_ids(self):
         props = xai_radar._schema(5, 3)["properties"]["topics"]["items"]["properties"]
@@ -211,6 +211,11 @@ class StartupLedgerV3Tests(unittest.TestCase):
         source = (ROOT / "production" / "register_task.ps1").read_text(
             encoding="utf-8-sig")
         self.assertIn("-RestartInterval (New-TimeSpan -Minutes 1)", source)
+
+    def test_29a_register_script_has_no_daemon_execution_limit(self):
+        source = (ROOT / "production" / "register_task.ps1").read_text(
+            encoding="utf-8-sig")
+        self.assertIn("-ExecutionTimeLimit ([TimeSpan]::Zero)", source)
 
     def test_30_roi_requires_minimum_sample(self):
         with patch.dict(os.environ, {"XAI_ATTRIBUTION_MIN_SAMPLE_SIZE": "10"}):

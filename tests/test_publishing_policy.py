@@ -1,6 +1,7 @@
 import os
 import sys
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -20,8 +21,10 @@ from publishing_policy import (  # noqa: E402
     budget_reached,
     calculate_growth_score,
     classify_hook_type,
+    has_material_policy_update,
     normalize_topic_key,
     pre_generation_skip_reason,
+    semantic_policy_signature,
     stagnation_fallback_active,
     topic_cooldown_skip_reason,
 )
@@ -75,9 +78,12 @@ class PublishingPolicyTests(unittest.TestCase):
         failed = [{"posted_at_jst": (self.now - timedelta(hours=5)).isoformat()}]
         self.assertFalse(stagnation_fallback_active(failed, self.now, 3))
 
-    def test_low_quality_fallback_does_not_relax_score_threshold(self):
+    def test_low_quality_fallback_uses_a_bounded_floor(self):
         self.assertFalse(post._score_gate_allows(3.0, False, False, False))
         self.assertFalse(post._score_gate_allows(3.0, False, False, True))
+        with patch.dict(os.environ, {"LOW_QUALITY_FALLBACK_MIN_SCORE": "4.5"}):
+            self.assertTrue(post._score_gate_allows(5.0, False, False, True))
+            self.assertFalse(post._score_gate_allows(4.4, False, False, True))
 
     def test_topic_cooldown_within_four_hours(self):
         rows = [{
@@ -165,6 +171,90 @@ class PublishingPolicyTests(unittest.TestCase):
 
     def test_topic_normalization_examples(self):
         self.assertEqual(normalize_topic_key("再審制度の改正案を審議"), "再審制度改正")
+
+
+    def test_food_consumption_tax_one_percent_has_stable_signature(self):
+        first = semantic_policy_signature(
+            "食料品の消費税を来年4月から1%に引き下げる方針")
+        second = semantic_policy_signature(
+            "1％減税の前に説明すべき条件　食品への消費税")
+        self.assertEqual(first, "policy:consumption_tax:food:1_percent")
+        self.assertEqual(second, first)
+
+    def test_food_consumption_tax_headlines_share_topic_key(self):
+        self.assertEqual(
+            normalize_topic_key("食料品の消費税を1%へ"),
+            normalize_topic_key("食品への消費税1％案を表明"),
+        )
+
+    def test_semantic_policy_cooldown_is_three_days(self):
+        rows = [{
+            "topic_key": "食料品消費税案",
+            "last_posted_at": (self.now - timedelta(hours=48)).isoformat(),
+            "news_title": "食料品の消費税を1%へ引き下げる方針",
+        }]
+        self.assertEqual(
+            topic_cooldown_skip_reason(
+                "別の見出し",
+                "消費税1％について食品の負担を説明",
+                rows,
+                self.now,
+                4,
+                semantic_cooldown_hours=72,
+            ),
+            "semantic_topic_cooldown",
+        )
+
+    def test_semantic_policy_cooldown_expires_after_three_days(self):
+        rows = [{
+            "topic_key": "food-consumption-tax",
+            "last_posted_at": (self.now - timedelta(hours=73)).isoformat(),
+            "news_title": "食料品の消費税を1%へ引き下げる方針",
+        }]
+        self.assertIsNone(topic_cooldown_skip_reason(
+            "another-headline",
+            "消費税1%について食料品の負担を説明",
+            rows,
+            self.now,
+            4,
+            semantic_cooldown_hours=72,
+        ))
+
+    def test_material_status_change_can_bypass_semantic_cooldown(self):
+        rows = [{
+            "topic_key": "食料品消費税案",
+            "last_posted_at": (self.now - timedelta(hours=2)).isoformat(),
+            "news_title": "食料品の消費税を1%へ引き下げる方針",
+        }]
+        self.assertIsNone(topic_cooldown_skip_reason(
+            "食料品消費税",
+            "食料品の消費税1％法案が成立",
+            rows,
+            self.now,
+            4,
+            semantic_cooldown_hours=72,
+        ))
+        self.assertTrue(has_material_policy_update(
+            "食料品の消費税1％法案が成立",
+            "食料品の消費税を1%へ引き下げる方針",
+        ))
+
+    def test_semantic_duplicate_blocks_paraphrased_generated_post(self):
+        candidate = {
+            "title": "1％減税の前に説明すべきこと",
+            "tweet_text": "食品への消費税1％案について制度設計を確認します。",
+        }
+        history = [{
+            "title": "食料品の消費税を1%へ",
+            "tweet_text": "食料品の消費税1%方針について負担を検証します。",
+        }]
+        self.assertTrue(post.is_duplicate(candidate, history))
+
+    def test_rescue_mode_does_not_bypass_topic_cooldown(self):
+        source = (SRC / "post.py").read_text(encoding="utf-8")
+        self.assertIn("if cooldown_reason:", source)
+        self.assertNotIn(
+            "if cooldown_reason and not stagnation_fallback:", source)
 
 
 if __name__ == "__main__":

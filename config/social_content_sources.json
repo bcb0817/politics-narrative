@@ -1,0 +1,46 @@
+[
+  {
+    "name": "e-GovパブリックコメントRSS",
+    "url": "https://public-comment.e-gov.go.jp/rss/pcm_list.xml",
+    "source_type": "government_public_comment",
+    "authority_level": 10,
+    "update_frequency": "daily",
+    "category": "administration",
+    "language": "ja",
+    "enabled": true,
+    "cost": 0
+  },
+  {
+    "name": "国会会議録検索API",
+    "url": "https://kokkai.ndl.go.jp/api/meeting_list",
+    "source_type": "diet_official_api",
+    "authority_level": 10,
+    "update_frequency": "daily",
+    "category": "diet",
+    "language": "ja",
+    "enabled": true,
+    "cost": 0
+  },
+  {
+    "name": "EDINET API",
+    "url": "https://api.edinet-fsa.go.jp/api/v2/documents.json",
+    "source_type": "financial_disclosure_api_requires_key",
+    "authority_level": 10,
+    "update_frequency": "daily",
+    "category": "corporate_governance",
+    "language": "ja",
+    "enabled": false,
+    "cost": 0
+  },
+  {
+    "name": "日本銀行ニュース",
+    "url": "https://www.boj.or.jp/about/abouthp.htm",
+    "source_type": "central_bank_official_rss_directory",
+    "authority_level": 10,
+    "update_frequency": "daily",
+    "category": "economy",
+    "language": "ja",
+    "enabled": false,
+    "cost": 0
+  }
+]
