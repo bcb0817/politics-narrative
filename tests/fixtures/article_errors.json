@@ -1,0 +1,11 @@
+{
+  "notice": "明示的な架空資料。実在の制度・人物・団体の主張ではありません。",
+  "cases": [
+    {"name":"法案提出と施行", "source":"架空政府は架空支援法案を提出した。", "claim":"架空支援法は施行された。", "expected":"policy_stage"},
+    {"name":"複数年と年間", "source":"架空補助金は3年間の総額300億円である。", "claim":"架空補助金は年間300億円である。", "expected":"budget_period"},
+    {"name":"発言文脈", "source":"架空議員は、財源が確保された場合に支援を支持すると発言した。", "claim":"架空議員は支援を支持した。", "expected":"missing_context"},
+    {"name":"起訴と有罪", "source":"架空氏は起訴され、公判前である。", "claim":"架空氏は有罪が確定した。", "expected":"judicial_stage"},
+    {"name":"古い肩書", "source":"架空氏は2020年に退任した元大臣である。", "claim":"架空氏は現在の大臣である。", "expected":"title_at_event"},
+    {"name":"Xと国民の総意", "source":"架空のX投稿者10人が賛成した。", "claim":"国民の総意は賛成である。", "expected":"fabricated_public_opinion"}
+  ]
+}
