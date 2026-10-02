@@ -4,6 +4,10 @@
 旧Botのdaemonは復旧していません。既存の公開設定・投稿頻度・月次予算は変更しません。
 Python 3.11以降、標準ライブラリのみで実行できます。
 
+例外として、明示的な依頼による通常のX投稿1件だけを確認する
+`src.manual_x_smoke`があります。記事公開・任意本文・定期投稿には対応しません。
+2026-10-02のテストは成功済みで、再実行しても追加送信しません。
+
 ```powershell
 Set-Location 'D:\SNS Bot\politics-narrative'
 python -X utf8 local_bot.py article --theme '解説したい政策' --url 'https://一次資料のURL'

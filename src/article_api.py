@@ -78,6 +78,8 @@ class Ledger:
     def legacy_spend(self,c,month):
         names={r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         total=xai=0.0
+        if 'x_manual_smoke' in names:
+            total+=c.execute('SELECT COALESCE(SUM(reserved_usd),0) FROM x_manual_smoke WHERE month=?',(month,)).fetchone()[0]
         if 'api_usage_events' in names:
             for provider,amount in c.execute("SELECT provider,COALESCE(SUM(estimated_cost_usd),0) FROM api_usage_events WHERE timestamp LIKE ? AND (provider<>'xai' OR error_type='reserved') GROUP BY provider",(month+'%',)):
                 total+=amount

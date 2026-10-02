@@ -172,3 +172,39 @@ HTTP時間上限を120秒から360秒へ調整後の経路はモック検証の�
 現在の回帰テストは29件（政治的な取り違え6例のsubtestを含む）です。
 構文確認、dry-run、既存SQLite候補の読み取り専用性、実API失敗実行の再開時に
 台帳の呼び出し件数が2件のまま増えないことも確認しています。
+
+## 1回限りの通常X投稿テスト（2026-10-02）
+
+ユーザーの実投稿テスト依頼に限り、`src.manual_x_smoke`を追加しました。
+記事生成・通常Botからの呼び出しはなく、停止中の14タスクは変更していません。
+X Articlesの公開確認ではありません。
+
+```powershell
+# 初期状態はdry-run。APIや.envへアクセスしない
+python -X utf8 -m src.manual_x_smoke --expected-user goudakazundo931
+
+# 明示的に依頼された1回だけ。既に完了済みなので現在は保存結果の表示のみ
+python -X utf8 -m src.manual_x_smoke --send --expected-user goudakazundo931
+```
+
+本文は「動作確認のテスト投稿です。」に固定。`.env`のAPI_KEY、API_KEY_SECRET、
+ACCESS_TOKEN、ACCESS_TOKEN_SECRETでOAuth 1.0a認証します。xAIキーではありません。
+ライブ経路だけ、既にインストール済みのrequests/requests_oauthlibを使います。
+GET /2/users/meでユーザー名を一致確認してからPOST /2/tweetsを1回だけ実行。
+POST_ENABLEDとX_POST_ENABLEDがtrueでない場合は停止し、設定を変更・迂回しません。
+
+送信前の状態と費用予約をSQLiteのx_manual_smokeに永続化し、記事生成と同じ実行ロックを使用。
+成功、失敗、応答不明、途中停止のいずれも同じスロットを自動再送しません。
+旧自動投稿のDBが復元されている場合は、旧上限の検証不足を避けるため停止します。
+キー・応答中の認証情報・エラー本文は保存しません。
+記録は`outputs/manual_x_smoke/result.json`（Git対象外）。予約は記事側の総予算計算にも含めます。
+
+公式の[料金表](https://docs.x.com/x-api/getting-started/pricing)を2026-10-02に確認。
+User Read $0.010 + URLなし投稿 $0.015 = $0.025を保守的に予約し、実費はnull。
+外部アプリの利用や削除済みの台帳までは把握できず、アカウント全体の請求上限保証ではありません。
+購入、契約変更、予算増額は行いません。
+
+実投稿は2026-10-02 11:43 JSTにHTTP 201で成功し、投稿IDを確認しました。
+同一コマンド再実行も保存結果の再生だけで、API要求・投稿は追加されませんでした。
+追加7テストを含む合計36件が成功。元の記事生成APIの応答不明問題は別件であり、
+今回の投稿成功は生成記事の完成や自動記事公開の成功を意味しません。
