@@ -5,7 +5,7 @@ import socket
 from urllib.parse import urlsplit, urljoin
 
 
-def read_html(url, *, timeout=8, max_bytes=1000000, resolver=socket.getaddrinfo):
+def read_html(url, *, timeout=8, max_bytes=1000000, resolver=socket.getaddrinfo, xml=False):
     for _ in range(4):
         parsed = urlsplit(url)
         if parsed.scheme not in {'http', 'https'} or not parsed.hostname or parsed.username or parsed.password:
@@ -31,7 +31,8 @@ def read_html(url, *, timeout=8, max_bytes=1000000, resolver=socket.getaddrinfo)
                     raise ValueError('article_redirect_missing')
                 url = urljoin(url, target)
                 continue
-            if response.status != 200 or 'html' not in (response.getheader('Content-Type') or '').lower():
+            content_type = (response.getheader('Content-Type') or '').lower()
+            if response.status != 200 or not (('xml' in content_type or 'rss' in content_type) if xml else 'html' in content_type):
                 raise ValueError('article_response_not_html')
             if response.getheader('Content-Encoding', 'identity') != 'identity':
                 raise ValueError('article_encoding_not_allowed')

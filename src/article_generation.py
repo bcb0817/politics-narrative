@@ -134,9 +134,20 @@ def main(argv=None):
     p.add_argument('--research',choices=['provided','web'],default='provided')
     p.add_argument('--budget',type=float,default=None); p.add_argument('--min-chars',type=int,default=2500); p.add_argument('--max-chars',type=int,default=4000)
     p.add_argument('--candidates',type=Path); p.add_argument('--output',type=Path); p.add_argument('--resume',type=Path)
+    p.add_argument('--rss',action='store_true',help='Collect RSS candidates before drafting; never publishes')
+    p.add_argument('--feed',action='append',help='Override RSS feed URLs with --rss')
     p.add_argument('--dry-run',action='store_true'); p.add_argument('--env-file',type=Path,default=ROOT/'.env')
     p.add_argument('--config',type=Path,default=ROOT/'config/article_generation.json')
     args=p.parse_args(argv); cfg=load(args.config)
+    if args.feed and not args.rss: p.error('--feed requires --rss')
+    if args.rss and (args.candidates or args.resume): p.error('--rss cannot combine with candidates/resume')
+    if args.rss:
+        from .rss_candidates import collect
+        rss_cfg=load(ROOT/'config/rss_sources.json')
+        args.candidates=ROOT/'data/rss_candidates.json'
+        if not args.dry_run:
+            collect(args.feed or rss_cfg['feeds'],args.candidates,hours=rss_cfg['max_age_hours'])
+        elif not args.candidates.exists(): p.error('dry-run needs previously collected candidates; run local_bot.py rss first')
     if args.resume and args.config==ROOT/'config/article_generation.json':
         cfg=load(args.resume/'run.json')['config']
     if cfg['auto_publish'] or cfg['x_search_enabled'] or cfg['endpoint']!='https://api.x.ai/v1/responses': p.error('unsupported publishing/search/endpoint setting')

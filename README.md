@@ -1,6 +1,6 @@
 # politics-narrative — 政治解説の記事下書き
 
-現在の入口は **手動実行のxAI記事生成だけ**です。X/Threadsへの公開機能、定期収集、
+現在の入口は **手動実行のRSS候補収集とxAI記事生成**です。X/Threadsへの通常公開機能、定期収集、
 旧Botのdaemonは復旧していません。既存の公開設定・投稿頻度・月次予算は変更しません。
 Python 3.11以降、標準ライブラリのみで実行できます。
 
@@ -20,6 +20,17 @@ python -X utf8 local_bot.py article --theme '解説したい政策' --url 'https
 - 詳細な実行・復旧・料金・制限：[記事運用手順](docs/ARTICLE_OPERATIONS.md)
 - 編集方針：[記事編集規約](config/article_editorial.md)
 - モデル・料金・上限：[設定](config/article_generation.json)
+
+RSSから取得して生成する場合（公開はしません）：
+
+```powershell
+python -X utf8 local_bot.py rss
+python -X utf8 local_bot.py article --rss --research web
+```
+
+既定RSSはNHK政治。`--feed URL`で変更できます。`rss`のみなら生成API料金は発生しません。
+`article --rss`は既存の候補選定・記事・紹介投稿案生成につながり、1実行1候補までです。
+一次資料を自分で指定する場合は`--research web`の代わりに`--url 一次資料URL`を追加します。
 
 ```powershell
 python -m unittest discover -s tests -v
