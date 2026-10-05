@@ -1,6 +1,8 @@
 {
   "enabled": true,
-  "version": "short-conservative-v2",
+  "version": "short-one-angle-v3",
+  "recent_post_count": 40,
+  "max_editorial_revisions": 1,
   "expected_username": "goudakazundo931",
   "expected_user_id": "1968295359593205760",
   "daily_target": 10,

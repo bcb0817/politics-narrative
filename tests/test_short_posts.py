@@ -21,6 +21,10 @@ BODY='NHKによると、'+FACT+'【論評】'+OPINION
 SOURCE={'id':1,'text':'架空の委員会は制度見直しを提案した。対象や実施時期は未定。現行制度は変わらない。','error':None}
 DRAFT={'text':BODY,'claims':[{'text':FACT,'kind':'fact','criterion':'','segment_ids':[1]},{'text':OPINION,'kind':'opinion','criterion':'国民負担の軽減','segment_ids':[1]}]}
 REVIEW={'approved':True,'coverage_complete':True,'attribution_ok':True,'conditions_preserved':True,'opinion_separated':True,'no_group_attack':True,'checks':[{'claim_index':i,'supported':True,'segment_ids':[1]} for i in range(2)],'issues':[]}
+DRAFT.update(decision='publish',skip_reason='',mode='comment',angle='対象が未定の制度見直し',form='短い指摘',
+             facts=[{'text':FACT,'segment_ids':[1]}],context={'entities':['架空の委員会'],'dates':[],'quantities':[],'stage':'提案','unknowns':['対象と時期']})
+REVIEW.update(quality={k:{'pass_check':True,'reason':'架空資料と整合'} for k in ('accuracy','specificity','readability','editorial_value','repetition')},
+              comparison={'same_news':False,'same_angle':False,'repeated_style':False,'new_fact':False,'new_fact_text':'','segment_ids':[],'compared_ids':[],'reason':'履歴なし'})
 
 class ShortTests(unittest.TestCase):
     def setUp(self):
@@ -43,9 +47,9 @@ class ShortTests(unittest.TestCase):
         self.assertIn('evidence_missing',validate_post(bad,REVIEW,SOURCE))
         rev=copy.deepcopy(REVIEW); rev['checks']=[]
         self.assertIn('review_coverage',validate_post(DRAFT,rev,SOURCE))
-    def test_opinion_requires_label_and_criterion(self):
+    def test_opinion_requires_criterion_not_fixed_label(self):
         bad=copy.deepcopy(DRAFT); bad['text']=BODY.replace('【論評】','')
-        self.assertIn('missing_opinion_label',validate_post(bad,REVIEW,SOURCE))
+        self.assertEqual(validate_post(bad,REVIEW,SOURCE),[])
         bad=copy.deepcopy(DRAFT); bad['claims'][1]['criterion']=''
         self.assertIn('missing_evaluation_criterion',validate_post(bad,REVIEW,SOURCE))
     def test_unsupported_opinion_and_group_attack_blocked(self):
@@ -54,9 +58,10 @@ class ShortTests(unittest.TestCase):
             self.assertIn('review_rejected',validate_post(DRAFT,rev,SOURCE))
         rev=copy.deepcopy(REVIEW); rev['checks'][1]['supported']=False
         self.assertIn('review_evidence_missing',validate_post(DRAFT,rev,SOURCE))
-    def test_summary_only_no_longer_accepted(self):
-        bad=copy.deepcopy(DRAFT); bad['claims'][1]['kind']='fact'
-        self.assertIn('no_evaluation',validate_post(bad,REVIEW,SOURCE))
+    def test_concise_fact_brief_allowed(self):
+        brief=copy.deepcopy(DRAFT); brief.update(text=FACT+'（NHK報道）',mode='news_brief',claims=[DRAFT['claims'][0]])
+        rev=copy.deepcopy(REVIEW); rev['checks']=rev['checks'][:1]
+        self.assertEqual(validate_post(brief,rev,SOURCE),[])
     def test_long_verbatim_copy_blocked(self):
         source=dict(SOURCE,text=BODY)
         self.assertIn('source_copy_too_long',validate_post(DRAFT,REVIEW,source))
