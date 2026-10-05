@@ -19,8 +19,9 @@ from .rss_candidates import collect, date
 from .manual_x_smoke import request as x_request, environment as x_environment
 
 JST=timezone(timedelta(hours=9))
-DRAFT=obj(text=S, claims=arr(obj(text=S, segment_ids=arr(I))))
+DRAFT=obj(text=S, claims=arr(obj(text=S, kind=S, criterion=S, segment_ids=arr(I))))
 REVIEW=obj(approved=B, coverage_complete=B, attribution_ok=B, conditions_preserved=B,
+           opinion_separated=B, no_group_attack=B,
            checks=arr(obj(claim_index=I, supported=B, segment_ids=arr(I))), issues=arr(S))
 
 def timestamp(): return datetime.now(timezone.utc)
@@ -40,12 +41,17 @@ def validate_post(draft, review, source):
     if re.search(r'https?://|www\.|[A-Za-z0-9-]+\.[A-Za-z]{2,}|[@#＃＠]|📌|売国|完全論破|ネット騒然',text): errors.append('style_or_url')
     if re.search(r'本文.{0,12}(切れ|途中)|取得.{0,6}(失敗|でき)|見出しだけ|資料不足',text): errors.append('internal_process_in_post')
     if not draft['claims']: errors.append('no_claims')
-    if not all(review[k] for k in ('approved','coverage_complete','attribution_ok','conditions_preserved')) or review['issues']:
+    if not all(review[k] for k in ('approved','coverage_complete','attribution_ok','conditions_preserved','opinion_separated','no_group_attack')) or review['issues']:
         errors.append('review_rejected')
+    if not any(c['kind']=='fact' for c in draft['claims']): errors.append('no_facts')
+    if not any(c['kind']=='opinion' for c in draft['claims']): errors.append('no_evaluation')
+    if '【論評】' not in text: errors.append('missing_opinion_label')
     checks={c['claim_index']:c for c in review['checks']}
     if len(checks)!=len(review['checks']) or set(checks)!=set(range(len(draft['claims']))): errors.append('review_coverage')
     for i,claim in enumerate(draft['claims']):
         ids=claim['segment_ids']; check=checks.get(i,{})
+        if claim['kind'] not in ('fact','opinion'): errors.append('invalid_claim_kind')
+        if claim['kind']=='opinion' and not claim['criterion'].strip(): errors.append('missing_evaluation_criterion')
         if not claim['text'].strip() or claim['text'] not in text: errors.append('claim_not_in_text')
         if not ids or any(str(n) not in parts for n in ids): errors.append('evidence_missing')
         if not check.get('supported') or not check.get('segment_ids') or any(str(n) not in parts for n in check.get('segment_ids',[])):
@@ -182,6 +188,7 @@ def generate(store,client,cfg,item,at,folder,source_fetch=fetch):
     previous=next((r for r in store.items() if r['url']==item['url']),None)
     revision=previous is not None
     if revision:
+        if previous['config_hash']!=digest(cfg): return 'previous_editorial_version'
         if previous['status']!='needs_research' or not previous['reason'] or not set(previous['reason'].split(',')) <= {'claim_not_in_text','source_copy_too_long','length','internal_process_in_post'}:
             return 'not_repairable'
         identity=previous['id']
@@ -198,14 +205,14 @@ def generate(store,client,cfg,item,at,folder,source_fetch=fetch):
         if revision: packet.update(previous_draft=load(folder/'draft.json'),repair_errors=previous['reason'],task='問題箇所を修正。同じ根拠だけを使う。claims.textは出力textの完全一致の部分文字列。資料文そのものではない。')
         draft=client.call(run,'short_revision' if revision else 'short_draft',json.dumps(packet,ensure_ascii=False),DRAFT,cfg['generation_budget_usd'],policy)
         save(folder/'draft.json',draft)
-        review=client.call(run,'short_revision_review' if revision else 'short_review',json.dumps(dict(article=draft,source=packet,task='独立検証。全主要主張が列挙され、提示原文の段落番号で裏付けられる場合だけ承認。報道の帰属、政治・司法の段階、条件、数字、引用の文脈、誇張、全文の網羅を検証。反論未確認を自認扱いしない。claim_indexは0始まり。問題はissuesへ。'),ensure_ascii=False),REVIEW,cfg['generation_budget_usd'],policy)
+        review=client.call(run,'short_revision_review' if revision else 'short_review',json.dumps(dict(article=draft,source=packet,task='独立検証。factは提示資料に裏付けられる事実、opinionは明示された判断基準と根拠事実に基づく評価として検証。supportedは意見への賛同ではなく根拠との整合。思想への不同意だけで拒否しない。意見に紛れた因果・犯罪・費用の断定も事実として検証。全主要主張・段階・条件・数字・引用文脈を網羅し各segment_idsを確認。NHK報道とBot独自の【論評】の帰属が分離されていればopinion_separated=true。移民政策への批判は許容し、国籍・民族・出自集団への攻撃や犯罪一般化はno_group_attack=false。反論未確認を自認扱いしない。claim_indexは0始まり。問題はissuesへ。'),ensure_ascii=False),REVIEW,cfg['generation_budget_usd'],policy)
         save(folder/'review.json',review)
         errors=validate_post(draft,review,source)
         previous=[r for r in store.items() if r['status'] in ('ready','published','sending','ambiguous') and r['body']]
         if any(SequenceMatcher(None,draft['text'],r['body']).ratio()>.8 for r in previous): errors.append('similar_text')
         if errors:
             store.update(identity,status='needs_research',reason=','.join(errors)); return 'needs_research'
-        save(folder/'evidence.json',[{'claim':c['text'],'quotes':[segments(source)[str(n)] for n in c['segment_ids']]} for c in draft['claims']])
+        save(folder/'evidence.json',[{'claim':c['text'],'kind':c['kind'],'criterion':c['criterion'],'quotes':[segments(source)[str(n)] for n in c['segment_ids']]} for c in draft['claims']])
         store.update(identity,status='ready',body=draft['text'],reason=None); return 'ready'
     except (BudgetExceeded,AmbiguousCall,AuthenticationError) as exc:
         store.update(identity,status='generation_failed',reason=type(exc).__name__)
@@ -252,7 +259,7 @@ def run_cycle(root=ROOT,send=x_request,clock=timestamp,collect_fn=collect,source
                         rss_cfg=load(root/'config/rss_sources.json')
                         news=collect_fn(rss_cfg['feeds'],root/'data/rss_candidates.json',at=at,hours=rss_cfg['max_age_hours'])
                         previous=store.items()
-                        repairs=[r for r in previous if r['status']=='needs_research' and r['reason'] and set(r['reason'].split(','))<={'claim_not_in_text','source_copy_too_long','length','internal_process_in_post'} and not any(c['stage']=='short_revision' for c in ledger.rows('short_'+r['id']))]
+                        repairs=[r for r in previous if r['config_hash']==digest(cfg) and r['status']=='needs_research' and r['reason'] and set(r['reason'].split(','))<={'claim_not_in_text','source_copy_too_long','length','internal_process_in_post'} and not any(c['stage']=='short_revision' for c in ledger.rows('short_'+r['id']))]
                         candidates=rank(news['candidates'],[{'urls':[r['url']],'theme':r['title']} for r in previous if r not in repairs],at)
                         outcome='no_eligible_candidates'
                         for candidate in [c for c in candidates if c['eligible'] and '動静' not in c['title'] and c['url'].startswith('https://news.web.nhk/')][:cfg['max_candidates_per_run']]:

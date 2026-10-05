@@ -15,10 +15,12 @@ CFG=load(ROOT/'config/short_posts.json'); CFG['enabled']=True
 MODEL=load(ROOT/'config/article_generation.json')
 ENV={k:'TEST' for k in ('API_KEY','API_KEY_SECRET','ACCESS_TOKEN','ACCESS_TOKEN_SECRET')}
 ENV.update(POST_ENABLED='true',X_POST_ENABLED='true',X_MONTHLY_BUDGET_USD='16',X_BUDGET_RESERVE_USD='.75',TOTAL_MONTHLY_API_BUDGET_USD='61',TOTAL_BUDGET_RESERVE_USD='3.25',X_POST_CREATE_MAX_PER_DAY='20',X_POST_CREATE_MAX_PER_MONTH='600',X_OWNED_READ_MAX_PER_DAY='36',X_OWNED_READ_MAX_PER_MONTH='1080')
-BODY='NHKによると、架空の委員会が制度見直しを提案しました。対象や実施時期は未定で、現行制度が変わったわけではありません。'
+FACT='架空の委員会が制度見直しを提案。対象や時期は未定。'
+OPINION='負担軽減を基準に、対象と費用の説明を求めたい。'
+BODY='NHKによると、'+FACT+'【論評】'+OPINION
 SOURCE={'id':1,'text':'架空の委員会は制度見直しを提案した。対象や実施時期は未定。現行制度は変わらない。','error':None}
-DRAFT={'text':BODY,'claims':[{'text':BODY[len('NHKによると、'):],'segment_ids':[1]}]}
-REVIEW={'approved':True,'coverage_complete':True,'attribution_ok':True,'conditions_preserved':True,'checks':[{'claim_index':0,'supported':True,'segment_ids':[1]}],'issues':[]}
+DRAFT={'text':BODY,'claims':[{'text':FACT,'kind':'fact','criterion':'','segment_ids':[1]},{'text':OPINION,'kind':'opinion','criterion':'国民負担の軽減','segment_ids':[1]}]}
+REVIEW={'approved':True,'coverage_complete':True,'attribution_ok':True,'conditions_preserved':True,'opinion_separated':True,'no_group_attack':True,'checks':[{'claim_index':i,'supported':True,'segment_ids':[1]} for i in range(2)],'issues':[]}
 
 class ShortTests(unittest.TestCase):
     def setUp(self):
@@ -41,6 +43,20 @@ class ShortTests(unittest.TestCase):
         self.assertIn('evidence_missing',validate_post(bad,REVIEW,SOURCE))
         rev=copy.deepcopy(REVIEW); rev['checks']=[]
         self.assertIn('review_coverage',validate_post(DRAFT,rev,SOURCE))
+    def test_opinion_requires_label_and_criterion(self):
+        bad=copy.deepcopy(DRAFT); bad['text']=BODY.replace('【論評】','')
+        self.assertIn('missing_opinion_label',validate_post(bad,REVIEW,SOURCE))
+        bad=copy.deepcopy(DRAFT); bad['claims'][1]['criterion']=''
+        self.assertIn('missing_evaluation_criterion',validate_post(bad,REVIEW,SOURCE))
+    def test_unsupported_opinion_and_group_attack_blocked(self):
+        for flag in ('opinion_separated','no_group_attack'):
+            rev=copy.deepcopy(REVIEW); rev[flag]=False
+            self.assertIn('review_rejected',validate_post(DRAFT,rev,SOURCE))
+        rev=copy.deepcopy(REVIEW); rev['checks'][1]['supported']=False
+        self.assertIn('review_evidence_missing',validate_post(DRAFT,rev,SOURCE))
+    def test_summary_only_no_longer_accepted(self):
+        bad=copy.deepcopy(DRAFT); bad['claims'][1]['kind']='fact'
+        self.assertIn('no_evaluation',validate_post(bad,REVIEW,SOURCE))
     def test_long_verbatim_copy_blocked(self):
         source=dict(SOURCE,text=BODY)
         self.assertIn('source_copy_too_long',validate_post(DRAFT,REVIEW,source))
