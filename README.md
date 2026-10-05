@@ -1,8 +1,17 @@
 # politics-narrative — 政治解説の記事下書き
 
-現在の入口は **手動実行のRSS候補収集とxAI記事生成**です。X/Threadsへの通常公開機能、定期収集、
-旧Botのdaemonは復旧していません。既存の公開設定・投稿頻度・月次予算は変更しません。
-Python 3.11以降、標準ライブラリのみで実行できます。
+2026-10-05の依頼により、**通常の短文Xニュース投稿は1日10件を目標に自動運用**します。
+RSS→xAI生成→独立検証→X公開を`local_bot.py short run`で接続。
+長文記事は手動レビュー用のまま、Threadsと旧補助タスクは停止を維持します。
+月次予算は増額しません。API障害・品質不足・PC停止時の10件保証はできません。
+Python 3.11以降。記事生成は標準ライブラリ、X公開はrequests/requests_oauthlibを使用。
+
+```powershell
+python -X utf8 local_bot.py short status
+python -X utf8 local_bot.py short dry-run
+```
+
+短文の運用・停止方法：[短文自動投稿](docs/SHORT_POSTS.md)。
 
 例外として、明示的な依頼による通常のX投稿1件だけを確認する
 `src.manual_x_smoke`があります。記事公開・任意本文・定期投稿には対応しません。
