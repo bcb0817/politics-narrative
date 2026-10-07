@@ -13,6 +13,10 @@ python -X utf8 local_bot.py short dry-run
 
 短文の運用・停止方法：[短文自動投稿](docs/SHORT_POSTS.md)。
 
+話題探索の独立モジュール：[social_radar](docs/SOCIAL_RADAR.md)。
+`python -X utf8 local_bot.py radar dry-run` で無課金確認できます。
+専用予算・定期実行・外部通知・自動公開は初期状態で無効。政治候補は既存の記事下書きへ接続します。
+
 例外として、明示的な依頼による通常のX投稿1件だけを確認する
 `src.manual_x_smoke`があります。記事公開・任意本文・定期投稿には対応しません。
 2026-10-02のテストは成功済みで、再実行しても追加送信しません。

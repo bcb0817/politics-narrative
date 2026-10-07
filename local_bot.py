@@ -3,6 +3,9 @@ import sys
 from src.article_generation import main
 
 if __name__ == '__main__':
+    if len(sys.argv)>1 and sys.argv[1]=='radar':
+        from src.social_radar import main as radar_main
+        sys.exit(radar_main(sys.argv[2:]))
     if len(sys.argv)>1 and sys.argv[1]=='short':
         from src.short_posts import main as short_main
         sys.exit(short_main(sys.argv[2:]))
