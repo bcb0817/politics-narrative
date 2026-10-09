@@ -1,0 +1,4 @@
+{
+  "feeds": ["https://news.web.nhk/n-data/conf/na/rss/cat4.xml"],
+  "max_age_hours": 48
+}

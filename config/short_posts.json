@@ -1,0 +1,21 @@
+{
+  "enabled": true,
+  "version": "short-one-angle-v3",
+  "recent_post_count": 40,
+  "max_editorial_revisions": 1,
+  "expected_username": "goudakazundo931",
+  "expected_user_id": "1968295359593205760",
+  "daily_target": 10,
+  "slots_jst": ["08:00", "09:30", "11:00", "12:30", "14:00", "15:30", "17:00", "18:30", "20:00", "21:30"],
+  "end_hour_jst": 23,
+  "min_interval_minutes": 60,
+  "max_candidates_per_run": 2,
+  "max_generation_attempts_per_day": 20,
+  "generation_budget_usd": 0.25,
+  "max_output_tokens": 1800,
+  "source_max_chars": 7000,
+  "x_post_cost_usd": 0.015,
+  "x_user_read_cost_usd": 0.01,
+  "pricing_verified_on": "2026-10-05",
+  "pricing_source": "https://docs.x.com/x-api/getting-started/pricing"
+}
