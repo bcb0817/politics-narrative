@@ -94,7 +94,7 @@ def validate_config(cfg):
         raise ValueError('unsupported_publication_notification_score_or_raw_retention')
     for key,lo,hi in [('max_candidates',1,5),('max_deep_dives',0,2),('max_followups',0,2),
                       ('followup_minutes',30,60),('discoveries_per_day',1,6),('max_tool_calls',1,2),
-                      ('max_calls',1,20),('max_retries',0,0),('tracking_hours',1,72),
+                      ('max_calls',1,20),('max_turns',1,2),('max_retries',0,0),('tracking_hours',1,72),
                       ('lookback_hours',1,72),('model_observation_retention_days',1,30)]:
         if type(cfg.get(key)) is not int or not lo<=cfg[key]<=hi: raise ValueError('invalid_'+key)
     if not cfg['categories'] or cfg['budget_timezone']!='Asia/Tokyo': raise ValueError('invalid_schedule')

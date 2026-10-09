@@ -115,6 +115,21 @@ class RadarTests(unittest.TestCase):
         self.assertEqual(len(sent),1); self.assertEqual(sent[0]['tools'][0]['type'],'x_search')
         self.assertIsNone(a['executed_conditions'])
         self.assertAlmostEqual(a['usage']['estimated_search_cost_usd'],.02)
+        self.assertEqual(sent[0]['max_turns'],2)
+    def test_exclusive_utc_window_includes_current_day(self):
+        sent=[]
+        def send(payload,key,**kw): sent.append(payload); return raw()
+        end=AT+timedelta(hours=3)
+        self.client(send).search('window','s','q',end-timedelta(hours=24),end,'discovery')
+        self.assertEqual(sent[0]['tools'][0]['from_date'],'2026-10-06')
+        self.assertEqual(sent[0]['tools'][0]['to_date'],'2026-10-08')
+    def test_approved_limits_and_schedule_stays_disabled(self):
+        self.assertEqual((CFG['run_budget_usd'],CFG['daily_budget_usd'],CFG['monthly_budget_usd']),(1,3,60))
+        self.assertFalse(CFG['paid_schedule_enabled'])
+        self.assertFalse(CFG['auto_publish'])
+    def test_monthly_budget_blocks_before_send(self):
+        self.cfg['monthly_budget_usd']=.1
+        with self.assertRaises(BudgetExceeded): self.client(lambda *a,**k:self.fail('network')).search('r','s','q',AT,AT,'discovery')
     def test_duplicate_same_person_separate_event(self):
         r=result(); a,new=self.store.ingest(topic(),r,'j',AT,self.cfg)
         b,new=self.store.ingest(topic(),r,'j2',AT,self.cfg)

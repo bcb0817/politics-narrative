@@ -98,10 +98,13 @@ class SearchClient:
             raise AmbiguousCall('search_already_attempted; inspect_cost_and_response')
         if not self.key: raise AuthenticationError('XAI_API_KEY_missing')
         cfg=self.cfg
-        tool={'type':'x_search','from_date':start.date().isoformat(),'to_date':end.date().isoformat(),
+        # X Search uses an exclusive UTC calendar-day upper bound, not timestamps.
+        start=start.astimezone(timezone.utc); end=end.astimezone(timezone.utc)
+        upper=end.date() if end.hour==end.minute==end.second==end.microsecond==0 else end.date()+timedelta(days=1)
+        tool={'type':'x_search','from_date':start.date().isoformat(),'to_date':upper.isoformat(),
               'enable_image_understanding':False,'enable_video_understanding':False}
         payload=dict(model=cfg['model'],store=False,max_output_tokens=cfg['max_output_tokens'],
-                     max_tool_calls=cfg['max_tool_calls'],tools=[tool],
+                     max_tool_calls=cfg['max_tool_calls'],max_turns=cfg['max_turns'],tools=[tool],
                      input=[{'role':'system','content':SYSTEM},{'role':'user','content':json.dumps({'purpose':purpose,'query':query},ensure_ascii=False)}],
                      text={'format':{'type':'json_schema','name':'social_radar','strict':True,'schema':SEARCH}})
         size=len(json.dumps(payload,ensure_ascii=False).encode())
@@ -119,7 +122,7 @@ class SearchClient:
         post_count,profile_count=counts.get('x_posts_fetched'),counts.get('x_users_fetched')
         usage['estimated_search_cost_usd']=(post_count*cfg['pricing']['x_search_per_post']+profile_count*cfg['pricing']['x_search_per_profile']) if type(post_count) is int and type(profile_count) is int else None
         # Never store hidden reasoning or raw social text. Model summaries are labeled.
-        result={'purpose':purpose,'requested':{'query':query,'tool':tool,'max_tool_calls':cfg['max_tool_calls']},
+        result={'purpose':purpose,'requested':{'query':query,'tool':tool,'max_tool_calls':cfg['max_tool_calls'],'max_turns':cfg['max_turns'],'exact_window_start':start.isoformat(),'exact_window_end':end.isoformat()},
                 'executed_conditions':None,'citations':citations(raw),'topics':[],
                 'limitations':['server_tool_results_not_returned; no_raw_reaction_measurements'],
                 'usage':usage,'provider_response_id':raw.get('id'),'provenance':'model_synthesis_with_api_citations'}
